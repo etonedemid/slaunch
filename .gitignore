@@ -1,0 +1,12 @@
+SdOut/
+build/
+projects/sSystem/build/
+projects/sMenu/build/
+projects/sInstaller/build/
+*.map
+*.lst
+*.nsp
+*.nso
+*.nro
+*.nacp
+slaunch.zip

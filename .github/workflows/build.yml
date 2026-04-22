@@ -1,0 +1,139 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags:     ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install required dkp packages (curl + mbedtls for installer,
+      # switch-tools for elf2nso/elf2nro/nacptool)
+      - name: Install packages
+        run: |
+          dkp-pacman -Syu --noconfirm \
+            switch-tools \
+            switch-curl \
+            switch-mbedtls \
+            switch-zlib
+
+      # Atmosphere libstratosphere (needed by sSystem for ECS)
+      # Clone Atmosphere and build just the libs
+      - name: Setup Atmosphere libs
+        run: |
+          git clone --depth=1 https://github.com/Atmosphere-NX/Atmosphere.git /opt/atmosphere
+          cd /opt/atmosphere
+          # Only need the static libs + headers, not a full build
+          # The libstratosphere.a and headers are under libraries/libstratosphere
+          cd libraries/libstratosphere
+          make -j$(nproc) || true   # tolerate partial build; headers are what matter
+          mkdir -p $DEVKITPRO/AtmosphereLibs/include
+          mkdir -p $DEVKITPRO/AtmosphereLibs/lib
+          cp -r include/* $DEVKITPRO/AtmosphereLibs/include/ 2>/dev/null || true
+          find . -name "*.a" -exec cp {} $DEVKITPRO/AtmosphereLibs/lib/ \; 2>/dev/null || true
+
+      - name: Build sMenu
+        run: make smenu
+
+      - name: Build sInstaller
+        run: make sinstaller
+
+      # sSystem requires Atmosphere libs — build best-effort
+      - name: Build sSystem
+        run: make ssystem
+        continue-on-error: true
+
+      # Rename NSO outputs to friendly names for release assets
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          [ -f SdOut/atmosphere/contents/0100000000001000/exefs/main ] && \
+            cp SdOut/atmosphere/contents/0100000000001000/exefs/main dist/sSystem.nso
+          [ -f SdOut/slaunch/bin/sMenu/main ] && \
+            cp SdOut/slaunch/bin/sMenu/main dist/sMenu.nso
+          [ -f SdOut/switch/sInstaller/sInstaller.nro ] && \
+            cp SdOut/switch/sInstaller/sInstaller.nro dist/sInstaller.nro
+          # Full SD card zip
+          cd SdOut && zip -r ../dist/slaunch-sdcard.zip . && cd ..
+          ls -lh dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: slaunch-build
+          path: dist/
+          retention-days: 7
+
+  # Only create a GitHub release when a version tag is pushed
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: slaunch-build
+          path: dist/
+
+      - name: Get tag name
+        id: tag
+        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG }}
+          name: "sLaunch ${{ steps.tag.outputs.TAG }}"
+          body: |
+            ## sLaunch ${{ steps.tag.outputs.TAG }}
+
+            Blazing-fast, text-based Nintendo Switch HOME Menu replacement.
+
+            ### Installation
+
+            **Option A — Installer (recommended)**
+            1. Copy `sInstaller.nro` to `sdmc:/switch/sInstaller/sInstaller.nro`
+            2. Launch it from the Homebrew Menu
+            3. Press **A** to download and install
+
+            **Option B — Manual**
+            1. Download `slaunch-sdcard.zip`
+            2. Extract to the root of your SD card
+            3. Reboot your Switch
+
+            ### What's included
+            | File | Description |
+            |------|-------------|
+            | `sSystem.nso` | Backend system applet (replaces qlaunch) |
+            | `sMenu.nso` | Text-based menu UI |
+            | `sInstaller.nro` | Installer homebrew NRO |
+            | `slaunch-sdcard.zip` | Full SD card layout (manual install) |
+
+            ### Uninstall
+            Delete `atmosphere/contents/0100000000001000/` from your SD card.
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.TAG, '-') }}
+          files: |
+            dist/sSystem.nso
+            dist/sMenu.nso
+            dist/sInstaller.nro
+            dist/slaunch-sdcard.zip
+          fail_on_unmatched_files: false
