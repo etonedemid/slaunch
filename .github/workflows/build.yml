@@ -21,7 +21,7 @@ jobs:
       # switch-tools for elf2nso/elf2nro/nacptool)
       - name: Install packages
         run: |
-          dkp-pacman -Syu --noconfirm \
+          dkp-pacman -S --noconfirm --needed \
             switch-tools \
             switch-curl \
             switch-mbedtls \
