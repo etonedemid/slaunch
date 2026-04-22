@@ -28,19 +28,16 @@ jobs:
             switch-zlib
 
       # Atmosphere libstratosphere (needed by sSystem for ECS)
-      # Clone Atmosphere and build just the libs
+      # Clone a pinned Atmosphere release tag and build just libstratosphere.
       - name: Setup Atmosphere libs
         run: |
-          git clone --depth=1 https://github.com/Atmosphere-NX/Atmosphere.git /opt/atmosphere
-          cd /opt/atmosphere
-          # Only need the static libs + headers, not a full build
-          # The libstratosphere.a and headers are under libraries/libstratosphere
-          cd libraries/libstratosphere
-          make -j$(nproc) || true   # tolerate partial build; headers are what matter
-          mkdir -p $DEVKITPRO/AtmosphereLibs/include
-          mkdir -p $DEVKITPRO/AtmosphereLibs/lib
-          cp -r include/* $DEVKITPRO/AtmosphereLibs/include/ 2>/dev/null || true
-          find . -name "*.a" -exec cp {} $DEVKITPRO/AtmosphereLibs/lib/ \; 2>/dev/null || true
+          git clone --depth=1 --branch 1.8.0 \
+            https://github.com/Atmosphere-NX/Atmosphere.git /opt/atmosphere
+          cd /opt/atmosphere/libraries/libstratosphere
+          make -j$(nproc)
+          mkdir -p $DEVKITPRO/AtmosphereLibs/include $DEVKITPRO/AtmosphereLibs/lib
+          cp -r include/. $DEVKITPRO/AtmosphereLibs/include/
+          find . -name "*.a" -exec cp {} $DEVKITPRO/AtmosphereLibs/lib/ \;
 
       - name: Build sMenu
         run: make smenu
@@ -48,10 +45,8 @@ jobs:
       - name: Build sInstaller
         run: make sinstaller
 
-      # sSystem requires Atmosphere libs — build best-effort
       - name: Build sSystem
         run: make ssystem
-        continue-on-error: true
 
       # Rename NSO outputs to friendly names for release assets
       - name: Stage release assets

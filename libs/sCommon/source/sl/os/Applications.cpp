@@ -45,13 +45,13 @@ namespace sl::os {
 
     std::string GetAppName(const NacpStruct &nacp) {
         // Priority order: English, then any non-empty entry
-        static const NacpLanguageEntry* pick(const NacpStruct &n) {
+        auto pick = [](const NacpStruct &n) -> const NacpLanguageEntry* {
             // English (AmericanEnglish = index 0)
             if (n.lang[0].name[0] != '\0') return &n.lang[0];
             for (int i = 1; i < 16; i++)
                 if (n.lang[i].name[0] != '\0') return &n.lang[i];
             return nullptr;
-        }
+        };
         const auto *e = pick(nacp);
         if (!e) return "Unknown";
         // Truncate to null terminator
