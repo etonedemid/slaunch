@@ -3,59 +3,65 @@
 
 namespace sl::sys::app {
 
-    AppletHolder g_AppHolder  = {};
-    u64          g_AppId      = 0;
-    bool         g_AppRunning = false;
-    bool         g_AppHasFocus = false;
+    AppletApplication g_AppHolder   = {};
+    u64               g_AppId       = 0;
+    bool              g_AppRunning  = false;
+    bool              g_AppHasFocus = false;
 
-    // Build the 0x88-byte preselected-user launch parameter expected by games
+    // Build the 0x88-byte preselected-user launch parameter expected by games.
+    // Layout (from qlaunch / uLaunch): magic(4) + is_user_selected(1) + pad(3) +
+    // uid(16) + padding. The is_user_selected byte MUST be 1 -- leaving it 0
+    // makes the game think no user was preselected and it exits right after the
+    // "Licensed by Nintendo" splash.
     static Result PushUserParam(AccountUid user) {
-        // Layout: magic(4) + uid(16) + padding to 0x88
         struct alignas(4) UserParam {
-            u32        magic;   // 0xC79497CA
-            u8         _pad0[4];
+            u32        magic;             // 0xC79497CA
+            u8         is_user_selected;  // 1
+            u8         pad[3];
             AccountUid uid;
-            u8         _rest[0x88 - 4 - 4 - sizeof(AccountUid)];
+            u8         unused[0x70];
         } param = {};
         static_assert(sizeof(param) == 0x88);
-        param.magic = 0xC79497CA;
-        param.uid   = user;
+        param.magic            = 0xC79497CA;
+        param.is_user_selected = 1;
+        param.uid              = user;
 
         AppletStorage st;
-        R_TRY(appletCreateStorage(&st, sizeof(param)));
-        R_TRY(appletStorageWrite(&st, 0, &param, sizeof(param)));
-        R_TRY(appletApplicationPushLaunchParameter(
-            &g_AppHolder,
-            AppletLaunchParameterKind_PreselectedUser, &st));
+        Result rc = appletCreateStorage(&st, sizeof(param));
+        if (rc != 0) return rc;
+        rc = appletStorageWrite(&st, 0, &param, sizeof(param));
+        if (rc != 0) { appletStorageClose(&st); return rc; }
+        rc = appletApplicationPushLaunchParameter(
+            &g_AppHolder, AppletLaunchParameterKind_PreselectedUser, &st);
         appletStorageClose(&st);
-        return ResultSuccess();
+        return rc;
     }
 
     Result Launch(u64 app_id, AccountUid user) {
-        if (g_AppRunning) return MAKERESULT(Module_Libnx, LibnxError_AlreadyExists);
+        if (g_AppRunning) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
         // Touch the app (marks as recently used in NS)
         nsTouchApplication(app_id);
 
-        // Create the application holder
-        R_TRY(appletCreateApplication(&g_AppHolder, app_id));
+        Result rc = appletCreateApplication(&g_AppHolder, app_id);
+        if (rc != 0) return rc;
 
-        // Push the selected user
-        R_TRY(PushUserParam(user));
+        rc = PushUserParam(user);
+        if (rc != 0) return rc;
 
         // Release foreground so the app can acquire it
         appletUnlockForeground();
 
-        // Start it
-        R_TRY(appletApplicationStart(&g_AppHolder));
+        rc = appletApplicationStart(&g_AppHolder);
+        if (rc != 0) return rc;
 
         // Hand focus to the app
         appletApplicationRequestForApplicationToGetForeground(&g_AppHolder);
 
-        g_AppId      = app_id;
-        g_AppRunning = true;
+        g_AppId       = app_id;
+        g_AppRunning  = true;
         g_AppHasFocus = true;
-        return ResultSuccess();
+        return 0;
     }
 
     Result Resume() {

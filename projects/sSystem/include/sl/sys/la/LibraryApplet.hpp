@@ -7,8 +7,10 @@ namespace sl::sys::la {
     extern AppletHolder g_MenuHolder;
     extern bool         g_MenuRunning;
 
-    // Launch sMenu as a library applet in the eShop slot via ECS redirect
-    Result LaunchMenu(AppletId menu_applet_id);
+    // Launch sMenu as a library applet in the eShop slot via ECS redirect.
+    // The status blob is pushed as the applet's input data BEFORE it starts,
+    // so sMenu can read it with appletPopInData at launch.
+    Result LaunchMenu(AppletId menu_applet_id, const void *status, size_t status_size);
 
     // Stop sMenu (graceful exit with 15s timeout, then force)
     void   StopMenu();
@@ -26,9 +28,14 @@ namespace sl::sys::la {
     Result PushStorage(AppletStorage &st);
     Result PopStorage(AppletStorage &st);
 
-    // Open a system library applet (album, web, mii editor, etc.)
-    // while keeping sMenu alive in the background
-    Result OpenSystemApplet(AppletId id, const void *args, size_t args_size,
-                            void *out, size_t out_size);
+    // Open a system library applet (album, web, mii editor, ...) and block
+    // until it closes. Each applet needs a specific common-args `la_version`
+    // and its own input struct(s); a negative version means "push no common
+    // args at all" (required by e.g. MiiEdit). Passing the wrong version or a
+    // null/zero input where the applet expects one makes it fault -- which is
+    // why MiiEdit was crashing. Modelled on uLaunch's la::Start.
+    Result OpenSystemApplet(AppletId id, s32 la_version,
+                            const void *in1 = nullptr, size_t in1_size = 0,
+                            const void *in2 = nullptr, size_t in2_size = 0);
 
 } // namespace sl::sys::la

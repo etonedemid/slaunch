@@ -3,8 +3,10 @@
 
 namespace sl::sys::app {
 
-    // Tracks the currently running application (if any)
-    extern AppletHolder g_AppHolder;
+    // Tracks the currently running application (if any).
+    // Applications use the dedicated AppletApplication type (distinct from the
+    // AppletHolder used for library applets) in the current libnx applet API.
+    extern AppletApplication g_AppHolder;
     extern u64          g_AppId;
     extern bool         g_AppRunning;
     extern bool         g_AppHasFocus;

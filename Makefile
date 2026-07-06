@@ -1,5 +1,5 @@
 #---------------------------------------------------------------------------------
-# sLaunch — Top-level Makefile
+# sLaunch - Top-level Makefile
 # Builds all components and produces the full SD card layout under SdOut/
 #
 # Requirements:
@@ -8,30 +8,42 @@
 #   switch-curl, switch-mbedtls (for sInstaller)
 #
 # Usage:
-#   make                    — build everything
-#   make ssystem            — backend system applet only
-#   make smenu              — text UI applet only
-#   make sinstaller         — installer NRO only
-#   make nxlink             — build installer + send via nxlink
-#   make nxlink SWITCH_IP=x — same but to a specific IP
-#   make clean              — remove all build artifacts
-#   make package            — zip SdOut/ into slaunch.zip
+#   make                    - build everything
+#   make ssystem            - backend system applet only
+#   make smenu              - text UI applet only
+#   make sinstaller         - installer NRO only
+#   make nxlink             - build installer + send via nxlink
+#   make nxlink SWITCH_IP=x - same but to a specific IP
+#   make clean              - remove all build artifacts
+#   make package            - zip SdOut/ into slaunch.zip
 #
 # Install devkitPro packages:
 #   dkp-pacman -S devkitA64 libnx switch-tools switch-curl switch-mbedtls
 #---------------------------------------------------------------------------------
 
-.PHONY: all ssystem smenu sinstaller nxlink clean package
+.PHONY: all ssystem smenu sinstaller nxlink clean package assets
 
-all: ssystem smenu sinstaller
+all: ssystem smenu sinstaller assets
 	@echo ""
 	@echo "=== sLaunch build complete ==="
 	@echo "SD card layout ready in SdOut/"
 	@echo ""
-	@echo "  SdOut/atmosphere/contents/0100000000001000/exefs/main  <- sSystem (qlaunch replacement)"
-	@echo "  SdOut/slaunch/bin/sMenu/main                           <- sMenu text UI"
-	@echo "  SdOut/switch/sInstaller/sInstaller.nro                 <- installer homebrew"
+	@echo "  SdOut/atmosphere/contents/0100000000001000/exefs/{main,main.npdm}  <- sSystem daemon (qlaunch)"
+	@echo "  SdOut/slaunch/bin/sMenu/{main,main.npdm}                           <- sMenu SDL applet (via ECS)"
+	@echo "  SdOut/slaunch/fonts/                                               <- bundled fonts"
+	@echo "  SdOut/switch/sInstaller/sInstaller.nro                             <- installer homebrew"
 	@echo ""
+
+# Copy bundled assets (fonts + a themes folder for user wallpapers) into the
+# SD layout so they land at sdmc:/slaunch/... on the device.
+assets:
+	@echo "--- Staging assets ---"
+	@mkdir -p SdOut/slaunch/fonts SdOut/slaunch/themes SdOut/slaunch/bin/hbloader
+	@cp -f assets/fonts/*.ttf SdOut/slaunch/fonts/ 2>/dev/null || true
+	@cp -f assets/fonts/*.otf SdOut/slaunch/fonts/ 2>/dev/null || true
+	@cp -f assets/fonts/LICENSE-OFL.txt assets/fonts/ATTRIBUTION.md SdOut/slaunch/fonts/ 2>/dev/null || true
+	@# nx-hbloader exefs served via ECS for the Homebrew menu (loads hbmenu.nro)
+	@cp -f assets/hbloader/main assets/hbloader/main.npdm SdOut/slaunch/bin/hbloader/ 2>/dev/null || true
 
 ssystem:
 	@echo "--- Building sSystem ---"

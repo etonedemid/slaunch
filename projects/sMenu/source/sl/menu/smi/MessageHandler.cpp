@@ -6,8 +6,10 @@ namespace sl::menu::smi {
         using namespace sl::smi;
 
         AppletStorage st;
-        // appletPopFromGeneralChannel is non-blocking; loop until empty
-        while (R_SUCCEEDED(appletPopFromGeneralChannel(&st))) {
+        // Daemon -> applet: events arrive on our InData queue (the daemon pushes
+        // them with appletHolderPushInData). Non-blocking; drain until empty.
+        // The initial SystemStatus is popped once in main() before this loop.
+        while (R_SUCCEEDED(appletPopInData(&st))) {
             CommandHeader hdr = {};
             if (R_FAILED(appletStorageRead(&st, 0, &hdr, sizeof(hdr)))) {
                 appletStorageClose(&st);

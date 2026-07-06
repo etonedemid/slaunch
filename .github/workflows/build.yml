@@ -31,7 +31,7 @@ jobs:
       # Clone a pinned Atmosphere release tag and build just libstratosphere.
       - name: Setup Atmosphere libs
         run: |
-          git clone --depth=1 --branch 1.8.0 \
+          git clone --depth=1 --branch 1.11.2 \
             https://github.com/Atmosphere-NX/Atmosphere.git /opt/atmosphere
           cd /opt/atmosphere/libraries/libstratosphere
           make -j$(nproc)
@@ -47,6 +47,10 @@ jobs:
 
       - name: Build sSystem
         run: make ssystem
+
+      # Copy bundled fonts (+ a themes folder) into the SD layout.
+      - name: Stage assets
+        run: make assets
 
       # Rename NSO outputs to friendly names for release assets
       - name: Stage release assets
@@ -104,12 +108,12 @@ jobs:
 
             ### Installation
 
-            **Option A — Installer (recommended)**
+            **Option A - Installer (recommended)**
             1. Copy `sInstaller.nro` to `sdmc:/switch/sInstaller/sInstaller.nro`
             2. Launch it from the Homebrew Menu
             3. Press **A** to download and install
 
-            **Option B — Manual**
+            **Option B - Manual**
             1. Download `slaunch-sdcard.zip`
             2. Extract to the root of your SD card
             3. Reboot your Switch

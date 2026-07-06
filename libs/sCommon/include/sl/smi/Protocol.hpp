@@ -1,11 +1,12 @@
 #pragma once
 #include <switch.h>
+#include <sl/Result.hpp>
 #include <cstring>
 
 // sLaunch SMI (System-Menu Interface) protocol
 // Communication between sSystem (backend) and sMenu (UI) via AppletStorage blobs.
 // Layout per transaction: [CommandHeader][payload...]
-// Storage size: 0x4000 bytes (16 KB — sufficient for all commands)
+// Storage size: 0x4000 bytes (16 KB - sufficient for all commands)
 
 namespace sl::smi {
 
@@ -24,6 +25,9 @@ namespace sl::smi {
         OpenNetConnect,
         OpenUserPage,
         OpenMiiEdit,
+        OpenWebBrowser,        // offline web applet
+        OpenControllers,       // controller-management applet
+        OpenHomebrewMenu,      // launch the installed hbmenu NRO
         OpenPowerMenu,
         RestartMenu,
         ReloadAppList,
@@ -140,13 +144,19 @@ namespace sl::smi {
         StorageWriter w;
         if (!w.IsValid()) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
+        // Use raw libnx Result checks (not R_TRY): this header is shared with
+        // sSystem, where R_TRY is Atmosphere's macro returning ams::Result and
+        // would clash with the libnx Result (u32) return type here.
         CommandHeader hdr { Magic, static_cast<u32>(msg) };
-        R_TRY(w.Write(hdr));
-        R_TRY(w.Write(payload));
+        Result rc = w.Write(hdr);
+        if (rc != 0) return rc;
+        rc = w.Write(payload);
+        if (rc != 0) return rc;
 
-        // sMenu runs inside the system applet holder — push via appletPushToGeneralChannel
-        // which routes back to the system applet that hosts us.
-        return appletPushToGeneralChannel(&w.GetStorage());
+        // Applet -> daemon: push onto our OutData queue; the daemon (which holds
+        // us) drains it with appletHolderPopOutData. (Events come the other way
+        // via appletPopInData.) This matches the library-applet IPC uLaunch uses.
+        return appletPushOutData(&w.GetStorage());
     }
 
     inline Result SendMenuCommand(SystemMessage msg) {
@@ -154,8 +164,9 @@ namespace sl::smi {
         if (!w.IsValid()) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
         CommandHeader hdr { Magic, static_cast<u32>(msg) };
-        R_TRY(w.Write(hdr));
-        return appletPushToGeneralChannel(&w.GetStorage());
+        Result rc = w.Write(hdr);
+        if (rc != 0) return rc;
+        return appletPushOutData(&w.GetStorage());
     }
 
 } // namespace sl::smi
