@@ -40,8 +40,7 @@ atmosphere/contents/0100000000001000/exefs/{main,main.npdm}   sSystem daemon (ql
 slaunch/bin/sMenu/{main,main.npdm}                            sMenu applet (ECS exefs)
 slaunch/fonts/                                                bundled fonts
 slaunch/config/                                               theme/font config (created at runtime)
-slaunch/themes/                                               optional user wallpapers (forest.jpg, warm.jpg, custom.jpg)
-switch/sInstaller/sInstaller.nro                              installer homebrew
+slaunch/                                               optional user wallpapers (.jpg and .png)
 ```
 
 ## Building
