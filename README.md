@@ -4,10 +4,7 @@ A fast, clean, **SDL2-based HOME Menu replacement** for the Nintendo Switch
 (Atmosphère CFW). Themes with wallpapers, custom fonts, a first-run setup flow,
 and a single scrollable menu of your games + system shortcuts.
 
-> Status: **boots and runs on hardware.** The daemon comes up as qlaunch, serves
-> the menu into an applet slot via ECS, and the SDL menu renders. Game-launch /
-> applet-open choreography and the finer HOME-button behaviour are the current
-> iteration target - see *Status & diagnostics* below.
+> Status: **boots and runs on hardware.** 
 
 <img width="1280" height="720" alt="2026070522182400-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/5f1b99aa-48eb-4218-b5c6-50ea6d116164" />
 <img width="1280" height="720" alt="2026070522175200-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/17ef74c8-767e-40e7-b4d8-11dbb7ca7859" />
