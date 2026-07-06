@@ -9,6 +9,10 @@ and a single scrollable menu of your games + system shortcuts.
 > applet-open choreography and the finer HOME-button behaviour are the current
 > iteration target - see *Status & diagnostics* below.
 
+<img width="1280" height="720" alt="2026070522182400-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/5f1b99aa-48eb-4218-b5c6-50ea6d116164" />
+<img width="1280" height="720" alt="2026070522175200-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/17ef74c8-767e-40e7-b4d8-11dbb7ca7859" />
+
+
 ## Architecture
 
 sLaunch follows the same split as [uLaunch](https://github.com/Xortroll/uLaunch):
