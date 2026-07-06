@@ -4,10 +4,9 @@ A fast, clean, **SDL2-based HOME Menu replacement** for the Nintendo Switch
 (Atmosphère CFW). Themes with wallpapers, custom fonts, a first-run setup flow,
 and a single scrollable menu of your games + system shortcuts.
 
-> Status: **boots and runs on hardware.** 
-
-<img width="1280" height="720" alt="2026070522182400-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/5f1b99aa-48eb-4218-b5c6-50ea6d116164" />
-<img width="1280" height="720" alt="2026070522175200-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/17ef74c8-767e-40e7-b4d8-11dbb7ca7859" />
+<img width="1280" height="720" alt="2026070618142500-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/5c1429b1-beaf-4cc0-a077-044067a26406" />
+<img width="1280" height="720" alt="2026070617275100-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/ae1b5f25-6ab8-45cc-ad90-94cfcd430327" />
+<img width="1280" height="720" alt="2026070617262000-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/dc426e0c-8dc0-43f8-a93e-f7373559e201" />
 
 
 ## Architecture
