@@ -1,425 +1,552 @@
-// sInstaller - sLaunch installer homebrew NRO
-// Downloads the latest sLaunch release from GitHub and installs it.
-// Uses libcurl over HTTPS (mbedtls). Text-only UI.
+// sInstaller - sLaunch installer (SDL2 UI)
+// AMOLED-themed, home-menu mockup preview.
 
 #include <switch.h>
-#include <curl/curl.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_image.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
-#include <cstdarg>
-#include <sys/stat.h>
 #include <string>
-#include <vector>
 #include <functional>
+#include <vector>
+#include <cmath>
+#include <unistd.h>
 
-// ---------------------------------------------------------------------------
-// ANSI helpers (same as sMenu)
-#define ESC        "\x1b["
-#define RESET      ESC "0m"
-#define BOLD       ESC "1m"
-#define DIM        ESC "2m"
-#define FG_RED     ESC "31m"
-#define FG_GREEN   ESC "32m"
-#define FG_YELLOW  ESC "33m"
-#define FG_CYAN    ESC "36m"
-#define FG_WHITE   ESC "37m"
-#define FG_BRIGHT_WHITE ESC "97m"
-#define FG_BRIGHT_YELLOW ESC "93m"
-#define FG_BRIGHT_GREEN  ESC "92m"
-#define FG_BRIGHT_RED    ESC "91m"
-#define BG_BLUE    ESC "44m"
-#define CLEAR      ESC "2J" ESC "H"
-#define CLEAR_LINE ESC "2K"
+static const int W = 1280, H = 720;
 
-static constexpr const char *GH_OWNER = "etonedemid";
-static constexpr const char *GH_REPO  = "slaunch";
-static constexpr const char *GH_API   = "https://api.github.com";
+static SDL_Renderer *g_ren = nullptr;
+static TTF_Font *g_fL = nullptr, *g_fM = nullptr, *g_fS = nullptr;
 
-// Destination paths on SD card
-static constexpr const char *DST_SSYSTEM = "sdmc:/atmosphere/contents/0100000000001000/exefs/main";
-static constexpr const char *DST_SMENU   = "sdmc:/slaunch/bin/sMenu/main";
-static constexpr const char *DST_SMENU_DIR = "sdmc:/slaunch/bin/sMenu";
+struct Col { Uint8 r, g, b; };
+// AMOLED palette
+static const Col kBlack{0, 0, 0}, kBg{5, 5, 8}, kBg2{10, 10, 14},
+                 kFg{240, 242, 248}, kDim{40, 42, 50},
+                 kAccent{95, 200, 255}, kGreen{100, 220, 140}, kRed{235, 80, 80};
 
-// ---------------------------------------------------------------------------
-// libcurl write callback - appends to a std::string
-static size_t CurlWriteString(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    auto *buf = static_cast<std::string*>(userdata);
-    buf->append(static_cast<const char*>(ptr), size * nmemb);
-    return size * nmemb;
+static void FillRect(int x, int y, int w, int h, Col c, Uint8 a = 255) {
+    SDL_SetRenderDrawColor(g_ren, c.r, c.g, c.b, a);
+    SDL_Rect r{x, y, w, h};
+    SDL_RenderFillRect(g_ren, &r);
 }
 
-// libcurl write callback - writes to a FILE*
-static size_t CurlWriteFile(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    return fwrite(ptr, size, nmemb, static_cast<FILE*>(userdata));
+static void Text(TTF_Font *f, int x, int y, Col c, const char *s, bool center = false) {
+    if (!f || !s || !s[0]) return;
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(f, s, SDL_Color{c.r, c.g, c.b, 255});
+    if (!surf) return;
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(g_ren, surf);
+    SDL_Rect dst{center ? x - surf->w / 2 : x, y, surf->w, surf->h};
+    SDL_FreeSurface(surf);
+    if (tex) { SDL_RenderCopy(g_ren, tex, nullptr, &dst); SDL_DestroyTexture(tex); }
 }
 
-// Progress callback
-struct ProgressCtx {
-    std::function<void(double, double)> cb;
-};
-static int CurlProgress(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
-                         curl_off_t, curl_off_t) {
-    auto *ctx = static_cast<ProgressCtx*>(userdata);
-    if (ctx->cb && dltotal > 0)
-        ctx->cb(static_cast<double>(dlnow), static_cast<double>(dltotal));
-    return 0;
+static int TextWidth(TTF_Font *f, const char *s) {
+    if (!f || !s || !s[0]) return 0;
+    int w = 0, h = 0;
+    TTF_SizeUTF8(f, s, &w, &h);
+    return w;
 }
 
-// ---------------------------------------------------------------------------
-// Tiny JSON value extractor - no external library needed.
-// Finds the first occurrence of "key":"value" or "key":value in a JSON string.
-static std::string JsonExtract(const std::string &json, const char *key) {
-    std::string needle = std::string("\"") + key + "\"";
-    auto pos = json.find(needle);
-    if (pos == std::string::npos) return "";
+// ---- recursive copy / delete ---------------------------------------------
+static int g_total = 0, g_done = 0;
 
-    pos = json.find(':', pos + needle.size());
-    if (pos == std::string::npos) return "";
-
-    // Skip whitespace
-    while (pos < json.size() && (json[pos] == ':' || json[pos] == ' ')) pos++;
-
-    if (json[pos] == '"') {
-        // String value
-        pos++;
-        auto end = json.find('"', pos);
-        if (end == std::string::npos) return "";
-        return json.substr(pos, end - pos);
-    } else {
-        // Number / bool value
-        auto end = json.find_first_of(",}\n", pos);
-        if (end == std::string::npos) end = json.size();
-        return json.substr(pos, end - pos);
+static void CountTree(const std::string &src) {
+    DIR *d = opendir(src.c_str());
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        std::string s = src + "/" + e->d_name;
+        struct stat st;
+        if (stat(s.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) CountTree(s);
+        else g_total++;
     }
+    closedir(d);
 }
 
-// Extract all values for a repeated key (e.g., "browser_download_url" in assets array)
-static std::vector<std::string> JsonExtractAll(const std::string &json, const char *key) {
-    std::vector<std::string> results;
-    std::string needle = std::string("\"") + key + "\"";
-    size_t search_from = 0;
+static void Mkdirs(const std::string &path) {
+    for (size_t i = 1; i < path.size(); i++)
+        if (path[i] == '/') mkdir(path.substr(0, i).c_str(), 0777);
+    mkdir(path.c_str(), 0777);
+}
 
-    while (true) {
-        auto pos = json.find(needle, search_from);
-        if (pos == std::string::npos) break;
-        search_from = pos + needle.size();
+static bool CopyFile(const std::string &src, const std::string &dst) {
+    FILE *in = fopen(src.c_str(), "rb");
+    if (!in) return false;
+    FILE *out = fopen(dst.c_str(), "wb");
+    if (!out) { fclose(in); return false; }
+    char buf[65536];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+    fclose(in);
+    fclose(out);
+    return ok;
+}
 
-        pos = json.find(':', search_from);
-        if (pos == std::string::npos) break;
-        search_from = pos + 1;
-
-        while (search_from < json.size() && json[search_from] == ' ') search_from++;
-        if (search_from >= json.size()) break;
-
-        if (json[search_from] == '"') {
-            search_from++;
-            auto end = json.find('"', search_from);
-            if (end == std::string::npos) break;
-            results.push_back(json.substr(search_from, end - search_from));
-            search_from = end + 1;
+static bool CopyTree(const std::string &src, const std::string &dst,
+                     const std::function<void()> &tick) {
+    Mkdirs(dst);
+    DIR *d = opendir(src.c_str());
+    if (!d) return false;
+    struct dirent *e;
+    bool ok = true;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        std::string s = src + "/" + e->d_name, t = dst + "/" + e->d_name;
+        struct stat st;
+        if (stat(s.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (!CopyTree(s, t, tick)) ok = false;
+        } else {
+            if (!CopyFile(s, t)) ok = false;
+            g_done++;
+            tick();
         }
     }
-    return results;
+    closedir(d);
+    return ok;
 }
 
-// ---------------------------------------------------------------------------
-// UI helpers
-
-static int g_row = 4; // current log row
-
-static void Header() {
-    printf(CLEAR);
-    printf(BG_BLUE BOLD FG_BRIGHT_WHITE);
-    // Fill header row
-    for (int i = 0; i < 160; i++) putchar(' ');
-    printf(ESC "1;1H"); // move to row 1 col 1
-    printf("  sLaunch Installer");
-    // Right side
-    printf(ESC "1;130H" "github.com/etonedemid/slaunch" RESET);
-
-    printf(ESC "2;1H" DIM FG_WHITE);
-    for (int i = 0; i < 160; i++) putchar('-');
-    printf(RESET);
-    g_row = 4;
+static bool DeleteTree(const std::string &path) {
+    DIR *d = opendir(path.c_str());
+    if (!d) return remove(path.c_str()) == 0;
+    struct dirent *e;
+    bool ok = true;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        std::string s = path + "/" + e->d_name;
+        struct stat st;
+        if (stat(s.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (!DeleteTree(s)) ok = false;
+            rmdir(s.c_str());
+        } else {
+            if (remove(s.c_str()) != 0) ok = false;
+        }
+    }
+    closedir(d);
+    rmdir(path.c_str());
+    return ok;
 }
 
-static void Log(const char *color, const char *prefix, const char *fmt, ...) {
-    char buf[512];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-
-    printf(ESC "%d;1H" CLEAR_LINE, g_row);
-    printf("%s%s%s %s\n" RESET, color, prefix, RESET, buf);
-    g_row++;
-    consoleUpdate(nullptr);
+static bool IsInstalled() {
+    struct stat st;
+    return stat("sdmc:/atmosphere/contents/0100000000001000", &st) == 0;
 }
 
-#define LOG_INFO(...)  Log(FG_CYAN,          " INFO ", __VA_ARGS__)
-#define LOG_OK(...)    Log(FG_BRIGHT_GREEN,  "  OK  ", __VA_ARGS__)
-#define LOG_WARN(...)  Log(FG_BRIGHT_YELLOW, " WARN ", __VA_ARGS__)
-#define LOG_ERR(...)   Log(FG_BRIGHT_RED,    " ERR  ", __VA_ARGS__)
+// ---- carousel helpers ------------------------------------------------------
+struct MockItem {
+    const char *label;
+    bool        running;
+    bool        favourite;
+};
 
-static void ProgressBar(int row, double done, double total, const char *label) {
-    constexpr int BarWidth = 50;
-    int filled = (total > 0) ? (int)(done / total * BarWidth) : 0;
-    if (filled > BarWidth) filled = BarWidth;
+static void DrawCarousel(const std::vector<MockItem> &items, int cursor,
+                         float &scroll_pos, int center_y, int spacing,
+                         bool left_align = false, int margin = 120) {
+    scroll_pos += (cursor - scroll_pos) * 0.30f;
+    if (std::abs(cursor - scroll_pos) < 0.01f) scroll_pos = (float)cursor;
 
-    printf(ESC "%d;1H" CLEAR_LINE, row);
-    printf(FG_CYAN "  %s " RESET "[", label);
-    for (int i = 0; i < filled; i++) putchar('#');
-    for (int i = filled; i < BarWidth; i++) putchar('.');
-    printf("]  %3.0f%%" RESET, total > 0 ? (done / total * 100.0) : 0.0);
-    consoleUpdate(nullptr);
-}
+    const int span = 7;
+    for (int off = -span; off <= span; off++) {
+        int idx = (int)lroundf(scroll_pos) + off;
+        if (idx < 0 || idx >= (int)items.size()) continue;
 
-static void Footer(const char *msg) {
-    printf(ESC "44;1H" DIM FG_WHITE);
-    for (int i = 0; i < 160; i++) putchar('-');
-    printf(ESC "45;1H" CLEAR_LINE "%s" RESET, msg);
-    consoleUpdate(nullptr);
-}
+        const float vdist = std::abs((float)idx - scroll_pos);
+        const bool  big   = vdist < 0.5f;
+        const bool  sel   = (idx == cursor);
+        TTF_Font   *fs    = big ? g_fM : g_fS;
+        const float alpha = std::max(0.06f, 1.0f - vdist * 0.13f);
 
-// ---------------------------------------------------------------------------
-// HTTP helpers
+        char text[256];
+        text[0] = '\0';
+        if (items[idx].running) strcat(text, "\xE2\x97\x8F ");
+        if (items[idx].favourite) strcat(text, "\xE2\x98\x85 ");
+        strcat(text, items[idx].label);
 
-static CURL *InitCurl() {
-    CURL *curl = curl_easy_init();
-    if (!curl) return nullptr;
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "sLaunch-Installer/0.1");
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L); // Switch doesn't have CA store
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
-    return curl;
-}
+        int lw = TextWidth(fs, text);
+        int tx = left_align ? margin : (W - lw) / 2;
+        int y  = center_y + (int)((idx - scroll_pos) * spacing) - (big ? 14 : 10);
 
-static bool HttpGet(const char *url, std::string &out) {
-    CURL *curl = InitCurl();
-    if (!curl) return false;
+        if (sel) {
+            Text(g_fM, tx - 34, y, kAccent, ">");
+        }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteString);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
+        Col nameCol;
+        if (sel || big) {
+            nameCol = items[idx].running ? kAccent : kFg;
+        } else {
+            nameCol = items[idx].running ? Col{26, 58, 74} : kDim;
+        }
 
-    CURLcode rc = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    return rc == CURLE_OK;
-}
+        Uint8 a = (Uint8)(alpha * 255);
+        SDL_Surface *surf = TTF_RenderUTF8_Blended(fs, text,
+            SDL_Color{nameCol.r, nameCol.g, nameCol.b, a});
+        if (surf) {
+            SDL_Texture *tex = SDL_CreateTextureFromSurface(g_ren, surf);
+            SDL_Rect dst{tx, y, surf->w, surf->h};
+            SDL_FreeSurface(surf);
+            if (tex) { SDL_RenderCopy(g_ren, tex, nullptr, &dst); SDL_DestroyTexture(tex); }
+        }
 
-static bool HttpDownload(const char *url, const char *dst_path,
-                          int progress_row, const char *label) {
-    // Ensure parent directory exists
-    {
-        char dir[FS_MAX_PATH];
-        strncpy(dir, dst_path, sizeof(dir) - 1);
-        char *slash = strrchr(dir, '/');
-        if (slash) {
-            *slash = '\0';
-            // mkdir -p equivalent
-            for (char *p = dir + 1; *p; p++) {
-                if (*p == '/') {
-                    *p = '\0';
-                    mkdir(dir, 0777);
-                    *p = '/';
-                }
+        if (items[idx].running) {
+            const char *tag = "running";
+            int tw = TextWidth(g_fS, tag);
+            int ty = y + TTF_FontHeight(fs) - TTF_FontHeight(g_fS) - 2;
+            int tag_x = tx + lw + 18;
+            SDL_Surface *ts = TTF_RenderUTF8_Blended(g_fS, tag,
+                SDL_Color{kAccent.r, kAccent.g, kAccent.b, a});
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect tdst{tag_x, ty, ts->w, ts->h};
+                SDL_FreeSurface(ts);
+                if (tt) { SDL_RenderCopy(g_ren, tt, nullptr, &tdst); SDL_DestroyTexture(tt); }
             }
-            mkdir(dir, 0777);
         }
     }
+}
 
-    FILE *fp = fopen(dst_path, "wb");
-    if (!fp) return false;
+// ---- dialog ----------------------------------------------------------------
+static void DrawConfirmDialog(const char *title, const char *subtitle,
+                              int cursor, bool isDanger = false) {
+    // Dim the screen
+    FillRect(0, 0, W, H, kBlack, 150);
 
-    CURL *curl = InitCurl();
-    if (!curl) { fclose(fp); return false; }
+    int bw = 560, bh = 260;
+    int bx = (W - bw) / 2, by = (H - bh) / 2;
+    FillRect(bx, by, bw, bh, kBg2, 245);
+    FillRect(bx, by, bw, 3, isDanger ? kRed : kAccent);
 
-    ProgressCtx pctx;
-    pctx.cb = [&](double done, double total) {
-        ProgressBar(progress_row, done, total, label);
+    Text(g_fM, W / 2, by + 40, kFg, title, true);
+    if (subtitle && subtitle[0])
+        Text(g_fS, W / 2, by + 90, kDim, subtitle, true);
+
+    const char *opts[2] = {"Yes", "No"};
+    for (int i = 0; i < 2; i++) {
+        bool sel = (i == cursor);
+        int y = by + 140 + i * 48;
+        if (sel) FillRect(W / 2 - 90, y - 4, 180, 42, Col{40, 42, 50}, 60);
+        Text(g_fM, W / 2, y, sel ? (isDanger ? kRed : kAccent) : kDim, opts[i], true);
+    }
+
+    Text(g_fS, W / 2, H - 40, kDim, "Up/Down: Choose    A: Confirm    B: Cancel", true);
+}
+
+// ---- mock home menu data ---------------------------------------------------
+static std::vector<MockItem> BuildMockItems() {
+    return {
+        {"The Legend of Zelda: Tears of the Kingdom", false, true},
+        {"Controllers",  false, false},
+        {"Album",        false, false},
+        {"User Page",    false, false},
+        {"Web Browser",  false, false},
+        {"Mii Edit",     false, false},
+        {"Settings",     false, false},
+        {"Power",        false, false},
+        {"Homebrew Menu",false, false},
+        {"Hollow Knight",false, false},
+        {"Celeste",      false, false},
     };
-
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteFile);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlProgress);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &pctx);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-
-    CURLcode rc = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    fclose(fp);
-
-    return rc == CURLE_OK;
-}
-
-// ---------------------------------------------------------------------------
-// Core install logic
-
-struct ReleaseInfo {
-    std::string tag;
-    std::string ssystem_url;
-    std::string smenu_url;
-};
-
-static bool FetchLatestRelease(ReleaseInfo &out) {
-    char url[512];
-    snprintf(url, sizeof(url), "%s/repos/%s/%s/releases/latest",
-             GH_API, GH_OWNER, GH_REPO);
-
-    LOG_INFO("Fetching release info...");
-    std::string body;
-    if (!HttpGet(url, body)) {
-        LOG_ERR("Failed to reach GitHub API");
-        return false;
-    }
-
-    out.tag = JsonExtract(body, "tag_name");
-    if (out.tag.empty()) {
-        LOG_ERR("No releases found on %s/%s", GH_OWNER, GH_REPO);
-        return false;
-    }
-
-    LOG_OK("Found release: %s", out.tag.c_str());
-
-    // Find download URLs for our two assets
-    auto urls = JsonExtractAll(body, "browser_download_url");
-    for (auto &u : urls) {
-        if (u.find("sSystem.nso") != std::string::npos ||
-            u.find("sSystem_main") != std::string::npos)
-            out.ssystem_url = u;
-        else if (u.find("sMenu.nso") != std::string::npos ||
-                 u.find("sMenu_main") != std::string::npos)
-            out.smenu_url = u;
-    }
-
-    if (out.ssystem_url.empty() || out.smenu_url.empty()) {
-        LOG_ERR("Release assets not found (expected sSystem.nso + sMenu.nso)");
-        return false;
-    }
-
-    return true;
-}
-
-static bool Install(const ReleaseInfo &rel) {
-    LOG_INFO("Installing sSystem -> %s", DST_SSYSTEM);
-    if (!HttpDownload(rel.ssystem_url.c_str(), DST_SSYSTEM, g_row, "sSystem.nso")) {
-        LOG_ERR("Failed to download sSystem");
-        return false;
-    }
-    g_row += 2;
-    LOG_OK("sSystem installed");
-
-    LOG_INFO("Installing sMenu -> %s", DST_SMENU);
-    if (!HttpDownload(rel.smenu_url.c_str(), DST_SMENU, g_row, "sMenu.nso  ")) {
-        LOG_ERR("Failed to download sMenu");
-        return false;
-    }
-    g_row += 2;
-    LOG_OK("sMenu installed");
-
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-extern "C" void __appInit() {
-    smInitialize();
-    fsInitialize();
-    fsdevMountSdmc();
-    appletInitialize();
-    hidInitialize();
-    socketInitializeDefault();
-    nifmInitialize(NifmServiceType_User);
-    curl_global_init(CURL_GLOBAL_ALL);
-}
-
-extern "C" void __appExit() {
-    curl_global_cleanup();
-    nifmExit();
-    socketExit();
-    hidExit();
-    appletExit();
-    fsdevUnmountAll();
-    fsExit();
-    smExit();
 }
 
 // ---------------------------------------------------------------------------
 int main() {
-    consoleInit(nullptr);
+    romfsInit();
+    plInitialize(PlServiceType_User);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
 
-    Header();
-    Footer(" A: Install    B: Exit");
+    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Window *win = SDL_CreateWindow("sInstaller", 0, 0, W, H, 0);
+    g_ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
+    TTF_Init();
+    IMG_Init(IMG_INIT_PNG);
 
-    LOG_INFO("sLaunch Installer v0.1.0");
-    LOG_INFO("Repo: github.com/%s/%s", GH_OWNER, GH_REPO);
+    PlFontData fd;
+    if (R_SUCCEEDED(plGetSharedFontByType(&fd, PlSharedFontType_Standard))) {
+        g_fL = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 1, 46);
+        g_fM = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 1, 28);
+        g_fS = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 1, 22);
+    }
 
-    // Wait for user confirmation
-    printf(ESC "%d;1H" FG_BRIGHT_YELLOW
-           "  Press A to install the latest release, or B to exit." RESET, g_row + 1);
-    consoleUpdate(nullptr);
+    SDL_Texture *icon = IMG_LoadTexture(g_ren, "romfs:/icon.png");
+
+    // --- installer state ---
+    enum class Screen { MainMenu, MockMenu, ConfirmInstall, ConfirmRemove,
+                        Installing, Removing, Done, Failed };
+    Screen screen = Screen::MainMenu;
+
+    bool installed = IsInstalled();
+
+    // Main installer menu
+    struct InstallerItem { const char *label; };
+    std::vector<InstallerItem> installerItems = {
+        {installed ? "Re-install sLaunch" : "Install sLaunch"},
+        {"Try it out"},
+        {installed ? "Remove sLaunch" : " "},
+        {"Exit installer"},
+    };
+    int instCursor = 0;
+    float instScroll = 0.0f;
+
+    // Mock home menu
+    std::vector<MockItem> mockItems = BuildMockItems();
+    int mockCursor = 2;
+    float mockScroll = 2.0f;
+
+    // Dialog state
+    int dialogCursor = 1; // 0 = Yes, 1 = No (default to No for safety)
+
+    bool ok = false;
 
     while (appletMainLoop()) {
         padUpdate(&pad);
         u64 down = padGetButtonsDown(&pad);
-        if (down & HidNpadButton_A) break;
-        if (down & HidNpadButton_B) {
-            consoleExit(nullptr);
-            return 0;
+
+        // ---- input ----
+        if (screen == Screen::MainMenu) {
+            if (down & HidNpadButton_Up)   instCursor = (instCursor + (int)installerItems.size() - 1) % (int)installerItems.size();
+            if (down & HidNpadButton_Down) instCursor = (instCursor + 1) % (int)installerItems.size();
+
+            if (down & HidNpadButton_A) {
+                switch (instCursor) {
+                    case 0: // Install / Re-install
+                        dialogCursor = 1;
+                        screen = Screen::ConfirmInstall;
+                        break;
+                    case 1: // Try it out
+                        screen = Screen::MockMenu;
+                        mockCursor = 2;
+                        mockScroll = 2.0f;
+                        break;
+                    case 2: // Remove / Disable
+                        dialogCursor = 1;
+                        screen = Screen::ConfirmRemove;
+                        break;
+                    case 3: // Exit
+                        goto cleanup;
+                }
+            }
+            if (down & HidNpadButton_B) goto cleanup;
+
+        } else if (screen == Screen::ConfirmInstall || screen == Screen::ConfirmRemove) {
+            if (down & HidNpadButton_Up || down & HidNpadButton_Down) dialogCursor ^= 1;
+            if (down & HidNpadButton_B) {
+                screen = Screen::MainMenu;
+            }
+            if (down & HidNpadButton_A) {
+                if (dialogCursor == 0) { // Yes
+                    g_total = 0;
+                    g_done = 0;
+                    if (screen == Screen::ConfirmInstall) {
+                        screen = Screen::Installing;
+                    } else {
+                        screen = Screen::Removing;
+                    }
+                } else { // No
+                    screen = Screen::MainMenu;
+                }
+            }
+
+        } else if (screen == Screen::MockMenu) {
+            const int last = (int)mockItems.size() - 1;
+            if (down & HidNpadButton_Up)   mockCursor = mockCursor > 0 ? mockCursor - 1 : last;
+            if (down & HidNpadButton_Down) mockCursor = mockCursor < last ? mockCursor + 1 : 0;
+            if (down & HidNpadButton_L)    mockCursor = std::max(0, mockCursor - 5);
+            if (down & HidNpadButton_R)    mockCursor = std::min(last, mockCursor + 5);
+
+            if (down & HidNpadButton_A || down & HidNpadButton_B) {
+                screen = Screen::MainMenu;
+                instCursor = 1; // back to "Try it out"
+                instScroll = 1.0f;
+            }
+
+        } else if (screen == Screen::Installing || screen == Screen::Removing) {
+            // no input during operation
+
+        } else if (screen == Screen::Done || screen == Screen::Failed) {
+            if (down & (HidNpadButton_A | HidNpadButton_B)) goto cleanup;
         }
-        svcSleepThread(16'666'666ULL);
-    }
 
-    g_row += 3;
-    printf(ESC "%d;1H" FG_BRIGHT_WHITE BOLD "  Installing sLaunch..." RESET, g_row);
-    g_row += 2;
-    consoleUpdate(nullptr);
+        // ---- draw ----
+        FillRect(0, 0, W, H, kBlack);
 
-    // Ensure network is up
-    LOG_INFO("Waiting for network...");
-    {
-        NifmInternetConnectionStatus status;
-        int attempts = 0;
-        while (attempts++ < 30) {
-            u32 strength = 0;
-            NifmInternetConnectionType type;
-            nifmGetInternetConnectionStatus(&type, &strength, &status);
-            if (status == NifmInternetConnectionStatus_Connected) break;
-            svcSleepThread(500'000'000ULL);
+        if (screen == Screen::MainMenu) {
+            time_t now = time(nullptr);
+            struct tm tm_now;
+            localtime_r(&now, &tm_now);
+            char clock[32];
+            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
+            Text(g_fS, 40, 16, kDim, clock);
+
+            u32 charge = 0;
+            psmGetBatteryChargePercentage(&charge);
+            char batt[16];
+            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
+            int bw = TextWidth(g_fS, batt);
+            Text(g_fS, W - 40 - bw, 16, kDim, batt);
+
+            Text(g_fL, W / 2, 100, kFg, "sLaunch", true);
+            Text(g_fS, W / 2, 160, kDim, "Home menu replacement", true);
+            FillRect(W / 2 - 200, 190, 400, 1, kBg2);
+
+            std::vector<MockItem> instMock;
+            for (auto &it : installerItems) instMock.push_back({it.label, false, false});
+            DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
+
+        } else if (screen == Screen::ConfirmInstall) {
+            // Draw the menu behind the dialog
+            time_t now = time(nullptr);
+            struct tm tm_now;
+            localtime_r(&now, &tm_now);
+            char clock[32];
+            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
+            Text(g_fS, 40, 16, kDim, clock);
+            u32 charge = 0;
+            psmGetBatteryChargePercentage(&charge);
+            char batt[16];
+            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
+            int bw = TextWidth(g_fS, batt);
+            Text(g_fS, W - 40 - bw, 16, kDim, batt);
+            Text(g_fL, W / 2, 100, kFg, "sLaunch Installer", true);
+            Text(g_fS, W / 2, 160, kDim, "A clean HOME Menu replacement", true);
+            FillRect(W / 2 - 200, 190, 400, 1, kBg2);
+            std::vector<MockItem> instMock;
+            for (auto &it : installerItems) instMock.push_back({it.label, false, false});
+            DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
+
+            DrawConfirmDialog("Install sLaunch?",
+                "This will copy files to your SD card.", dialogCursor, false);
+
+        } else if (screen == Screen::ConfirmRemove) {
+            // Draw the menu behind the dialog
+            time_t now = time(nullptr);
+            struct tm tm_now;
+            localtime_r(&now, &tm_now);
+            char clock[32];
+            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
+            Text(g_fS, 40, 16, kDim, clock);
+            u32 charge = 0;
+            psmGetBatteryChargePercentage(&charge);
+            char batt[16];
+            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
+            int bw = TextWidth(g_fS, batt);
+            Text(g_fS, W - 40 - bw, 16, kDim, batt);
+            Text(g_fL, W / 2, 100, kFg, "sLaunch Installer", true);
+            Text(g_fS, W / 2, 160, kDim, "A clean HOME Menu replacement", true);
+            FillRect(W / 2 - 200, 190, 400, 1, kBg2);
+            std::vector<MockItem> instMock;
+            for (auto &it : installerItems) instMock.push_back({it.label, false, false});
+            DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
+
+            DrawConfirmDialog(installed ? "Remove sLaunch?" : "Disable sLaunch?",
+                installed ? "This will delete all sLaunch files." : "This will disable the sLaunch sysmodule.",
+                dialogCursor, true);
+
+        } else if (screen == Screen::MockMenu) {
+            time_t now = time(nullptr);
+            struct tm tm_now;
+            localtime_r(&now, &tm_now);
+            char clock[32];
+            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
+            Text(g_fS, 40, 16, kDim, clock);
+            u32 charge = 0;
+            psmGetBatteryChargePercentage(&charge);
+            char batt[16];
+            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
+            int bw = TextWidth(g_fS, batt);
+            Text(g_fS, W - 40 - bw, 16, kDim, batt);
+
+            if ((int)mockItems.size() > 1) {
+                char pos[28];
+                snprintf(pos, sizeof(pos), "%d / %d", mockCursor + 1, (int)mockItems.size());
+                int pw = TextWidth(g_fS, pos);
+                Text(g_fS, W - pw - 40, 50, kDim, pos);
+            }
+
+            DrawCarousel(mockItems, mockCursor, mockScroll, H / 2, 48, true);
+            Text(g_fS, 120, H - 40, kDim, "A/B: Back to installer");
+
+        } else if (screen == Screen::Installing) {
+            Text(g_fM, 120, H / 2 - 30, kFg, "Installing sLaunch...");
+            int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
+            FillRect(bx, by, bw, bh, kBg2);
+            float p = g_total > 0 ? (float)g_done / (float)g_total : 0.0f;
+            FillRect(bx, by, (int)(bw * p), bh, kAccent);
+            char cnt[64];
+            snprintf(cnt, sizeof(cnt), "%d / %d files", g_done, g_total);
+            Text(g_fS, 120, H / 2 + 30, kDim, cnt);
+
+        } else if (screen == Screen::Removing) {
+            Text(g_fM, 120, H / 2 - 30, kFg, installed ? "Removing sLaunch..." : "Disabling sLaunch...");
+            int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
+            FillRect(bx, by, bw, bh, kBg2);
+            float p = g_total > 0 ? (float)g_done / (float)g_total : 0.0f;
+            FillRect(bx, by, (int)(bw * p), bh, kAccent);
+            char cnt[64];
+            snprintf(cnt, sizeof(cnt), "%d / %d files", g_done, g_total);
+            Text(g_fS, 120, H / 2 + 30, kDim, cnt);
+
+        } else if (screen == Screen::Done) {
+            Text(g_fM, 120, H / 2 - 20, kAccent, "Done", true);
+            Text(g_fS, 120, H / 2 + 20, kDim, "Reboot to apply changes", true);
+            Text(g_fS, 120, H - 40, kDim, "Press A to exit");
+
+        } else if (screen == Screen::Failed) {
+            Text(g_fM, 120, H / 2 - 20, kRed, "Operation failed", true);
+            Text(g_fS, 120, H / 2 + 20, kDim, "Check your SD card and try again", true);
+            Text(g_fS, 120, H - 40, kDim, "Press A to exit");
         }
-        NifmInternetConnectionType type;
-        u32 strength = 0;
-        nifmGetInternetConnectionStatus(&type, &strength, &status);
-        if (status != NifmInternetConnectionStatus_Connected) {
-            LOG_ERR("No internet connection. Connect to WiFi and try again.");
-            goto done;
+
+        SDL_RenderPresent(g_ren);
+
+        // ---- operation logic (run once after first draw) ----
+        if (screen == Screen::Installing && g_total == 0) {
+            CountTree("romfs:/payload");
+            if (g_total == 0) g_total = 1;
+            ok = CopyTree("romfs:/payload", "sdmc:", [&]() {
+                FillRect(0, 0, W, H, kBlack);
+                Text(g_fM, 120, H / 2 - 30, kFg, "Installing sLaunch...");
+                int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
+                FillRect(bx, by, bw, bh, kBg2);
+                float p = (float)g_done / (float)g_total;
+                FillRect(bx, by, (int)(bw * p), bh, kAccent);
+                char cnt[64];
+                snprintf(cnt, sizeof(cnt), "%d / %d files", g_done, g_total);
+                Text(g_fS, 120, H / 2 + 30, kDim, cnt);
+                SDL_RenderPresent(g_ren);
+            });
+            installed = ok;
+            screen = ok ? Screen::Done : Screen::Failed;
         }
-        LOG_OK("Network ready");
+
+        if (screen == Screen::Removing && g_total == 0) {
+            if (installed) {
+                // Remove: delete the sLaunch directory
+                CountTree("sdmc:/atmosphere/contents/0100000000001000");
+                if (g_total == 0) g_total = 1;
+                ok = DeleteTree("sdmc:/atmosphere/contents/0100000000001000");
+            }
+            installed = !ok; // if removal succeeded, not installed anymore
+            screen = ok ? Screen::Done : Screen::Failed;
+        }
     }
 
-    {
-        ReleaseInfo rel;
-        if (!FetchLatestRelease(rel)) goto done;
-        if (!Install(rel)) goto done;
-
-        g_row++;
-        printf(ESC "%d;1H" BOLD FG_BRIGHT_GREEN
-               "  Installation complete! Reboot to start sLaunch." RESET, g_row);
-        Footer(" Installation complete. Press B to exit.");
-    }
-
-done:
-    // Wait for B to exit
-    while (appletMainLoop()) {
-        padUpdate(&pad);
-        if (padGetButtonsDown(&pad) & HidNpadButton_B) break;
-        svcSleepThread(16'666'666ULL);
-    }
-
-    consoleExit(nullptr);
+cleanup:
+    if (icon) SDL_DestroyTexture(icon);
+    if (g_fL) TTF_CloseFont(g_fL);
+    if (g_fM) TTF_CloseFont(g_fM);
+    if (g_fS) TTF_CloseFont(g_fS);
+    IMG_Quit();
+    TTF_Quit();
+    SDL_DestroyRenderer(g_ren);
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    plExit();
+    romfsExit();
     return 0;
 }

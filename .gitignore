@@ -18,3 +18,4 @@ slaunch.zip
 *.d
 *.npdm
 assets/fonts/Wingdings.ttf
+projects/sInstaller/romfs/payload

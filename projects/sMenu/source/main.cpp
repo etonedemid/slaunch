@@ -332,7 +332,6 @@ int main() {
         };
         step(dir_v, held_v, next_v, start_v, Btn::Up,   Btn::Down);
         step(dir_h, held_h, next_h, start_h, Btn::Left, Btn::Right);
-
         ui.Render();
     }
 

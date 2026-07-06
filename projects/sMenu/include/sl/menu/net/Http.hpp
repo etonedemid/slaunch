@@ -15,4 +15,9 @@ namespace sl::menu::net {
     // transfer. `out` is cleared on entry.
     bool Get(const char *url, std::string &out, long timeout_s = 8);
 
+    // POST `body` to url. `content_type` and `authorization` may be null. `out`
+    // receives the response body; returns true on HTTP 2xx.
+    bool Post(const char *url, const char *body, const char *content_type,
+              const char *authorization, std::string &out, long timeout_s = 8);
+
 } // namespace sl::menu::net
