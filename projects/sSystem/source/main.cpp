@@ -104,6 +104,11 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
     }
 }
 
+static bool HandleKeyboardRequest() {
+    //stub
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Carry out the queued action once the menu applet has closed. Games/resume
 // leave the menu closed (the game runs); opening a system applet blocks until
@@ -196,7 +201,6 @@ static void RunPendingAction() {
         }
         case Pending::None:
         default:
-            // Menu closed with no action (crash / restart request) -> relaunch.
             LaunchMenu();
             break;
     }
@@ -328,10 +332,14 @@ namespace ams {
             R_ABORT_UNLESS(psmInitialize());
             R_ABORT_UNLESS(nifmInitialize(NifmServiceType_User));
             R_ABORT_UNLESS(setsysInitialize());
+            SetSysFirmwareVersion fw = {};
+            if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw)))
+            hosversionSet(MAKEHOSVERSION(fw.major, fw.minor, fw.micro) | BIT(31));
             R_ABORT_UNLESS(setInitialize());
             R_ABORT_UNLESS(timeInitialize());
             R_ABORT_UNLESS(ldrShellInitialize());
             R_ABORT_UNLESS(pmshellInitialize());
+            
 
             // SD last: it is not always ready before the other services init.
             R_ABORT_UNLESS(fsdevMountSdmc());

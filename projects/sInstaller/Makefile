@@ -1,6 +1,7 @@
 #---------------------------------------------------------------------------------
-# sInstaller Makefile - builds the Switch installer NRO
-# Run via Homebrew Menu or send via nxlink: make nxlink
+# sInstaller Makefile - builds the sLaunch installer NRO.
+# It bundles the built SD payload (from ../../SdOut) into its romfs and copies
+# it onto the SD card, so no network/release is needed to install.
 #---------------------------------------------------------------------------------
 
 TARGET   := sInstaller
@@ -10,6 +11,7 @@ INCLUDES := include
 
 SDOUT    := ../../SdOut
 OUTDIR   := $(SDOUT)/switch/sInstaller
+ROMFS    := romfs
 
 #---------------------------------------------------------------------------------
 include $(DEVKITPRO)/libnx/switch_rules
@@ -19,18 +21,21 @@ APP_AUTHOR  := sLaunch
 APP_VERSION := 0.1.0
 APP_ICON    := ../../assets/icon.jpg
 
+PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
+SDL_CFLAGS := $(shell $(PKGCONF) --cflags sdl2 SDL2_ttf SDL2_image)
+SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image)
+
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS    = -g -Wall -O2 -ffunction-sections $(ARCH) \
-            $(INCLUDE) -D__SWITCH__ \
-            -DSL_VERSION=\"$(APP_VERSION)\"
+            $(INCLUDE) $(SDL_CFLAGS) -D__SWITCH__ -DSL_VERSION=\"$(APP_VERSION)\"
 
 CXXFLAGS  = $(CFLAGS) -std=c++20 -fno-rtti -fno-exceptions
 
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
             -Wl,-Map,$(BUILD)/$(TARGET).map
 
-LIBS     := -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lnx -lz
+LIBS     := $(SDL_LIBS)
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX)
 
@@ -44,13 +49,24 @@ INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 VPATH    := $(SOURCES)
 
 #---------------------------------------------------------------------------------
-.PHONY: all clean nxlink nxlink-server
+.PHONY: all clean romfs_stage nxlink
 
-all: $(OUTDIR)/$(TARGET).nro
+all: romfs_stage $(OUTDIR)/$(TARGET).nro
 
-# Build the NRO
+# Stage the SD payload (everything except the installer itself) + the logo into
+# the NRO's romfs.
+romfs_stage:
+	@echo "--- Staging installer payload ---"
+	@rm -rf $(ROMFS)
+	@mkdir -p $(ROMFS)/payload
+	@cp -r $(SDOUT)/atmosphere $(ROMFS)/payload/ 2>/dev/null || true
+	@cp -r $(SDOUT)/slaunch    $(ROMFS)/payload/ 2>/dev/null || true
+	@cp ../../icon.png $(ROMFS)/icon.png 2>/dev/null || true
+
+# Build the NRO with romfs + icon.
 $(OUTDIR)/$(TARGET).nro: $(BUILD)/$(TARGET).nacp $(BUILD)/$(TARGET).elf | $(OUTDIR)
 	@elf2nro $(BUILD)/$(TARGET).elf $@ --nacp=$(BUILD)/$(TARGET).nacp \
+	    --romfsdir=$(ROMFS) \
 	    $(if $(wildcard $(APP_ICON)),--icon=$(APP_ICON),)
 	@echo "NRO: $@"
 
@@ -71,19 +87,9 @@ $(OUTDIR):
 	@mkdir -p $@
 
 clean:
-	@rm -rf $(BUILD) $(OUTDIR)/$(TARGET).nro
+	@rm -rf $(BUILD) $(ROMFS) $(OUTDIR)/$(TARGET).nro
 
-# ---------------------------------------------------------------------------
-# nxlink - send the NRO to a Switch over the network
-# Usage: make nxlink SWITCH_IP=192.168.1.x
-#        (if SWITCH_IP not set, nxlink broadcasts to find the console)
 nxlink: all
-	@echo "Sending $(TARGET).nro via nxlink..."
-	@nxlink -s $(OUTDIR)/$(TARGET).nro $(if $(SWITCH_IP),-a $(SWITCH_IP),)
-
-# nxlink-server: send NRO AND stay connected to receive stdout logs
-nxlink-server: all
-	@echo "Sending $(TARGET).nro via nxlink (with log server)..."
 	@nxlink -s $(OUTDIR)/$(TARGET).nro $(if $(SWITCH_IP),-a $(SWITCH_IP),)
 
 -include $(OFILES:.o=.d)

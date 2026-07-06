@@ -1,4 +1,5 @@
 #include <sl/menu/ui/Menu.hpp>
+#include <sl/smi/Protocol.hpp>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -21,6 +22,7 @@ namespace sl::menu::ui {
     static constexpr int kHintY       = 682;
 
     static SDL_Color WithAlpha(SDL_Color c, Uint8 a) { return SDL_Color{ c.r, c.g, c.b, a }; }
+
 
     // Editor palette.
     static const SDL_Color kPalette[] = {
@@ -267,13 +269,13 @@ namespace sl::menu::ui {
         if (m_items.empty()) return;
         const MenuItem &it = m_items[m_cursor];
         if (it.kind != ItemKind::Game) return;
-        m_kb_purpose = KbPurpose::RenameGame;
-        m_kb_app   = it.app_id;
-        m_kb_text  = it.name;
-        m_kb_row   = 0;
-        m_kb_col   = 0;
+        m_kb_purpose = sl::smi::Kb_RenameGame;
+        m_kb_app = it.app_id;
+        m_kb_text = it.name;
+        m_kb_row = 0;
+        m_kb_col = 0;
         m_kb_upper = false;
-        m_screen   = Screen::Keyboard;
+        m_screen = Screen::Keyboard;
     }
 
     // ---- On-screen keyboard (rename) ---------------------------------------
@@ -296,16 +298,44 @@ namespace sl::menu::ui {
 
     Menu::Action Menu::OnButtonKeyboard(Btn b) {
         auto commit = [&]() {
-            if (m_kb_purpose == KbPurpose::WeatherCity) {
-                m_widgets.SetWeatherCity(m_kb_text.c_str());
-                SetStatus("Location set");
-                m_screen = Screen::Theming;
-            } else {
-                SetCustomName(m_kb_app, m_kb_text.c_str());
-                RebuildItems();
-                SelectApp(m_kb_app);
-                SetStatus("Renamed");
-                m_screen = Screen::Main;
+            switch (m_kb_purpose) {
+                case sl::smi::Kb_WeatherCity:
+                    m_widgets.SetWeatherCity(m_kb_text.c_str());
+                    SetStatus("Location set");
+                    m_screen = Screen::Theming;
+                    break;
+                case sl::smi::Kb_AuroraUser:
+                    m_widgets.SetAuroraUser(m_kb_text.c_str());
+                    SetStatus("User set");
+                    m_screen = Screen::Theming;
+                    break;
+                case sl::smi::Kb_AuroraPass:
+                    m_widgets.SetAuroraPass(m_kb_text.c_str());
+                    SetStatus("Password set");
+                    m_screen = Screen::Theming;
+                    break;
+                case sl::smi::Kb_AuroraSend:
+                    m_widgets.AuroraSend(m_kb_text.c_str());
+                    SetStatus("Sent");
+                    m_screen = Screen::Main;
+                    break;
+                case sl::smi::Kb_ThemeName:
+                    if (m_theme.IsCustom((int)m_kb_app) && !m_kb_text.empty()) {
+                        Theme &c = m_theme.CustomAt((int)m_kb_app);
+                        strncpy(c.name, m_kb_text.c_str(), sizeof(c.name) - 1);
+                        c.name[sizeof(c.name) - 1] = '\0';
+                        m_theme.Save();
+                    }
+                    SetStatus("Theme renamed");
+                    m_screen = Screen::ThemeEditor;
+                    break;
+                default: // Kb_RenameGame
+                    SetCustomName(m_kb_app, m_kb_text.c_str());
+                    RebuildItems();
+                    SelectApp(m_kb_app);
+                    SetStatus("Renamed");
+                    m_screen = Screen::Main;
+                    break;
             }
         };
         auto backspace = [&]() {
@@ -334,10 +364,17 @@ namespace sl::menu::ui {
         if (b == Btn::Y)    backspace();          // quick backspace
         if (b == Btn::X)    m_kb_upper = !m_kb_upper;
         if (b == Btn::Plus) commit();
-        if (b == Btn::B)    m_screen = (m_kb_purpose == KbPurpose::WeatherCity)
-                                        ? Screen::Theming : Screen::Main; // cancel
+        if (b == Btn::B) {
+            m_screen = (m_kb_purpose == sl::smi::Kb_WeatherCity ||
+                        m_kb_purpose == sl::smi::Kb_AuroraUser ||
+                        m_kb_purpose == sl::smi::Kb_AuroraPass)
+                       ? Screen::Theming :
+                       (m_kb_purpose == sl::smi::Kb_ThemeName)
+                       ? Screen::ThemeEditor : Screen::Main;
+        }
         return Action::None;
     }
+
 
     void Menu::SetUser(AccountUid uid, const char *nickname) {
         m_user = uid;
@@ -351,6 +388,8 @@ namespace sl::menu::ui {
         m_status_tick = armGetSystemTick();
     }
 
+    // Ask the daemon to show the keyboard: write a request file, then flag the
+    // applet to exit so qlaunch can display swkbd and hand the text back.
     // =========================================================================
     // Input
     Menu::Action Menu::OnButton(Btn b, u64 &out_app_id) {
@@ -373,8 +412,9 @@ namespace sl::menu::ui {
     Menu::Action Menu::OnButtonOobe(Btn b) {
         constexpr int LastStep = 2;
         if (m_oobe_step == 1) {
-            if (b == Btn::Down) { m_theme_cursor = (m_theme_cursor + 1) % TotalThemeCount; m_theme.Select(m_theme_cursor); }
-            if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + TotalThemeCount - 1) % TotalThemeCount; m_theme.Select(m_theme_cursor); }
+            const int n = m_theme.Count();
+            if (b == Btn::Down) { m_theme_cursor = (m_theme_cursor + 1) % n; m_theme.Select(m_theme_cursor); }
+            if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + n - 1) % n; m_theme.Select(m_theme_cursor); }
         }
         if (b == Btn::A) {
             if (m_oobe_step < LastStep) { m_oobe_step++; }
@@ -424,6 +464,7 @@ namespace sl::menu::ui {
                 case ItemKind::Theming:
                     m_screen = Screen::Theming;
                     m_theming_cursor = 0;
+                    m_sub_scroll = 0;
                     return Action::None;
                 case ItemKind::Themes:
                     m_screen = Screen::Themes;
@@ -447,6 +488,15 @@ namespace sl::menu::ui {
             BuildOptions();
             m_options_cursor = 0;
             if (!m_options.empty()) m_options_open = true;
+            return Action::None;
+        }
+        // Y sends a message to AuroraChat (when the widget is enabled).
+        if (b == Btn::Y && m_widgets.AuroraEnabled()) {
+            m_kb_purpose = sl::smi::Kb_AuroraSend;
+            m_kb_app = 0;
+            m_kb_text = "";
+            m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
+            m_screen = Screen::Keyboard;
             return Action::None;
         }
         if (b == Btn::Plus) return Action::OpenPower;
@@ -520,7 +570,8 @@ namespace sl::menu::ui {
     }
 
     // ---- Theming submenu (appearance + widgets) ----------------------------
-    namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_Weather, TH_WeatherCity, TH_Back, TH_Count }; }
+    namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_Weather, TH_WeatherCity,
+                       TH_Aurora, TH_AuroraUser, TH_AuroraPass, TH_Back, TH_Count }; }
 
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto cycleAlign = [&](int dir) {
@@ -535,15 +586,33 @@ namespace sl::menu::ui {
         }
         if (m_theming_cursor == TH_Weather && (b == Btn::Left || b == Btn::Right))
             m_widgets.SetWeatherEnabled(!m_widgets.WeatherEnabled());
+        if (m_theming_cursor == TH_Aurora && (b == Btn::Left || b == Btn::Right))
+            m_widgets.SetAuroraEnabled(!m_widgets.AuroraEnabled());
         if (b == Btn::A) {
             switch (m_theming_cursor) {
-                case TH_Themes:  m_screen = Screen::Themes; m_theme_cursor = m_theme.CurrentIndex(); break;
-                case TH_Fonts:   m_screen = Screen::Fonts;  m_font_cursor = m_font_applied; break;
+                case TH_Themes:  m_screen = Screen::Themes; m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
+                case TH_Fonts:   m_screen = Screen::Fonts;  m_font_cursor = m_font_applied; m_sub_scroll = m_font_cursor; break;
                 case TH_TextPos: cycleAlign(+1); break;
                 case TH_Weather: m_widgets.SetWeatherEnabled(!m_widgets.WeatherEnabled()); break;
                 case TH_WeatherCity:
-                    m_kb_purpose = KbPurpose::WeatherCity;
+                    m_kb_purpose = sl::smi::Kb_WeatherCity;
+                    m_kb_app = 0;
                     m_kb_text = m_widgets.WeatherCity();
+                    m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
+                    m_screen = Screen::Keyboard;
+                    break;
+                case TH_Aurora:      m_widgets.SetAuroraEnabled(!m_widgets.AuroraEnabled()); break;
+                case TH_AuroraUser:
+                    m_kb_purpose = sl::smi::Kb_AuroraUser;
+                    m_kb_app = 0;
+                    m_kb_text = m_widgets.AuroraUser();
+                    m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
+                    m_screen = Screen::Keyboard;
+                    break;
+                case TH_AuroraPass:
+                    m_kb_purpose = sl::smi::Kb_AuroraPass;
+                    m_kb_app = 0;
+                    m_kb_text = "";
                     m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
                     m_screen = Screen::Keyboard;
                     break;
@@ -555,28 +624,47 @@ namespace sl::menu::ui {
     }
 
     Menu::Action Menu::OnButtonThemes(Btn b) {
-        if (b == Btn::Down) { m_theme_cursor = (m_theme_cursor + 1) % TotalThemeCount; m_theme.Select(m_theme_cursor); }
-        if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + TotalThemeCount - 1) % TotalThemeCount; m_theme.Select(m_theme_cursor); }
-        if (b == Btn::A) { m_theme.Select(m_theme_cursor); m_theme.Save(); SetStatus("Theme applied"); }
-        if (b == Btn::Y && ThemeManager::IsCustom(m_theme_cursor)) {
-            m_screen = Screen::ThemeEditor;
-            m_edit_cursor = 0;
+        // The list is every theme plus a trailing "New custom theme" entry.
+        const int nThemes = m_theme.Count();
+        const int listN   = nThemes + 1;
+        const int newIdx  = nThemes; // the "New" row
+
+        auto openEditor = [&](int theme_idx) {
+            m_editing_theme = theme_idx;
+            m_theme.Select(theme_idx);
+            m_theme_cursor = theme_idx;
+            m_edit_cursor  = 0;
             ScanWallpapers();
-            m_theme.Select(CustomThemeIndex);
-            m_theme_cursor = CustomThemeIndex;
+            m_screen = Screen::ThemeEditor;
+        };
+
+        if (b == Btn::Down) { m_theme_cursor = (m_theme_cursor + 1) % listN; if (m_theme_cursor < nThemes) m_theme.Select(m_theme_cursor); }
+        if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + listN - 1) % listN; if (m_theme_cursor < nThemes) m_theme.Select(m_theme_cursor); }
+        if (b == Btn::A) {
+            if (m_theme_cursor == newIdx) {
+                openEditor(m_theme.AddCustom());   // create + edit a new custom
+            } else {
+                m_theme.Select(m_theme_cursor);
+                m_theme.Save();
+                SetStatus("Theme applied");
+            }
         }
+        if (b == Btn::Y && m_theme_cursor < nThemes && m_theme.IsCustom(m_theme_cursor))
+            openEditor(m_theme_cursor);
         if (b == Btn::B) {
             m_theme.Load();
             m_theme_cursor = m_theme.CurrentIndex();
             m_screen = Screen::Theming;
+            m_sub_scroll = m_theming_cursor;
         }
         return Action::None;
     }
 
-    // Theme-editor rows: a background selector, six Color slots, and Save.
+    // Theme-editor rows: a background selector, six Color slots, then rename /
+    // save / delete.
     namespace {
         enum { EF_Background = 0, EF_Top, EF_Bottom, EF_Text,
-               EF_Accent, EF_Secondary, EF_Title, EF_Save, EF_Count };
+               EF_Accent, EF_Secondary, EF_Title, EF_Rename, EF_Save, EF_Delete, EF_Count };
     }
 
     static SDL_Color *EditorColor(Theme &c, int row) {
@@ -593,24 +681,30 @@ namespace sl::menu::ui {
 
     void Menu::ScanWallpapers() {
         m_wallpapers.clear();
-        DIR *d = opendir("sdmc:/slaunch");
-        if (!d) return;
-        struct dirent *e;
-        while ((e = readdir(d)) != nullptr) {
-            const char *name = e->d_name;
-            size_t len = strlen(name);
-            if (len < 5) continue;
-            const char *e4 = name + len - 4;
-            const char *e5 = len >= 5 ? name + len - 5 : "";
-            if (strcasecmp(e4, ".jpg") == 0 || strcasecmp(e4, ".png") == 0 ||
-                strcasecmp(e4, ".bmp") == 0 || strcasecmp(e5, ".jpeg") == 0)
-                m_wallpapers.push_back(std::string("sdmc:/slaunch/") + name);
+        // Accept images from either the documented themes folder or the slaunch
+        // root, so wherever the user drops them works.
+        const char *dirs[2] = { "sdmc:/slaunch/themes", "sdmc:/slaunch" };
+        for (const char *dir : dirs) {
+            DIR *d = opendir(dir);
+            if (!d) continue;
+            struct dirent *e;
+            while ((e = readdir(d)) != nullptr) {
+                const char *name = e->d_name;
+                size_t len = strlen(name);
+                if (len < 5) continue;
+                const char *e4 = name + len - 4;
+                const char *e5 = len >= 5 ? name + len - 5 : "";
+                if (strcasecmp(e4, ".jpg") == 0 || strcasecmp(e4, ".png") == 0 ||
+                    strcasecmp(e4, ".bmp") == 0 || strcasecmp(e5, ".jpeg") == 0)
+                    m_wallpapers.push_back(std::string(dir) + "/" + name);
+            }
+            closedir(d);
         }
-        closedir(d);
     }
 
     void Menu::CycleBackground(int dir) {
-        Theme &c = m_theme.Custom();
+        if (!m_theme.IsCustom(m_editing_theme)) return;
+        Theme &c = m_theme.CustomAt(m_editing_theme);
         const int n = (int)m_wallpapers.size();       // option 0 = Gradient
         int cur = 0;
         for (int i = 0; i < n; i++)
@@ -621,8 +715,8 @@ namespace sl::menu::ui {
             strncpy(c.wallpaper, m_wallpapers[cur - 1].c_str(), sizeof(c.wallpaper) - 1);
             c.wallpaper[sizeof(c.wallpaper) - 1] = '\0';
         }
-        m_theme.Select(CustomThemeIndex);
-        m_theme_cursor    = CustomThemeIndex;
+        m_theme.Select(m_editing_theme);
+        m_theme_cursor    = m_editing_theme;
         m_wallpaper_theme = -1; // force the wallpaper cache to reload
     }
 
@@ -634,7 +728,8 @@ namespace sl::menu::ui {
     }
 
     Menu::Action Menu::OnButtonEditor(Btn b) {
-        Theme &c = m_theme.Custom();
+        if (!m_theme.IsCustom(m_editing_theme)) { m_screen = Screen::Themes; return Action::None; }
+        Theme &c = m_theme.CustomAt(m_editing_theme);
 
         if (b == Btn::Down) m_edit_cursor = (m_edit_cursor + 1) % EF_Count;
         if (b == Btn::Up)   m_edit_cursor = (m_edit_cursor + EF_Count - 1) % EF_Count;
@@ -646,11 +741,24 @@ namespace sl::menu::ui {
 
         if (b == Btn::A) {
             if (m_edit_cursor == EF_Save) {
-                m_theme.Select(CustomThemeIndex);
+                m_theme.Select(m_editing_theme);
                 m_theme.Save();
-                SetStatus("Custom theme saved");
+                SetStatus("Theme saved");
+                m_theme_cursor = m_editing_theme;
                 m_screen = Screen::Themes;
-                m_theme_cursor = CustomThemeIndex;
+            } else if (m_edit_cursor == EF_Rename) {
+                m_kb_purpose = sl::smi::Kb_ThemeName;
+                m_kb_app = (u64)m_editing_theme;
+                m_kb_text = c.name;
+                m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
+                m_screen = Screen::Keyboard;
+            } else if (m_edit_cursor == EF_Delete) {
+                m_theme.DeleteCustom(m_editing_theme);
+                m_theme.Save();
+                m_editing_theme = -1;
+                m_theme_cursor = m_theme.CurrentIndex();
+                SetStatus("Theme deleted");
+                m_screen = Screen::Themes;
             } else if (SDL_Color *col = EditorColor(c, m_edit_cursor)) {
                 OpenColorPicker(col);
             }
@@ -669,7 +777,7 @@ namespace sl::menu::ui {
         auto adjust = [&](int d) {
             int v = (int)*ch[m_pick_channel] + d;
             *ch[m_pick_channel] = (Uint8)(v < 0 ? 0 : v > 255 ? 255 : v);
-            m_theme.Select(CustomThemeIndex); // live preview
+            m_theme.Select(m_editing_theme); // live preview
         };
         if (b == Btn::Right) adjust(+1);
         if (b == Btn::Left)  adjust(-1);
@@ -698,6 +806,7 @@ namespace sl::menu::ui {
             // Revert any live preview back to the applied font, then leave.
             ApplyFont(m_font_applied);
             m_screen = Screen::Theming;
+            m_sub_scroll = m_theming_cursor;
         }
         return Action::None;
     }
@@ -858,6 +967,53 @@ namespace sl::menu::ui {
         m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, kHintY, t.dim, hint);
     }
 
+    void Menu::DrawCarousel(const std::vector<std::string> &labels,
+                            const std::vector<std::string> &values,
+                            int cursor, float &scroll_pos) {
+        const Theme &t = m_theme.Current();
+        if (labels.empty()) return;
+
+        scroll_pos += (cursor - scroll_pos) * 0.30f;
+        if (std::abs(cursor - scroll_pos) < 0.01f) scroll_pos = (float)cursor;
+
+        const int margin = kListX, center_y = 360, spacing = 48, span = 7;
+        for (int off = -span; off <= span; off++) {
+            const int idx = (int)lroundf(scroll_pos) + off;
+            if (idx < 0 || idx >= (int)labels.size()) continue;
+
+            const float vdist = std::abs((float)idx - scroll_pos);
+            const bool  big   = vdist < 0.5f;
+            const FontSize fs = big ? FontSize::Large : FontSize::Normal;
+            const Uint8 alpha = (Uint8)std::max(24.0f, 255.0f - vdist * 52.0f);
+            const int   lh    = m_gfx->LineHeight(fs);
+            const int   y     = center_y + (int)((idx - scroll_pos) * spacing) - lh / 2;
+            if (y < 90 || y > kHintY - 30) continue;
+
+            const bool sel = (idx == cursor);
+            const std::string &label = labels[idx];
+            const int lw = m_gfx->TextWidth(fs, label.c_str());
+            int tx;
+            switch (m_align) {
+                case TextAlign::Center: tx = (gfx::Gfx::Width - lw) / 2; break;
+                case TextAlign::Right:  tx = gfx::Gfx::Width - margin - lw; break;
+                default:                tx = margin; break;
+            }
+
+            if (sel)
+                m_gfx->Text(FontSize::Large, tx - 34, y, WithAlpha(t.accent, alpha), ">");
+            m_gfx->Text(fs, tx, y, WithAlpha(big ? t.accent : t.fg, alpha), label.c_str());
+
+            if (idx < (int)values.size() && !values[idx].empty()) {
+                const std::string &v = values[idx];
+                const int vy = y + lh - m_gfx->LineHeight(FontSize::Small) - 2;
+                const int vw = m_gfx->TextWidth(FontSize::Small, v.c_str());
+                const int vx = (m_align == TextAlign::Right) ? (tx - vw - 18)
+                                                             : (tx + lw + 18);
+                m_gfx->Text(FontSize::Small, vx, vy, WithAlpha(t.accent, alpha), v.c_str());
+            }
+        }
+    }
+
     void Menu::Render() {
         // The Fonts and Color-picker screens always render their chrome in the
         // default system font so they can never make themselves unreadable.
@@ -890,7 +1046,7 @@ namespace sl::menu::ui {
         } else if (m_oobe_step == 1) {
             m_gfx->TextCentered(FontSize::Large, cx, 120, t.title, "Choose a Theme");
             int top = 260;
-            for (int i = 0; i < TotalThemeCount; i++) {
+            for (int i = 0; i < m_theme.Count(); i++) {
                 bool sel = (i == m_theme_cursor);
                 int y = top + i * 52;
                 if (sel) m_gfx->FillRect(cx - 200, y - 4, 400, 46, WithAlpha(t.accent, 40));
@@ -1031,87 +1187,73 @@ namespace sl::menu::ui {
     }
 
     void Menu::DrawTheming() {
-        const Theme &t = m_theme.Current();
         DrawTopBar("Theming");
         const char *aligns[3] = { "Left", "Center", "Right" };
-        const char *labels[TH_Count] = {
-            "Themes", "Fonts", "Text position", "Weather widget", "Weather location", "Back"
+        std::vector<std::string> labels = {
+            "Themes", "Fonts", "Text position", "Weather widget", "Weather location",
+            "AuroraChat", "AuroraChat user", "AuroraChat password", "Back"
         };
+        std::vector<std::string> values(labels.size());
+        values[TH_TextPos]     = aligns[(int)m_align];
+        values[TH_Weather]     = m_widgets.WeatherEnabled() ? "On" : "Off";
+        values[TH_WeatherCity] = m_widgets.WeatherCity()[0] ? m_widgets.WeatherCity() : "(not set)";
+        values[TH_Aurora]      = m_widgets.AuroraEnabled() ? "On" : "Off";
+        values[TH_AuroraUser]  = m_widgets.AuroraUser()[0] ? m_widgets.AuroraUser() : "(not set)";
+        values[TH_AuroraPass]  = m_widgets.AuroraHasPass() ? "********" : "(not set)";
 
-        const int cx = gfx::Gfx::Width / 2, top = 176, rowH = 62;
-        for (int i = 0; i < TH_Count; i++) {
-            const bool sel = (i == m_theming_cursor);
-            const int  y   = top + i * rowH;
-            if (sel) m_gfx->FillRect(cx - 340, y - 6, 680, rowH - 12, WithAlpha(t.accent, 46));
-            m_gfx->Text(FontSize::Large, cx - 300, y, sel ? t.accent : t.fg, labels[i]);
-            const SDL_Color vc = sel ? t.accent : t.dim;
-            if (i == TH_TextPos)
-                m_gfx->Text(FontSize::Normal, cx + 120, y + 6, vc, aligns[(int)m_align]);
-            else if (i == TH_Weather)
-                m_gfx->Text(FontSize::Normal, cx + 120, y + 6, vc,
-                            m_widgets.WeatherEnabled() ? "On" : "Off");
-            else if (i == TH_WeatherCity) {
-                const char *c = m_widgets.WeatherCity();
-                m_gfx->Text(FontSize::Normal, cx + 120, y + 6, vc, c[0] ? c : "(not set)");
-            }
-        }
-        DrawHint("B: Back");
+        DrawCarousel(labels, values, m_theming_cursor, m_sub_scroll);
+        DrawHint("Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back");
     }
 
     void Menu::DrawThemes() {
-        const Theme &t = m_theme.Current();
         DrawTopBar("Themes");
-        int cx = gfx::Gfx::Width / 2;
-        int top = 220;
-        for (int i = 0; i < TotalThemeCount; i++) {
-            bool sel = (i == m_theme_cursor);
-            int y = top + i * 56;
-            if (sel) m_gfx->FillRect(cx - 220, y - 6, 440, 50, WithAlpha(t.accent, 46));
-            char label[48];
-            snprintf(label, sizeof(label), "%s%s", m_theme.At(i).name,
-                     (i == m_theme.CurrentIndex()) ? "  *" : "");
-            m_gfx->TextCentered(FontSize::Large, cx, y, sel ? t.accent : t.fg, label);
+        std::vector<std::string> labels, values;
+        for (int i = 0; i < m_theme.Count(); i++) {
+            labels.push_back(m_theme.At(i).name);
+            values.push_back(i == m_theme.CurrentIndex() ? "current" : "");
         }
+        labels.push_back("+ New custom theme");
+        values.push_back("");
+        DrawCarousel(labels, values, m_theme_cursor, m_sub_scroll);
 
-        if (m_status[0] != '\0') {
-            u64 nowt = armGetSystemTick(), freq = armGetSystemTickFreq();
-            if ((nowt - m_status_tick) < 3 * freq)
-                m_gfx->TextCentered(FontSize::Normal, cx, kHintY - 44, t.accent, m_status);
-        }
-
-        if (ThemeManager::IsCustom(m_theme_cursor))
-            DrawHint("A: Apply    Y: Customise    B: Back");
+        if (m_theme_cursor == m_theme.Count())
+            DrawHint("A: Create new theme    B: Back");
+        else if (m_theme.IsCustom(m_theme_cursor))
+            DrawHint("A: Apply    Y: Edit    B: Back");
         else
             DrawHint("A: Apply    B: Back");
     }
 
     void Menu::DrawEditor() {
-        const Theme &t = m_theme.Current(); // the custom theme, shown live
-        DrawTopBar("Custom Theme");
-        Theme &c = m_theme.Custom();
+        const Theme &t = m_theme.Current(); // the edited theme, shown live
+        if (!m_theme.IsCustom(m_editing_theme)) return;
+        Theme &c = m_theme.CustomAt(m_editing_theme);
+        DrawTopBar(c.name);
 
         const char *labels[EF_Count] = {
             "Background", "Gradient top", "Gradient bottom", "Text",
-            "Accent", "Secondary", "Title", "Save & Apply"
+            "Accent", "Secondary", "Title", "Rename theme", "Save & Apply", "Delete theme"
         };
 
-        const int lx = 200, vx = 720, rowH = 58, top = 150;
+        const int lx = 200, vx = 720, rowH = 50, top = 132;
         for (int i = 0; i < EF_Count; i++) {
             const bool sel = (i == m_edit_cursor);
             const int  y   = top + i * rowH;
-            if (sel) m_gfx->FillRect(lx - 30, y - 6, 900, rowH - 8, WithAlpha(t.accent, 46));
-            m_gfx->Text(FontSize::Normal, lx, y, sel ? t.accent : t.fg, labels[i]);
+            const SDL_Color rc = (i == EF_Delete) ? SDL_Color{235, 90, 90, 255}
+                                                  : (sel ? t.accent : t.fg);
+            if (sel) m_gfx->FillRect(lx - 30, y - 6, 900, rowH - 6, WithAlpha(t.accent, 46));
+            m_gfx->Text(FontSize::Normal, lx, y, rc, labels[i]);
 
             if (SDL_Color *col = EditorColor(c, i)) {
-                m_gfx->FillRect(vx, y, 64, 36, *col);
+                m_gfx->FillRect(vx, y, 60, 32, *col);
                 char hex[16];
                 snprintf(hex, sizeof(hex), "#%02X%02X%02X", col->r, col->g, col->b);
-                m_gfx->Text(FontSize::Small, vx + 84, y + 6, t.dim, hex);
+                m_gfx->Text(FontSize::Small, vx + 78, y + 4, t.dim, hex);
             } else if (i == EF_Background) {
                 const char *slash = c.wallpaper[0] ? strrchr(c.wallpaper, '/') : nullptr;
                 const char *bg = (c.wallpaper[0] == '\0') ? "Gradient"
                                 : (slash ? slash + 1 : c.wallpaper);
-                m_gfx->Text(FontSize::Small, vx - 40, y + 6, t.dim, "<");
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, t.dim, "<");
                 m_gfx->Text(FontSize::Normal, vx, y, t.fg, bg);
             }
         }
@@ -1121,8 +1263,12 @@ namespace sl::menu::ui {
             DrawHint("Up/Down: Row    Left/Right: Change background    B: Back");
         else if (m_edit_cursor == EF_Save)
             DrawHint("Up/Down: Row    A: Save & apply    B: Back");
+        else if (m_edit_cursor == EF_Rename)
+            DrawHint("Up/Down: Row    A: Rename    B: Back");
+        else if (m_edit_cursor == EF_Delete)
+            DrawHint("Up/Down: Row    A: Delete this theme    B: Back");
         else
-            DrawHint("Up/Down: Row    A: Edit Color    B: Back");
+            DrawHint("Up/Down: Row    A: Edit color    B: Back");
     }
 
     void Menu::DrawColorPicker() {
@@ -1167,37 +1313,20 @@ namespace sl::menu::ui {
         const Theme &t = m_theme.Current();
         DrawTopBar("Fonts");
 
-        int cx = gfx::Gfx::Width / 2;
-        int n = (int)m_font_names.size();
-        int listTop = 170;
-        int maxRows = 7;
-        int start = 0;
-        if (m_font_cursor >= maxRows) start = m_font_cursor - maxRows + 1;
-
-        for (int i = 0; i < maxRows && (start + i) < n; i++) {
-            int idx = start + i;
-            bool sel = (idx == m_font_cursor);
-            int y = listTop + i * 48;
-            if (sel) m_gfx->FillRect(cx - 300, y - 4, 600, 44, WithAlpha(t.accent, 46));
-            char label[80];
-            snprintf(label, sizeof(label), "%s%s", m_font_names[idx].c_str(),
-                     (idx == m_font_applied) ? "  *" : "");
-            m_gfx->TextCentered(FontSize::Normal, cx, y, sel ? t.accent : t.fg, label);
+        std::vector<std::string> labels, values;
+        for (int i = 0; i < (int)m_font_names.size(); i++) {
+            labels.push_back(m_font_names[i]);
+            values.push_back(i == m_font_applied ? "applied" : "");
         }
+        DrawCarousel(labels, values, m_font_cursor, m_sub_scroll);
 
-        // Live preview of the highlighted font (loaded into the alt slot).
+        // Live preview of the highlighted font, drawn IN that font at the bottom.
         EnsurePreviewFont(m_font_cursor);
-        int py = listTop + maxRows * 48 + 30;
-        m_gfx->TextCentered(FontSize::Small, cx, py, t.dim, "Preview");
-        m_gfx->UseDefaultFont(false); // render the sample IN the highlighted font
-        m_gfx->TextCentered(FontSize::Large, cx, py + 34, t.fg, "The quick brown fox 0123");
+        m_gfx->UseDefaultFont(false);
+        m_gfx->TextCentered(FontSize::Large, gfx::Gfx::Width / 2, kHintY - 66, t.fg,
+                            "The quick brown fox 0123");
         m_gfx->UseDefaultFont(true);
 
-        if (m_status[0] != '\0') {
-            u64 nowt = armGetSystemTick(), freq = armGetSystemTickFreq();
-            if ((nowt - m_status_tick) < 3 * freq)
-                m_gfx->TextCentered(FontSize::Normal, cx, kHintY - 44, t.accent, m_status);
-        }
         DrawHint("Up/Down: Preview    A: Apply    B: Back");
     }
 
@@ -1268,3 +1397,6 @@ namespace sl::menu::ui {
     }
 
 } // namespace sl::menu::ui
+
+
+

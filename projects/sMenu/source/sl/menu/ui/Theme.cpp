@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cctype>
 #include <sys/stat.h>
 
 namespace sl::menu::ui {
@@ -35,14 +36,13 @@ namespace sl::menu::ui {
             C(30, 70, 34), C(10, 30, 14), C(240, 245, 235), C(180, 240, 120),
             C(150, 180, 150), C(235, 250, 220), "sdmc:/slaunch/forest.jpg" };
 
-        // Default custom = AMOLED base with a cyan accent, gradient background.
-        m_custom = { "Custom",
-            C(0, 0, 0), C(0, 0, 0), C(240, 240, 240), C(90, 200, 220),
-            C(120, 120, 120), C(160, 220, 235), "" };
+        // No custom themes exist until the user creates one.
+        m_custom.clear();
     }
 
     const Theme &ThemeManager::At(int i) const {
-        if (i == CustomThemeIndex) return m_custom;
+        if (i >= BuiltinThemeCount && i < Count())
+            return m_custom[i - BuiltinThemeCount];
         if (i < 0) i = 0;
         if (i >= BuiltinThemeCount) i = BuiltinThemeCount - 1;
         return m_builtin[i];
@@ -50,8 +50,22 @@ namespace sl::menu::ui {
 
     void ThemeManager::Select(int i) {
         if (i < 0) i = 0;
-        if (i >= TotalThemeCount) i = TotalThemeCount - 1;
+        if (i >= Count()) i = Count() - 1;
         m_current = i;
+    }
+
+    int ThemeManager::AddCustom() {
+        Theme t = At(m_current); // start from the current look
+        snprintf(t.name, sizeof(t.name), "Custom %d", (int)m_custom.size() + 1);
+        m_custom.push_back(t);
+        return BuiltinThemeCount + (int)m_custom.size() - 1;
+    }
+
+    void ThemeManager::DeleteCustom(int i) {
+        if (!IsCustom(i)) return;
+        m_custom.erase(m_custom.begin() + (i - BuiltinThemeCount));
+        if (m_current >= Count()) m_current = Count() - 1;
+        if (m_current < 0) m_current = 0;
     }
 
     // ---- persistence --------------------------------------------------------
@@ -67,11 +81,13 @@ namespace sl::menu::ui {
 
     void ThemeManager::Load() {
         InitBuiltins();
+        m_custom.clear();
         if (!g_sd_ok) return; // no SD -> defaults only
 
         FILE *fp = fopen(ThemeCfg, "r");
         if (!fp) return;
 
+        int want_current = m_current;
         char line[160];
         while (fgets(line, sizeof(line), fp)) {
             line[strcspn(line, "\r\n")] = '\0';
@@ -81,19 +97,33 @@ namespace sl::menu::ui {
             const char *key = line;
             const char *val = eq + 1;
 
-            if      (strcmp(key, "current") == 0)        Select(atoi(val));
-            else if (strcmp(key, "custom_bg_top") == 0)  ParseColor(val, m_custom.bg_top);
-            else if (strcmp(key, "custom_bg_bot") == 0)  ParseColor(val, m_custom.bg_bottom);
-            else if (strcmp(key, "custom_fg") == 0)      ParseColor(val, m_custom.fg);
-            else if (strcmp(key, "custom_accent") == 0)  ParseColor(val, m_custom.accent);
-            else if (strcmp(key, "custom_dim") == 0)     ParseColor(val, m_custom.dim);
-            else if (strcmp(key, "custom_title") == 0)   ParseColor(val, m_custom.title);
-            else if (strcmp(key, "custom_wallpaper") == 0) {
-                strncpy(m_custom.wallpaper, val, sizeof(m_custom.wallpaper) - 1);
-                m_custom.wallpaper[sizeof(m_custom.wallpaper) - 1] = '\0';
+            if (strcmp(key, "current") == 0) { want_current = atoi(val); continue; }
+            if (strcmp(key, "custom_count") == 0) {
+                int n = atoi(val);
+                if (n < 0) n = 0; if (n > 64) n = 64;
+                m_custom.assign(n, m_builtin[2]); // AMOLED base
+                for (auto &c : m_custom) { strncpy(c.name, "Custom", sizeof(c.name)); c.wallpaper[0] = '\0'; }
+                continue;
+            }
+            // Per-custom keys: cN_field
+            if (key[0] == 'c' && isdigit((unsigned char)key[1])) {
+                int idx = atoi(key + 1);
+                const char *us = strchr(key, '_');
+                if (!us || idx < 0 || idx >= (int)m_custom.size()) continue;
+                const char *field = us + 1;
+                Theme &c = m_custom[idx];
+                if      (!strcmp(field, "name"))   { strncpy(c.name, val, sizeof(c.name) - 1); c.name[sizeof(c.name) - 1] = '\0'; }
+                else if (!strcmp(field, "bg_top")) ParseColor(val, c.bg_top);
+                else if (!strcmp(field, "bg_bot")) ParseColor(val, c.bg_bottom);
+                else if (!strcmp(field, "fg"))     ParseColor(val, c.fg);
+                else if (!strcmp(field, "accent")) ParseColor(val, c.accent);
+                else if (!strcmp(field, "dim"))    ParseColor(val, c.dim);
+                else if (!strcmp(field, "title"))  ParseColor(val, c.title);
+                else if (!strcmp(field, "wallpaper")) { strncpy(c.wallpaper, val, sizeof(c.wallpaper) - 1); c.wallpaper[sizeof(c.wallpaper) - 1] = '\0'; }
             }
         }
         fclose(fp);
+        Select(want_current);
     }
 
     void ThemeManager::Save() const {
@@ -104,13 +134,19 @@ namespace sl::menu::ui {
         FILE *fp = fopen(ThemeCfg, "w");
         if (!fp) return;
         fprintf(fp, "current=%d\n", m_current);
-        WriteColor(fp, "custom_bg_top", m_custom.bg_top);
-        WriteColor(fp, "custom_bg_bot", m_custom.bg_bottom);
-        WriteColor(fp, "custom_fg",     m_custom.fg);
-        WriteColor(fp, "custom_accent", m_custom.accent);
-        WriteColor(fp, "custom_dim",    m_custom.dim);
-        WriteColor(fp, "custom_title",  m_custom.title);
-        fprintf(fp, "custom_wallpaper=%s\n", m_custom.wallpaper);
+        fprintf(fp, "custom_count=%d\n", (int)m_custom.size());
+        for (int i = 0; i < (int)m_custom.size(); i++) {
+            const Theme &c = m_custom[i];
+            char k[32];
+            fprintf(fp, "c%d_name=%s\n", i, c.name);
+            snprintf(k, sizeof(k), "c%d_bg_top", i); WriteColor(fp, k, c.bg_top);
+            snprintf(k, sizeof(k), "c%d_bg_bot", i); WriteColor(fp, k, c.bg_bottom);
+            snprintf(k, sizeof(k), "c%d_fg", i);     WriteColor(fp, k, c.fg);
+            snprintf(k, sizeof(k), "c%d_accent", i); WriteColor(fp, k, c.accent);
+            snprintf(k, sizeof(k), "c%d_dim", i);    WriteColor(fp, k, c.dim);
+            snprintf(k, sizeof(k), "c%d_title", i);  WriteColor(fp, k, c.title);
+            fprintf(fp, "c%d_wallpaper=%s\n", i, c.wallpaper);
+        }
         fclose(fp);
     }
 

@@ -73,6 +73,10 @@ namespace sl::menu::ui {
         // an auto-repeat; the list wraps only on a fresh press at an end.
         void SetNavFresh(bool fresh) { m_nav_fresh = fresh; }
 
+        // True once the menu has asked the daemon to show the keyboard; the host
+        // loop should then let the applet exit so qlaunch can show swkbd.
+        bool WantsExit() const { return m_want_exit; }
+
     private:
         enum class Screen { Oobe, Main, Theming, Themes, ThemeEditor, ColorPicker, Fonts, Keyboard };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame };
@@ -88,6 +92,7 @@ namespace sl::menu::ui {
         Action OnButtonColorPicker(Btn b);
         Action OnButtonFonts(Btn b);
         Action OnButtonKeyboard(Btn b);
+        void DrawKeyboard();
         Action OnButtonDialog(Btn b, u64 &out_app_id);
 
         // Theme editor helpers.
@@ -114,9 +119,16 @@ namespace sl::menu::ui {
         void SetCustomName(u64 app_id, const char *name);
         void RenameSelected();      // software-keyboard rename of the selected game
 
+        // Keyboard bridge (swkbd runs in the daemon; see Protocol.hpp).
+
         void DrawBackground();
         void DrawTopBar(const char *center_title);
         void DrawHint(const char *hint);
+        // Shared main-menu-style carousel used by the sub-screens too. Each row
+        // is a label plus an optional right-hand value string.
+        void DrawCarousel(const std::vector<std::string> &labels,
+                          const std::vector<std::string> &values,
+                          int cursor, float &scroll_pos);
         void DrawOobe();
         void DrawMain();
         void DrawOptions();
@@ -125,7 +137,6 @@ namespace sl::menu::ui {
         void DrawEditor();
         void DrawColorPicker();
         void DrawFonts();
-        void DrawKeyboard();
         void DrawDialog();
 
         // Font selection
@@ -159,19 +170,9 @@ namespace sl::menu::ui {
         std::vector<std::pair<u64, std::string>> m_names; // app_id -> custom name
         int  m_theming_cursor = 0;
         bool m_jumped_to_suspended = false;
+        bool m_want_exit = false;   // asked the daemon to show the keyboard
 
-        // Built-in on-screen keyboard. swkbd can't be launched from our applet
-        // slot, so we render our own. It serves multiple purposes (renaming a
-        // game, entering a widget's city, ...).
-        enum class KbPurpose { RenameGame, WeatherCity };
-        std::string m_kb_text;
-        KbPurpose m_kb_purpose = KbPurpose::RenameGame;
-        u64  m_kb_app   = 0;   // game being renamed
-        int  m_kb_row   = 0;
-        int  m_kb_col   = 0;
-        bool m_kb_upper = false;
-
-        // Home-screen network widgets (weather, ...).
+        // Home-screen network widgets (weather, chat).
         widgets::Widgets m_widgets;
 
         // X "Options" overlay for the selected item.
@@ -183,10 +184,20 @@ namespace sl::menu::ui {
         int   m_cursor = 0;
         int   m_scroll = 0;
         float m_scroll_pos = 0.0f; // animated carousel position, eases to m_cursor
+        float m_sub_scroll = 0.0f; // animated position for the sub-screen carousels
         bool  m_nav_fresh  = true; // is the current directional press fresh?
-        int m_theme_cursor = 0;
-        int m_edit_cursor  = 0;
-        int m_oobe_step    = 0;
+        int m_theme_cursor   = 0;
+        int m_edit_cursor    = 0;
+        int m_editing_theme  = -1; // global index of the custom theme being edited
+        int m_oobe_step      = 0;
+
+        // Soft-keyboard state.
+        int  m_kb_purpose = 0;   // sl::smi::Kb_* constants
+        u64  m_kb_app     = 0;   // context (app_id or theme index)
+        std::string m_kb_text; // current input buffer
+        int  m_kb_row    = 0;  // 0-3 char rows, 4 special
+        int  m_kb_col    = 0;
+        bool m_kb_upper  = false;
 
         // Theme editor: available background images + the live Color picker.
         std::vector<std::string> m_wallpapers;   // image paths under slaunch/themes

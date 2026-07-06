@@ -1,5 +1,6 @@
 #include <sl/menu/net/Http.hpp>
 #include <curl/curl.h>
+#include <cstring>
 
 namespace sl::menu::net {
 
@@ -48,6 +49,45 @@ namespace sl::menu::net {
         const CURLcode rc = curl_easy_perform(curl);
         long http = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+        curl_easy_cleanup(curl);
+
+        return rc == CURLE_OK && http >= 200 && http < 300;
+    }
+
+    bool Post(const char *url, const char *body, const char *content_type,
+              const char *authorization, std::string &out, long timeout_s) {
+        out.clear();
+        CURL *curl = curl_easy_init();
+        if (!curl) return false;
+
+        struct curl_slist *headers = nullptr;
+        if (content_type) {
+            std::string h = std::string("Content-Type: ") + content_type;
+            headers = curl_slist_append(headers, h.c_str());
+        }
+        if (authorization) {
+            std::string h = std::string("Authorization: ") + authorization;
+            headers = curl_slist_append(headers, h.c_str());
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)(body ? strlen(body) : 0));
+        if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_s);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "sLaunch/0.1");
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
+        const CURLcode rc = curl_easy_perform(curl);
+        long http = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+        if (headers) curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 
         return rc == CURLE_OK && http >= 200 && http < 300;

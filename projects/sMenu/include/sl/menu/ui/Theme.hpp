@@ -1,12 +1,13 @@
 #pragma once
 #include <SDL2/SDL.h>
+#include <vector>
 
 // sLaunch theming (SDL2)
 // A theme is a background (vertical gradient top->bottom, optionally overlaid
 // with a wallpaper image loaded from the SD card) plus a set of UI colors.
-// Five themes ship built in; a sixth "Custom" slot is user-editable and
-// persisted to sdmc:/slaunch/config/theme.cfg. Users can drop their own
-// wallpaper at sdmc:/slaunch/<file> and reference it from a theme.
+// Five themes ship built in; any number of user "Custom" themes can be created,
+// edited and deleted, all persisted to sdmc:/slaunch/config/theme.cfg. Users
+// can drop their own wallpaper under sdmc:/slaunch(/themes) and reference it.
 
 namespace sl::menu::ui {
 
@@ -28,26 +29,33 @@ namespace sl::menu::ui {
     };
 
     constexpr int BuiltinThemeCount = 5;
-    constexpr int CustomThemeIndex  = BuiltinThemeCount; // 5
-    constexpr int TotalThemeCount   = BuiltinThemeCount + 1;
 
     class ThemeManager {
     public:
-        void Load();          // read selection + custom palette from SD
+        void Load();          // read selection + custom themes from SD
         void Save() const;    // persist them
 
-        int          Count() const { return TotalThemeCount; }
+        int          Count() const { return BuiltinThemeCount + (int)m_custom.size(); }
+        int          CustomCount() const { return (int)m_custom.size(); }
         int          CurrentIndex() const { return m_current; }
         const Theme &Current() const { return At(m_current); }
         const Theme &At(int i) const;
-        Theme       &Custom() { return m_custom; }
-        static bool  IsCustom(int i) { return i == CustomThemeIndex; }
+        bool         IsCustom(int i) const { return i >= BuiltinThemeCount && i < Count(); }
+
+        // A custom theme by *global* index (must satisfy IsCustom).
+        Theme &CustomAt(int i) { return m_custom[i - BuiltinThemeCount]; }
+
+        // Append a new custom theme (a copy of the current one). Returns its
+        // global index.
+        int  AddCustom();
+        // Delete the custom theme at global index i.
+        void DeleteCustom(int i);
 
         void Select(int i);
 
     private:
         Theme m_builtin[BuiltinThemeCount];
-        Theme m_custom;
+        std::vector<Theme> m_custom;
         int   m_current = 2; // default AMOLED
 
         void InitBuiltins();

@@ -78,6 +78,22 @@ namespace sl::smi {
     static_assert(sizeof(SystemStatus) <= StorageSize);
 
     // -------------------------------------------------------------------------
+    // Software-keyboard bridge. A library applet cannot launch swkbd, so the
+    // menu writes a request file and exits; the daemon (qlaunch) shows swkbd and
+    // writes the result back; the menu applies it on relaunch. These purpose ids
+    // are shared by both sides.
+    enum KbPurpose : u32 {
+        Kb_RenameGame = 0,
+        Kb_WeatherCity,
+        Kb_AuroraUser,
+        Kb_AuroraPass,
+        Kb_ThemeName,
+        Kb_AuroraSend,
+    };
+    constexpr const char *KbRequestPath = "sdmc:/slaunch/config/kb_req.txt";
+    constexpr const char *KbResultPath  = "sdmc:/slaunch/config/kb_result.txt";
+
+    // -------------------------------------------------------------------------
     // RAII storage writer/reader helpers
 
     class StorageWriter {
