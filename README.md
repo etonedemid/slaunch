@@ -4,10 +4,10 @@ A fast, clean, **SDL2-based HOME Menu replacement** for the Nintendo Switch
 (Atmosphère CFW). Themes with wallpapers, custom fonts, a first-run setup flow,
 and a single scrollable menu of your games + system shortcuts.
 
-> Status: **boots and runs on hardware.** The daemon comes up as qlaunch, serves
-> the menu into an applet slot via ECS, and the SDL menu renders. Game-launch /
-> applet-open choreography and the finer HOME-button behaviour are the current
-> iteration target - see *Status & diagnostics* below.
+<img width="1280" height="720" alt="2026070618142500-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/5c1429b1-beaf-4cc0-a077-044067a26406" />
+<img width="1280" height="720" alt="2026070617275100-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/ae1b5f25-6ab8-45cc-ad90-94cfcd430327" />
+<img width="1280" height="720" alt="2026070617262000-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/dc426e0c-8dc0-43f8-a93e-f7373559e201" />
+
 
 ## Architecture
 
@@ -36,8 +36,7 @@ atmosphere/contents/0100000000001000/exefs/{main,main.npdm}   sSystem daemon (ql
 slaunch/bin/sMenu/{main,main.npdm}                            sMenu applet (ECS exefs)
 slaunch/fonts/                                                bundled fonts
 slaunch/config/                                               theme/font config (created at runtime)
-slaunch/themes/                                               optional user wallpapers (forest.jpg, warm.jpg, custom.jpg)
-switch/sInstaller/sInstaller.nro                              installer homebrew
+slaunch/                                               optional user wallpapers (.jpg and .png)
 ```
 
 ## Building
