@@ -10,3 +10,11 @@ projects/sInstaller/build/
 *.nro
 *.nacp
 slaunch.zip
+
+# Local Claude Code config
+.claude/
+# Build objects / generated NPDMs
+*.o
+*.d
+*.npdm
+assets/fonts/Wingdings.ttf

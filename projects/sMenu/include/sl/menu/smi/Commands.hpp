@@ -1,7 +1,7 @@
 #pragma once
 #include <sl/smi/Protocol.hpp>
 
-// Convenience wrappers — sMenu side sends commands to sSystem
+// Convenience wrappers - sMenu side sends commands to sSystem
 
 namespace sl::menu::smi {
 
@@ -33,6 +33,18 @@ namespace sl::menu::smi {
 
     inline Result OpenMiiEdit() {
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenMiiEdit);
+    }
+
+    inline Result OpenWebBrowser() {
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenWebBrowser);
+    }
+
+    inline Result OpenControllers() {
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenControllers);
+    }
+
+    inline Result OpenHomebrewMenu() {
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenHomebrewMenu);
     }
 
     inline Result OpenUserPage() {

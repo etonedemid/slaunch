@@ -1,4 +1,5 @@
 #include <sl/os/Applications.hpp>
+#include <sl/Result.hpp>
 #include <cstring>
 
 namespace sl::os {
@@ -11,20 +12,21 @@ namespace sl::os {
         while (true) {
             NsApplicationRecord buf[PageSize];
             s32 count = 0;
-            R_TRY(nsListApplicationRecord(buf, PageSize, offset, &count));
+            Result rc = nsListApplicationRecord(buf, PageSize, offset, &count);
+            if (rc != 0) return rc;
             if (count == 0) break;
             for (s32 i = 0; i < count; i++)
                 out.push_back(buf[i]);
             offset += count;
             if (count < PageSize) break;
         }
-        return ResultSuccess();
+        return 0;
     }
 
     Result ListApplicationViews(const std::vector<u64> &app_ids,
                                 std::vector<NsApplicationView> &out) {
         out.clear();
-        if (app_ids.empty()) return ResultSuccess();
+        if (app_ids.empty()) return 0;
 
         out.resize(app_ids.size());
         return nsGetApplicationView(

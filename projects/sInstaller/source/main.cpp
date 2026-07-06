@@ -1,4 +1,4 @@
-// sInstaller — sLaunch installer homebrew NRO
+// sInstaller - sLaunch installer homebrew NRO
 // Downloads the latest sLaunch release from GitHub and installs it.
 // Uses libcurl over HTTPS (mbedtls). Text-only UI.
 
@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cstdarg>
+#include <sys/stat.h>
 #include <string>
 #include <vector>
 #include <functional>
@@ -40,14 +42,14 @@ static constexpr const char *DST_SMENU   = "sdmc:/slaunch/bin/sMenu/main";
 static constexpr const char *DST_SMENU_DIR = "sdmc:/slaunch/bin/sMenu";
 
 // ---------------------------------------------------------------------------
-// libcurl write callback — appends to a std::string
+// libcurl write callback - appends to a std::string
 static size_t CurlWriteString(void *ptr, size_t size, size_t nmemb, void *userdata) {
     auto *buf = static_cast<std::string*>(userdata);
     buf->append(static_cast<const char*>(ptr), size * nmemb);
     return size * nmemb;
 }
 
-// libcurl write callback — writes to a FILE*
+// libcurl write callback - writes to a FILE*
 static size_t CurlWriteFile(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return fwrite(ptr, size, nmemb, static_cast<FILE*>(userdata));
 }
@@ -65,7 +67,7 @@ static int CurlProgress(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
 }
 
 // ---------------------------------------------------------------------------
-// Tiny JSON value extractor — no external library needed.
+// Tiny JSON value extractor - no external library needed.
 // Finds the first occurrence of "key":"value" or "key":value in a JSON string.
 static std::string JsonExtract(const std::string &json, const char *key) {
     std::string needle = std::string("\"") + key + "\"";

@@ -1,5 +1,5 @@
 #---------------------------------------------------------------------------------
-# sInstaller Makefile — builds the Switch installer NRO
+# sInstaller Makefile - builds the Switch installer NRO
 # Run via Homebrew Menu or send via nxlink: make nxlink
 #---------------------------------------------------------------------------------
 
@@ -23,9 +23,7 @@ APP_ICON    := ../../assets/icon.jpg
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS    = -g -Wall -O2 -ffunction-sections $(ARCH) \
             $(INCLUDE) -D__SWITCH__ \
-            -DSL_VERSION=\"$(APP_VERSION)\" \
-            -DGH_OWNER=\"etonedemid\" \
-            -DGH_REPO=\"slaunch\"
+            -DSL_VERSION=\"$(APP_VERSION)\"
 
 CXXFLAGS  = $(CFLAGS) -std=c++20 -fno-rtti -fno-exceptions
 
@@ -76,7 +74,7 @@ clean:
 	@rm -rf $(BUILD) $(OUTDIR)/$(TARGET).nro
 
 # ---------------------------------------------------------------------------
-# nxlink — send the NRO to a Switch over the network
+# nxlink - send the NRO to a Switch over the network
 # Usage: make nxlink SWITCH_IP=192.168.1.x
 #        (if SWITCH_IP not set, nxlink broadcasts to find the console)
 nxlink: all
