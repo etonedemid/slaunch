@@ -1,6 +1,3 @@
-// sInstaller - sLaunch installer (SDL2 UI)
-// AMOLED-themed, home-menu mockup preview.
-
 #include <switch.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -112,22 +109,30 @@ static bool CopyTree(const std::string &src, const std::string &dst,
 
 static bool DeleteTree(const std::string &path) {
     DIR *d = opendir(path.c_str());
-    if (!d) return remove(path.c_str()) == 0;
+    if (!d) return remove(path.c_str()) == 0; 
+
     struct dirent *e;
     bool ok = true;
+    
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        
         std::string s = path + "/" + e->d_name;
         struct stat st;
-        if (stat(s.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        
+        if (lstat(s.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
             if (!DeleteTree(s)) ok = false;
-            rmdir(s.c_str());
         } else {
             if (remove(s.c_str()) != 0) ok = false;
         }
     }
+    
     closedir(d);
-    rmdir(path.c_str());
+    
+    if (rmdir(path.c_str()) != 0) {
+        ok = false;
+    }
+    
     return ok;
 }
 
@@ -211,27 +216,26 @@ static void DrawCarousel(const std::vector<MockItem> &items, int cursor,
 // ---- dialog ----------------------------------------------------------------
 static void DrawConfirmDialog(const char *title, const char *subtitle,
                               int cursor, bool isDanger = false) {
-    // Dim the screen
-    FillRect(0, 0, W, H, kBlack, 150);
+    // Solid black background (no tint, no transparency)
+    FillRect(0, 0, W, H, kBlack);
+    
+    int cy = H / 2 - 60;
 
-    int bw = 560, bh = 260;
-    int bx = (W - bw) / 2, by = (H - bh) / 2;
-    FillRect(bx, by, bw, bh, kBg2, 245);
-    FillRect(bx, by, bw, 3, isDanger ? kRed : kAccent);
+    // Explicit warning header
+    if (isDanger) {
+        Text(g_fL, W / 2, cy - 80, kRed, "WARNING", true);
+    }
 
-    Text(g_fM, W / 2, by + 40, kFg, title, true);
+    Text(g_fL, W / 2, cy, kFg, title, true);
     if (subtitle && subtitle[0])
-        Text(g_fS, W / 2, by + 90, kDim, subtitle, true);
+        Text(g_fM, W / 2, cy + 60, kDim, subtitle, true);
 
     const char *opts[2] = {"Yes", "No"};
     for (int i = 0; i < 2; i++) {
         bool sel = (i == cursor);
-        int y = by + 140 + i * 48;
-        if (sel) FillRect(W / 2 - 90, y - 4, 180, 42, Col{40, 42, 50}, 60);
+        int y = cy + 150 + i * 65;
         Text(g_fM, W / 2, y, sel ? (isDanger ? kRed : kAccent) : kDim, opts[i], true);
     }
-
-    Text(g_fS, W / 2, H - 40, kDim, "Up/Down: Choose    A: Confirm    B: Cancel", true);
 }
 
 // ---- mock home menu data ---------------------------------------------------
@@ -300,17 +304,56 @@ int main() {
 
     // Dialog state
     int dialogCursor = 1; // 0 = Yes, 1 = No (default to No for safety)
-
     bool ok = false;
+
+    const u64 freq        = armGetSystemTickFreq();
+    const u64 RepeatDelay = (360 * freq) / 1000;
+    auto ms = [&](u64 m) { return (m * freq) / 1000; };
+    
+    int held_v = 0;
+    u64 next_v = 0, start_v = 0;
 
     while (appletMainLoop()) {
         padUpdate(&pad);
         u64 down = padGetButtonsDown(&pad);
+        u64 held = padGetButtons(&pad); 
+
+        // Map both D-Pad and Left/Right analog sticks
+        int dir_v = 0;
+        if (held & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) dir_v = -1;
+        else if (held & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) dir_v = 1;
+
+        const u64 now = armGetSystemTick();
+        bool move_up = false;
+        bool move_down = false;
+
+        auto step = [&](int dir, int &held_state, u64 &next, u64 &start, bool &fire_up, bool &fire_down) {
+            if (dir == 0) { held_state = 0; return; }
+            const bool fresh = (dir != held_state);
+            bool fire = false;
+            
+            if (fresh) {
+                fire = true; start = now; next = now + RepeatDelay;
+            } else if (now >= next) {
+                fire = true;
+                const u64 held_ms = ((now - start) * 1000) / freq;
+                const u64 iv = held_ms < 700 ? 90 : held_ms < 1500 ? 55 : 32;
+                next = now + ms(iv);
+            }
+            
+            held_state = dir;
+            if (fire) {
+                if (dir < 0) fire_up = true;
+                else fire_down = true;
+            }
+        };
+
+        step(dir_v, held_v, next_v, start_v, move_up, move_down);
 
         // ---- input ----
         if (screen == Screen::MainMenu) {
-            if (down & HidNpadButton_Up)   instCursor = (instCursor + (int)installerItems.size() - 1) % (int)installerItems.size();
-            if (down & HidNpadButton_Down) instCursor = (instCursor + 1) % (int)installerItems.size();
+            if (move_up)   instCursor = (instCursor + (int)installerItems.size() - 1) % (int)installerItems.size();
+            if (move_down) instCursor = (instCursor + 1) % (int)installerItems.size();
 
             if (down & HidNpadButton_A) {
                 switch (instCursor) {
@@ -334,7 +377,7 @@ int main() {
             if (down & HidNpadButton_B) goto cleanup;
 
         } else if (screen == Screen::ConfirmInstall || screen == Screen::ConfirmRemove) {
-            if (down & HidNpadButton_Up || down & HidNpadButton_Down) dialogCursor ^= 1;
+            if (move_up || move_down) dialogCursor ^= 1;
             if (down & HidNpadButton_B) {
                 screen = Screen::MainMenu;
             }
@@ -354,10 +397,14 @@ int main() {
 
         } else if (screen == Screen::MockMenu) {
             const int last = (int)mockItems.size() - 1;
-            if (down & HidNpadButton_Up)   mockCursor = mockCursor > 0 ? mockCursor - 1 : last;
-            if (down & HidNpadButton_Down) mockCursor = mockCursor < last ? mockCursor + 1 : 0;
-            if (down & HidNpadButton_L)    mockCursor = std::max(0, mockCursor - 5);
-            if (down & HidNpadButton_R)    mockCursor = std::min(last, mockCursor + 5);
+            if (move_up)   mockCursor = mockCursor > 0 ? mockCursor - 1 : last;
+            if (move_down) mockCursor = mockCursor < last ? mockCursor + 1 : 0;
+            
+            // Map horizontal stick inputs to pagination as well, to make navigating massive lists easier
+            if (down & (HidNpadButton_L | HidNpadButton_Left | HidNpadButton_StickLLeft))  
+                mockCursor = std::max(0, mockCursor - 5);
+            if (down & (HidNpadButton_R | HidNpadButton_Right | HidNpadButton_StickLRight)) 
+                mockCursor = std::min(last, mockCursor + 5);
 
             if (down & HidNpadButton_A || down & HidNpadButton_B) {
                 screen = Screen::MainMenu;
@@ -399,7 +446,6 @@ int main() {
             DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
 
         } else if (screen == Screen::ConfirmInstall) {
-            // Draw the menu behind the dialog
             time_t now = time(nullptr);
             struct tm tm_now;
             localtime_r(&now, &tm_now);
@@ -423,7 +469,6 @@ int main() {
                 "This will copy files to your SD card.", dialogCursor, false);
 
         } else if (screen == Screen::ConfirmRemove) {
-            // Draw the menu behind the dialog
             time_t now = time(nullptr);
             struct tm tm_now;
             localtime_r(&now, &tm_now);
@@ -443,8 +488,8 @@ int main() {
             for (auto &it : installerItems) instMock.push_back({it.label, false, false});
             DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
 
-            DrawConfirmDialog(installed ? "Remove sLaunch?" : "Disable sLaunch?",
-                installed ? "This will delete all sLaunch files." : "This will disable the sLaunch sysmodule.",
+            DrawConfirmDialog(installed ? "Remove sLaunch?" : "Do nothing?",
+                installed ? "This will delete all sLaunch files." : "This will do nothing.",
                 dialogCursor, true);
 
         } else if (screen == Screen::MockMenu) {
@@ -482,7 +527,7 @@ int main() {
             Text(g_fS, 120, H / 2 + 30, kDim, cnt);
 
         } else if (screen == Screen::Removing) {
-            Text(g_fM, 120, H / 2 - 30, kFg, installed ? "Removing sLaunch..." : "Disabling sLaunch...");
+            Text(g_fM, 120, H / 2 - 30, kFg, installed ? "Removing sLaunch..." : "Doing nothing...");
             int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
             FillRect(bx, by, bw, bh, kBg2);
             float p = g_total > 0 ? (float)g_done / (float)g_total : 0.0f;
@@ -493,7 +538,7 @@ int main() {
 
         } else if (screen == Screen::Done) {
             Text(g_fM, 120, H / 2 - 20, kAccent, "Done", true);
-            Text(g_fS, 120, H / 2 + 20, kDim, "Reboot to apply changes", true);
+            Text(g_fS, 120, H / 2 + 20, kDim, "Please reboot", true);
             Text(g_fS, 120, H - 40, kDim, "Press A to exit");
 
         } else if (screen == Screen::Failed) {
@@ -526,13 +571,13 @@ int main() {
 
         if (screen == Screen::Removing && g_total == 0) {
             if (installed) {
-                // Remove: delete the sLaunch directory
                 CountTree("sdmc:/atmosphere/contents/0100000000001000");
                 if (g_total == 0) g_total = 1;
                 ok = DeleteTree("sdmc:/atmosphere/contents/0100000000001000");
+                ok = DeleteTree("sdmc:/slaunch/bin");
+                installed = !ok; 
+                screen = ok ? Screen::Done : Screen::Failed;
             }
-            installed = !ok; // if removal succeeded, not installed anymore
-            screen = ok ? Screen::Done : Screen::Failed;
         }
     }
 

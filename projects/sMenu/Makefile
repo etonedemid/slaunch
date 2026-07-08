@@ -6,11 +6,15 @@
 
 TARGET   := sMenu
 BUILD    := build
+
 SOURCES  := source source/sl/menu/ui source/sl/menu/gfx source/sl/menu/smi \
-            source/sl/menu/net source/sl/menu/widgets
-INCLUDES := include ../../libs/sCommon/include
+            source/sl/menu/net source/sl/menu/widgets ../../libs/Lua
+
+INCLUDES := include ../../libs/sCommon/include \
+            ../../libs/Lua ../../libs/sol2/include
 
 COMMON_SRC := ../../libs/sCommon/source/sl/os/Applications.cpp
+
 
 # SDL2 (+ ttf/image) compile & link flags from the switch portlibs pkg-config.
 PKGCONF  := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
@@ -31,20 +35,45 @@ OUTDIR := $(SDOUT)/slaunch/bin/sMenu
 include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
-APP_AUTHOR  := sLaunch
+APP_AUTHOR  := etonedemid
 APP_VERSION := 0.1.0
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
-CFLAGS    = -g -Wall -O2 -ffunction-sections $(ARCH) \
-            $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) -D__SWITCH__ -DSL_VERSION=\"$(APP_VERSION)\"
 
-CXXFLAGS  = $(CFLAGS) -std=c++20 -fno-rtti -fno-exceptions
+# --- Lua / sol2 configuration ---------------------------------------------------
+# 1. Switch newlib lacks BSD _longjmp / _setjmp; map to standard variants.
+# 2. Do NOT define LUA_USE_DLOPEN=0 — defined() checks are true even when 0.
+# 3. Exclude standalone interpreter files (lua.c, luac.c) from the library build.
+# 4. Force LUAI_MAXSTACK if llimits.h is not being included properly.
+# 5. SOL_NO_EXCEPTIONS is mandatory because we compile with -fno-exceptions.
+# 6. SOL_NO_PLAIN avoids sol2 trying to pass primitive refs by pointer.
+# 7. If lua_newstate in your lua.h takes 3 args, change NEWSTATE_ARGS to 3.
+
+NEWSTATE_ARGS := 2
+
+LUA_DEFINES = -D__SWITCH__ \
+              -D_longjmp=longjmp -D_setjmp=setjmp \
+              -DLUAI_MAXSTACK=1000000 \
+              -DLUA_32BITS \
+              -DLUAI_FUNC=extern
+			  
+SOL_FLAGS = -DSOL_ALL_SAFETIES_ON=0 -DSOL_EXCEPTIONS_SAFE_PROPAGATION=0 \
+            -DSOL_NO_EXCEPTIONS -DSOL_NO_PLAIN=1
+
+COMPAT_FLAGS = -Dsol_lua_newstate_args=$(NEWSTATE_ARGS)
+
+CFLAGS    = -g -Wall -O2 -ffunction-sections -fvisibility=default $(ARCH) \
+            $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) $(LUA_DEFINES)
+
+CXXFLAGS = $(CFLAGS) -std=gnu++20 -fno-rtti -fno-exceptions \
+           $(SOL_FLAGS) $(COMPAT_FLAGS)
 
 ASFLAGS  := -g $(ARCH)
 
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
-            -Wl,-Map,$(TARGET).map
+            -Wl,-Map,$(TARGET).map \
+            -Wl,--unresolved-symbols=ignore-in-object-files
 
 # Network libs first (curl -> mbedtls -> z), then SDL (whose flags end with
 # -lnx) so libnx resolves everything last.
@@ -54,6 +83,8 @@ LIBDIRS  := $(PORTLIBS) $(LIBNX)
 
 #---------------------------------------------------------------------------------
 CFILES   := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.c))
+CFILES   := $(filter-out %/lua.c %/luac.c,$(CFILES))
+
 CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp)) $(COMMON_SRC)
 SFILES   := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.s))
 OFILES   := $(patsubst %.cpp,$(BUILD)/%.o,$(CPPFILES)) \

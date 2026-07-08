@@ -3,6 +3,9 @@
 #include <string>
 #include <sl/menu/gfx/Gfx.hpp>
 #include <sl/menu/ui/Theme.hpp>
+#include <vector>
+#include <memory>
+#include "IWidget.hpp"
 
 // Small home-screen widgets that pull live data over the network on a
 // background thread. Weather (open-meteo) is implemented first; the structure
@@ -35,11 +38,11 @@ namespace sl::menu::widgets {
         // Queue a chat message to send (from the on-screen keyboard).
         void AuroraSend(const char *text);
 
-        // Draw the enabled widget cards down a column [x .. x+w]. Returns the
-        // total height used.
         int Render(gfx::Gfx *gfx, const ui::Theme &t, int x, int y, int w);
-
     private:
+        // ---- custom widgets ----
+        std::vector<std::unique_ptr<IWidget>> m_customWidgets;
+        void LoadCustomWidgets();
         // ---- config ----
         bool m_weatherEnabled = false;
         char m_weatherCity[64] = "";

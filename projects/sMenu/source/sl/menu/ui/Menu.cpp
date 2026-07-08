@@ -624,10 +624,9 @@ namespace sl::menu::ui {
     }
 
     Menu::Action Menu::OnButtonThemes(Btn b) {
-        // The list is every theme plus a trailing "New custom theme" entry.
         const int nThemes = m_theme.Count();
         const int listN   = nThemes + 1;
-        const int newIdx  = nThemes; // the "New" row
+        const int newIdx  = nThemes; 
 
         auto openEditor = [&](int theme_idx) {
             m_editing_theme = theme_idx;
@@ -642,7 +641,7 @@ namespace sl::menu::ui {
         if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + listN - 1) % listN; if (m_theme_cursor < nThemes) m_theme.Select(m_theme_cursor); }
         if (b == Btn::A) {
             if (m_theme_cursor == newIdx) {
-                openEditor(m_theme.AddCustom());   // create + edit a new custom
+                openEditor(m_theme.AddCustom());   
             } else {
                 m_theme.Select(m_theme_cursor);
                 m_theme.Save();
@@ -1098,8 +1097,8 @@ namespace sl::menu::ui {
             const bool running = (it.kind == ItemKind::Game &&
                                   it.app_id == m_suspended && m_suspended != 0);
 
-            // Favourites get a leading star (U+2605).
-            std::string label = it.is_favourite ? (std::string("\xE2\x98\x85 ") + it.name)
+            // Favourites get a leading star.
+            std::string label = it.is_favourite ? (std::string("* ") + it.name)
                                                  : it.name;
 
             // Position the text per the chosen alignment; the '>' cursor always
