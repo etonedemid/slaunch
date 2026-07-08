@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <dirent.h>
 
 namespace sl::menu::widgets {
 
@@ -88,6 +89,7 @@ namespace sl::menu::widgets {
     void Widgets::Init() {
         mutexInit(&m_lock);
         LoadConfig();
+        LoadCustomWidgets();
         net::GlobalInit();
         m_run = true;
         if (R_SUCCEEDED(threadCreate(&m_thread, &Widgets::ThreadTrampoline, this,
@@ -110,15 +112,13 @@ namespace sl::menu::widgets {
     void Widgets::ThreadTrampoline(void *arg) { static_cast<Widgets *>(arg)->ThreadLoop(); }
 
     void Widgets::ThreadLoop() {
-        // Poll ~6x/second so AuroraChat feels live; weather refreshes on a much
-        // slower cadence (~15 min) tracked by a loop counter.
-        int weatherTicks = 100000; // force an immediate first fetch
+        int weatherTicks = 100000; 
         while (m_run) {
             bool wneed;
             mutexLock(&m_lock);
             wneed = m_weatherEnabled && (m_wDirty || !m_wValid);
             mutexUnlock(&m_lock);
-            if (wneed || weatherTicks >= 5400) { // 5400 * 166ms ~= 15 min
+            if (wneed || weatherTicks >= 5400) { 
                 FetchWeather();
                 weatherTicks = 0;
             }
@@ -126,9 +126,33 @@ namespace sl::menu::widgets {
 
             AuroraStep();
 
+            // UPDATE CUSTOM WIDGETS
+            for (auto& cw : m_customWidgets) {
+                cw->Update();
+            }
+
             svcSleepThread(166'000'000ULL); // ~6 Hz
         }
         AuroraDisconnect();
+    }
+
+    void Widgets::LoadCustomWidgets() {
+        m_customWidgets.clear();
+        
+        DIR *d = opendir("sdmc:/slaunch/widgets");
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != nullptr) {
+                const char *name = e->d_name;
+                size_t len = strlen(name);
+                if (len > 4 && strcasecmp(name + len - 4, ".lua") == 0) {
+                    std::string path = std::string("sdmc:/slaunch/widgets/") + name;
+                    m_customWidgets.push_back(std::make_unique<LuaWidget>(path));
+                }
+            }
+            // https://media.tenor.com/3YFiWZeDca8AAAAe/i-cant-read-denji.png
+            closedir(d);
+        }
     }
 
     void Widgets::AddAuroraLine(const char *user, const char *msg) {
@@ -274,8 +298,7 @@ namespace sl::menu::widgets {
 
     bool renderaurorafirst = true;
 
-int Widgets::Render(gfx::Gfx *gfx, const ui::Theme &t, int x, int y, int w) {
-
+    int Widgets::Render(gfx::Gfx *gfx, const ui::Theme &t, int x, int y, int w) {
     int cy = y;
 
     auto renderWeatherWidget = [&]() {
@@ -416,6 +439,10 @@ int Widgets::Render(gfx::Gfx *gfx, const ui::Theme &t, int x, int y, int w) {
     } else {
         renderWeatherWidget();
         renderAuroraWidget();
+    }
+
+    for (auto& cw : m_customWidgets) {
+        cy = cw->Render(gfx, t, x, cy, w);
     }
 
     return cy; 
