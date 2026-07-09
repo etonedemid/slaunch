@@ -51,6 +51,18 @@ namespace sl::os {
     // Get NACP + icon for a single application
     Result GetApplicationControl(u64 app_id, NsApplicationControlData &out);
 
+    // Same, but also reports the total bytes NS wrote (NACP + JPEG icon). Use
+    // IconSize() on that value to get the icon length for caching.
+    Result GetApplicationControl(u64 app_id, NsApplicationControlData &out, u64 &out_size);
+
+    // Length of the JPEG icon inside a control blob of `control_data_size` bytes.
+    // The icon follows the fixed-size NACP, so it is everything past it. Returns
+    // 0 when NS reported nothing beyond the NACP (icon-less title).
+    inline size_t IconSize(u64 control_data_size) {
+        return control_data_size > sizeof(NacpStruct)
+                   ? (size_t)(control_data_size - sizeof(NacpStruct)) : 0;
+    }
+
     // Returns human-readable title name from NACP, picking the best language
     std::string GetAppName(const NacpStruct &nacp);
 

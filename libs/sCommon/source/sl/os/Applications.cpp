@@ -38,10 +38,15 @@ namespace sl::os {
 
     Result GetApplicationControl(u64 app_id, NsApplicationControlData &out) {
         u64 dummy = 0;
+        return GetApplicationControl(app_id, out, dummy);
+    }
+
+    Result GetApplicationControl(u64 app_id, NsApplicationControlData &out, u64 &out_size) {
+        out_size = 0;
         memset(&out, 0, sizeof(out));
         return nsGetApplicationControlData(
             NsApplicationControlSource_Storage,
-            app_id, &out, sizeof(out), &dummy
+            app_id, &out, sizeof(out), &out_size
         );
     }
 

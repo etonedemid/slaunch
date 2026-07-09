@@ -1,4 +1,5 @@
 #include <sl/menu/ui/Menu.hpp>
+#include <sl/menu/ui/Locale.hpp>
 #include <sl/smi/Protocol.hpp>
 #include <cstdio>
 #include <cstring>
@@ -38,6 +39,8 @@ namespace sl::menu::ui {
         m_gfx       = gfx;
         m_user      = user;
         m_suspended = suspended_app_id;
+        m_icons.Init(gfx);
+        LocaleInit();   // load the system-language locale (English is the fallback)
 
         // Resolve the user's nickname; if the launcher handed us an invalid uid,
         // fall back to the first account so the top bar isn't stuck on "Player".
@@ -78,6 +81,12 @@ namespace sl::menu::ui {
         // Stop the widget network thread before the process (and sockets) tear
         // down.
         m_widgets.Exit();
+        // Free icon textures while the renderer is still alive (main() calls
+        // gfx.Exit() only after the Menu is destroyed).
+        m_icons.Exit();
+        for (auto &kv : m_sys_icons)
+            if (kv.second) m_gfx->FreeImage(kv.second);
+        m_sys_icons.clear();
     }
 
     void Menu::RebuildItems() {
@@ -110,15 +119,15 @@ namespace sl::menu::ui {
         auto add = [&](ItemKind k, const char *name) {
             MenuItem it; it.kind = k; it.name = name; m_items.push_back(std::move(it));
         };
-        add(ItemKind::Theming,      "Theming");
-        add(ItemKind::Controllers,  "Controllers");
-        add(ItemKind::Album,        "Album");
-        add(ItemKind::UserPage,     "User Page");
-        add(ItemKind::WebBrowser,   "Web Browser");
-        add(ItemKind::MiiEdit,      "Mii Edit");
-        add(ItemKind::Settings,     "Settings");
-        add(ItemKind::Power,        "Power");
-        add(ItemKind::HomebrewMenu, "Homebrew menu");
+        add(ItemKind::Theming,      T("Theming"));
+        add(ItemKind::Controllers,  T("Controllers"));
+        add(ItemKind::Album,        T("Album"));
+        add(ItemKind::UserPage,     T("User Page"));
+        add(ItemKind::WebBrowser,   T("Web Browser"));
+        add(ItemKind::MiiEdit,      T("Mii Edit"));
+        add(ItemKind::Settings,     T("Settings"));
+        add(ItemKind::Power,        T("Power"));
+        add(ItemKind::HomebrewMenu, T("Homebrew menu"));
 
         // The remaining (non-favourite) games.
         for (auto &it : rest) m_items.push_back(std::move(it));
@@ -205,9 +214,15 @@ namespace sl::menu::ui {
     void Menu::LoadSettings() {
         FILE *fp = fopen("sdmc:/slaunch/config/settings.txt", "r");
         if (!fp) return;
-        int v = 0;
-        if (fscanf(fp, "align=%d", &v) == 1 && v >= 0 && v <= 2)
-            m_align = (TextAlign)v;
+        char line[64];
+        while (fgets(line, sizeof(line), fp)) {
+            int v = 0;
+            if (sscanf(line, "align=%d", &v) == 1 && v >= 0 && v <= 2)
+                m_align = (TextAlign)v;
+            else if (sscanf(line, "ui_mode=%d", &v) == 1 &&
+                     v >= 0 && v < (int)UiMode::Count)
+                m_ui_mode = (UiMode)v;
+        }
         fclose(fp);
     }
 
@@ -217,6 +232,7 @@ namespace sl::menu::ui {
         FILE *fp = fopen("sdmc:/slaunch/config/settings.txt", "w");
         if (!fp) return;
         fprintf(fp, "align=%d\n", (int)m_align);
+        fprintf(fp, "ui_mode=%d\n", (int)m_ui_mode);
         fclose(fp);
     }
 
@@ -299,25 +315,11 @@ namespace sl::menu::ui {
     Menu::Action Menu::OnButtonKeyboard(Btn b) {
         auto commit = [&]() {
             switch (m_kb_purpose) {
-                case sl::smi::Kb_WeatherCity:
-                    m_widgets.SetWeatherCity(m_kb_text.c_str());
-                    SetStatus("Location set");
-                    m_screen = Screen::Theming;
-                    break;
-                case sl::smi::Kb_AuroraUser:
-                    m_widgets.SetAuroraUser(m_kb_text.c_str());
-                    SetStatus("User set");
-                    m_screen = Screen::Theming;
-                    break;
-                case sl::smi::Kb_AuroraPass:
-                    m_widgets.SetAuroraPass(m_kb_text.c_str());
-                    SetStatus("Password set");
-                    m_screen = Screen::Theming;
-                    break;
-                case sl::smi::Kb_AuroraSend:
-                    m_widgets.AuroraSend(m_kb_text.c_str());
-                    SetStatus("Sent");
-                    m_screen = Screen::Main;
+                case sl::smi::Kb_WidgetOption:
+                    if (widgets::IWidget *w = m_widgets.At((int)m_kb_app))
+                        w->SetOption(m_kb_opt, m_kb_text);
+                    SetStatus("Saved");
+                    m_screen = Screen::WidgetOptions;
                     break;
                 case sl::smi::Kb_ThemeName:
                     if (m_theme.IsCustom((int)m_kb_app) && !m_kb_text.empty()) {
@@ -365,12 +367,118 @@ namespace sl::menu::ui {
         if (b == Btn::X)    m_kb_upper = !m_kb_upper;
         if (b == Btn::Plus) commit();
         if (b == Btn::B) {
-            m_screen = (m_kb_purpose == sl::smi::Kb_WeatherCity ||
-                        m_kb_purpose == sl::smi::Kb_AuroraUser ||
-                        m_kb_purpose == sl::smi::Kb_AuroraPass)
-                       ? Screen::Theming :
+            m_screen = (m_kb_purpose == sl::smi::Kb_WidgetOption)
+                       ? Screen::WidgetOptions :
                        (m_kb_purpose == sl::smi::Kb_ThemeName)
                        ? Screen::ThemeEditor : Screen::Main;
+        }
+        return Action::None;
+    }
+
+    // Mirror of DrawKeyboard's layout for touch hit-testing.
+    bool Menu::KbKeyAt(int x, int y, int &row, int &col) const {
+        const int cx = gfx::Gfx::Width / 2;
+        const int top = 250, rowH = 66, keyW = 66;
+
+        // Character rows.
+        for (int r = 0; r < 4; r++) {
+            const int n    = (int)strlen(kKbRows[r]);
+            const int rowW = n * keyW;
+            const int x0   = cx - rowW / 2;
+            const int ry   = top + r * rowH;
+            if (y >= ry - 8 && y < ry + rowH - 8 && x >= x0 && x < x0 + rowW) {
+                row = r; col = (x - x0) / keyW;
+                if (col >= n) col = n - 1;
+                return true;
+            }
+        }
+
+        // Special row (Shift / Space / Back / Done).
+        const int sy = top + 4 * rowH;
+        const int sw = 200, gap = 12, totW = 4 * sw + 3 * gap, sx0 = cx - totW / 2;
+        if (y >= sy - 8 && y < sy + rowH - 8) {
+            for (int c = 0; c < 4; c++) {
+                const int kx = sx0 + c * (sw + gap);
+                if (x >= kx && x < kx + sw) { row = kKbSpecialRow; col = c; return true; }
+            }
+        }
+        return false;
+    }
+
+    // Touch input. On the keyboard a tap presses a key; in the colour picker a
+    // tap/drag moves a slider; on the home screen a long-press (1.5s) on a widget
+    // grabs it for dragging (drop on release) and a double-tap elsewhere launches
+    // the item under the finger.
+    Menu::Action Menu::OnTouch(int phase, int x, int y, u64 &out_app_id) {
+        out_app_id = 0;
+
+        // ---- on-screen keyboard: tap a key ----
+        if (m_screen == Screen::Keyboard) {
+            if (phase != 0) return Action::None;  // act on touch-down only
+            int r, c;
+            if (KbKeyAt(x, y, r, c)) {
+                m_kb_row = r; m_kb_col = c;
+                OnButtonKeyboard(Btn::A);         // press the key under the finger
+            }
+            return Action::None;
+        }
+
+        // ---- colour picker: tap / drag an R/G/B slider ----
+        if (m_screen == Screen::ColorPicker) {
+            if (phase == 2 || !m_pick_target) return Action::None;  // act on down + drag
+            const int cx = gfx::Gfx::Width / 2;
+            const int tx = cx - 300, tw = 520, sy = 360, rh = 68; // mirror DrawColorPicker
+            Uint8 *ch[3] = { &m_pick_target->r, &m_pick_target->g, &m_pick_target->b };
+            for (int i = 0; i < 3; i++) {
+                const int ry = sy + i * rh;
+                if (y >= ry - 20 && y < ry + 34 && x >= tx - 12 && x <= tx + tw + 12) {
+                    m_pick_channel = i;
+                    int v = (x - tx) * 255 / tw;
+                    *ch[i] = (Uint8)(v < 0 ? 0 : v > 255 ? 255 : v);
+                    m_theme.Select(m_editing_theme); // live preview
+                    break;
+                }
+            }
+            return Action::None;
+        }
+
+        // home screen: a touch on a widget grabs it (never the UI); a touch
+        // elsewhere selects the item, or launches it if already selected; a touch
+        // on nothing is ignored.
+        if (m_screen != Screen::Main || m_options_open || m_dialog != Dialog::None) {
+            m_touching = false; m_drag_active = false;
+            return Action::None;
+        }
+
+        if (phase == 1) {                          // move: drag the held widget
+            if (m_drag_active)
+                m_widgets.MoveBy(m_drag_widget, x - m_touch_lx, y - m_touch_ly);
+            m_touch_lx = x; m_touch_ly = y;
+            return Action::None;
+        }
+
+        if (phase == 2) {                          // up: drop
+            if (m_drag_active) {
+                m_drag_active = false;
+                m_widgets.SavePositions();
+            }
+            m_touching = false; m_touch_widget = -1;
+            return Action::None;
+        }
+
+        // down
+        m_touching = true;
+        m_touch_lx = x; m_touch_ly = y;
+        m_touch_widget = m_widgets.AnyEnabled() ? m_widgets.HitTest(x, y) : -1;
+        if (m_touch_widget >= 0) {                  // grab it - drag to move, release to drop
+            m_drag_active = true; m_drag_widget = m_touch_widget;
+            return Action::None;
+        }
+
+        const int idx = MainItemAt(x, y);           // select, or launch if already selected
+        if (idx >= 0 && idx < (int)m_items.size()) {
+            if (idx == m_cursor) return OnButtonMain(Btn::A, out_app_id);
+            m_cursor = idx;
         }
         return Action::None;
     }
@@ -383,7 +491,7 @@ namespace sl::menu::ui {
     }
 
     void Menu::SetStatus(const char *msg) {
-        strncpy(m_status, msg, 127);
+        strncpy(m_status, T(msg), 127);   // localized; unknown messages pass through
         m_status[127] = '\0';
         m_status_tick = armGetSystemTick();
     }
@@ -404,6 +512,8 @@ namespace sl::menu::ui {
             case Screen::ThemeEditor: return OnButtonEditor(b);
             case Screen::ColorPicker: return OnButtonColorPicker(b);
             case Screen::Fonts:       return OnButtonFonts(b);
+            case Screen::Widgets:       return OnButtonWidgets(b);
+            case Screen::WidgetOptions: return OnButtonWidgetOptions(b);
             case Screen::Keyboard:    return OnButtonKeyboard(b);
         }
         return Action::None;
@@ -434,18 +544,37 @@ namespace sl::menu::ui {
         // auto-repeat) at an end wraps around, so holding the stick can't spin
         // the list endlessly.
         const int last = (int)m_items.size() - 1;
-        if (b == Btn::Down) {
-            if (m_cursor < last)       m_cursor++;
-            else if (m_nav_fresh)    { m_cursor = 0;    m_scroll_pos = 0.0f; }
-            return Action::None;
+        auto step     = [&](int d) { m_cursor = std::min(std::max(0, m_cursor + d), last); };
+        auto wrapNext = [&]() {
+            if (m_cursor < last)    m_cursor++;
+            else if (m_nav_fresh) { m_cursor = 0;    m_scroll_pos = 0.0f; }
+        };
+        auto wrapPrev = [&]() {
+            if (m_cursor > 0)       m_cursor--;
+            else if (m_nav_fresh) { m_cursor = last; m_scroll_pos = (float)last; }
+        };
+
+        // Navigation depends on the layout: the text List and the Line cover
+        // carousel are 1-D; the Grid moves in two dimensions by whole rows.
+        if (m_ui_mode == UiMode::Grid) {
+            const int cols = GridColumns();
+            if (b == Btn::Right) { wrapNext(); return Action::None; }
+            if (b == Btn::Left)  { wrapPrev(); return Action::None; }
+            if (b == Btn::Down)  { m_cursor = std::min(m_cursor + cols, last); return Action::None; }
+            if (b == Btn::Up)    { if (m_cursor - cols >= 0) m_cursor -= cols; return Action::None; }
+            if (b == Btn::R) { step(cols * 3);  return Action::None; }
+            if (b == Btn::L) { step(-cols * 3); return Action::None; }
+        } else if (m_ui_mode == UiMode::Line || m_ui_mode == UiMode::Cover) {
+            if (b == Btn::Right || b == Btn::Down) { wrapNext(); return Action::None; }
+            if (b == Btn::Left  || b == Btn::Up)   { wrapPrev(); return Action::None; }
+            if (b == Btn::R) { step(5);  return Action::None; }
+            if (b == Btn::L) { step(-5); return Action::None; }
+        } else { // List (text carousel)
+            if (b == Btn::Down) { wrapNext(); return Action::None; }
+            if (b == Btn::Up)   { wrapPrev(); return Action::None; }
+            if (b == Btn::R) { step(5);  return Action::None; }
+            if (b == Btn::L) { step(-5); return Action::None; }
         }
-        if (b == Btn::Up) {
-            if (m_cursor > 0)          m_cursor--;
-            else if (m_nav_fresh)    { m_cursor = last; m_scroll_pos = (float)last; }
-            return Action::None;
-        }
-        if (b == Btn::R) { m_cursor = std::min(m_cursor + 5, last); return Action::None; }
-        if (b == Btn::L) { m_cursor = std::max(0, m_cursor - 5); return Action::None; }
 
         const MenuItem &it = m_items[m_cursor];
 
@@ -490,15 +619,6 @@ namespace sl::menu::ui {
             if (!m_options.empty()) m_options_open = true;
             return Action::None;
         }
-        // Y sends a message to AuroraChat (when the widget is enabled).
-        if (b == Btn::Y && m_widgets.AuroraEnabled()) {
-            m_kb_purpose = sl::smi::Kb_AuroraSend;
-            m_kb_app = 0;
-            m_kb_text = "";
-            m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
-            m_screen = Screen::Keyboard;
-            return Action::None;
-        }
         if (b == Btn::Plus) return Action::OpenPower;
         return Action::None;
     }
@@ -511,15 +631,15 @@ namespace sl::menu::ui {
         if (m_items.empty()) return;
         const MenuItem &it = m_items[m_cursor];
         if (it.kind == ItemKind::Game) {
-            m_options.push_back({ IsFavourite(it.app_id) ? "Remove from Favourites"
-                                                         : "Add to Favourites", OptFav });
-            m_options.push_back({ "Rename", OptRename });
+            m_options.push_back({ IsFavourite(it.app_id) ? T("Remove from Favourites")
+                                                         : T("Add to Favourites"), OptFav });
+            m_options.push_back({ T("Rename"), OptRename });
             if (m_suspended != 0 && it.app_id == m_suspended)
-                m_options.push_back({ "Close game", OptCloseGame });
+                m_options.push_back({ T("Close game"), OptCloseGame });
         }
-        m_options.push_back({ m_sort == SortMode::Alpha ? "Sort: A - Z"
-                                                        : "Sort: Default", OptSort });
-        m_options.push_back({ "Cancel", OptDismiss });
+        m_options.push_back({ m_sort == SortMode::Alpha ? T("Sort: A - Z")
+                                                        : T("Sort: Default"), OptSort });
+        m_options.push_back({ T("Cancel"), OptDismiss });
     }
 
     Menu::Action Menu::OnButtonOptions(Btn b, u64 &out_app_id) {
@@ -570,13 +690,24 @@ namespace sl::menu::ui {
     }
 
     // ---- Theming submenu (appearance + widgets) ----------------------------
-    namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_Weather, TH_WeatherCity,
-                       TH_Aurora, TH_AuroraUser, TH_AuroraPass, TH_Back, TH_Count }; }
+    namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_UiMode, TH_Widgets,
+                       TH_Back, TH_Count }; }
 
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto cycleAlign = [&](int dir) {
             m_align = (TextAlign)(((int)m_align + dir + 3) % 3);
             SaveSettings();
+        };
+        auto cycleUiMode = [&](int dir) {
+            const int n = (int)UiMode::Count;
+            m_ui_mode = (UiMode)(((int)m_ui_mode + dir + n) % n);
+            m_grid_hl_x = -1.0f; // re-prime the grid animation on (re)entry
+            SaveSettings();
+        };
+        auto openWidgets = [&]() {
+            m_screen = Screen::Widgets;
+            m_widget_cursor = 0;
+            m_sub_scroll = 0;
         };
         if (b == Btn::Down) m_theming_cursor = (m_theming_cursor + 1) % TH_Count;
         if (b == Btn::Up)   m_theming_cursor = (m_theming_cursor + TH_Count - 1) % TH_Count;
@@ -584,42 +715,77 @@ namespace sl::menu::ui {
             if (b == Btn::Right) cycleAlign(+1);
             if (b == Btn::Left)  cycleAlign(-1);
         }
-        if (m_theming_cursor == TH_Weather && (b == Btn::Left || b == Btn::Right))
-            m_widgets.SetWeatherEnabled(!m_widgets.WeatherEnabled());
-        if (m_theming_cursor == TH_Aurora && (b == Btn::Left || b == Btn::Right))
-            m_widgets.SetAuroraEnabled(!m_widgets.AuroraEnabled());
+        if (m_theming_cursor == TH_UiMode) {
+            if (b == Btn::Right) cycleUiMode(+1);
+            if (b == Btn::Left)  cycleUiMode(-1);
+        }
         if (b == Btn::A) {
             switch (m_theming_cursor) {
                 case TH_Themes:  m_screen = Screen::Themes; m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
                 case TH_Fonts:   m_screen = Screen::Fonts;  m_font_cursor = m_font_applied; m_sub_scroll = m_font_cursor; break;
                 case TH_TextPos: cycleAlign(+1); break;
-                case TH_Weather: m_widgets.SetWeatherEnabled(!m_widgets.WeatherEnabled()); break;
-                case TH_WeatherCity:
-                    m_kb_purpose = sl::smi::Kb_WeatherCity;
-                    m_kb_app = 0;
-                    m_kb_text = m_widgets.WeatherCity();
-                    m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
-                    m_screen = Screen::Keyboard;
-                    break;
-                case TH_Aurora:      m_widgets.SetAuroraEnabled(!m_widgets.AuroraEnabled()); break;
-                case TH_AuroraUser:
-                    m_kb_purpose = sl::smi::Kb_AuroraUser;
-                    m_kb_app = 0;
-                    m_kb_text = m_widgets.AuroraUser();
-                    m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
-                    m_screen = Screen::Keyboard;
-                    break;
-                case TH_AuroraPass:
-                    m_kb_purpose = sl::smi::Kb_AuroraPass;
-                    m_kb_app = 0;
-                    m_kb_text = "";
-                    m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
-                    m_screen = Screen::Keyboard;
-                    break;
+                case TH_UiMode:  cycleUiMode(+1); break;
+                case TH_Widgets: openWidgets(); break;
                 case TH_Back:    m_screen = Screen::Main; break;
             }
         }
         if (b == Btn::B) m_screen = Screen::Main;
+        return Action::None;
+    }
+
+    // ---- Widgets submenu: list detected Lua widgets ------------------------
+    Menu::Action Menu::OnButtonWidgets(Btn b) {
+        const int n = m_widgets.Count();
+        if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = TH_Widgets; return Action::None; }
+        if (n == 0) return Action::None;
+        if (b == Btn::Down) m_widget_cursor = (m_widget_cursor + 1) % n;
+        if (b == Btn::Up)   m_widget_cursor = (m_widget_cursor + n - 1) % n;
+        // Left/Right toggles whether the menu loads/shows this widget.
+        if (b == Btn::Left || b == Btn::Right)
+            m_widgets.SetEnabled(m_widget_cursor, !m_widgets.IsEnabled(m_widget_cursor));
+        if (b == Btn::A) {   // A opens the widget's own options
+            m_widget_sel = m_widget_cursor;
+            m_widgetopt_cursor = 0;
+            m_sub_scroll = 0;
+            m_screen = Screen::WidgetOptions;
+        }
+        return Action::None;
+    }
+
+    // ---- Widget options: edit one widget's exposed variables ---------------
+    Menu::Action Menu::OnButtonWidgetOptions(Btn b) {
+        widgets::IWidget *w = m_widgets.At(m_widget_sel);
+        const int n = w ? w->OptionCount() : 0;
+        if (b == Btn::B) {
+            m_screen = Screen::Widgets;
+            m_sub_scroll = m_widget_cursor;
+            return Action::None;
+        }
+        if (!w || n == 0) return Action::None;
+        if (b == Btn::Down) m_widgetopt_cursor = (m_widgetopt_cursor + 1) % n;
+        if (b == Btn::Up)   m_widgetopt_cursor = (m_widgetopt_cursor + n - 1) % n;
+
+        const int oi = m_widgetopt_cursor;
+        const bool isBool = (w->OptionType(oi) == "bool");
+
+        auto toggleBool = [&]() {
+            w->SetOption(oi, w->OptionValue(oi) == "1" ? "0" : "1");
+        };
+
+        if (isBool && (b == Btn::Left || b == Btn::Right)) toggleBool();
+        if (b == Btn::A) {
+            if (isBool) {
+                toggleBool();
+            } else {
+                // Edit a string/int value on the software keyboard.
+                m_kb_purpose = sl::smi::Kb_WidgetOption;
+                m_kb_app  = (u64)m_widget_sel;
+                m_kb_opt  = oi;
+                m_kb_text = w->OptionValue(oi);
+                m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
+                m_screen = Screen::Keyboard;
+            }
+        }
         return Action::None;
     }
 
@@ -955,15 +1121,17 @@ namespace sl::menu::ui {
         m_gfx->Text(FontSize::Small, gfx::Gfx::Width - edge - bw, 16, t.fg, batt);
         m_gfx->Text(FontSize::Small, gfx::Gfx::Width - edge - bw - gap - nw, 16, t.dim, name);
 
+        // Localized when it's a known UI title; user data (theme/widget names)
+        // passes through T() unchanged.
         if (center_title && center_title[0])
-            m_gfx->TextCentered(FontSize::Title, gfx::Gfx::Width / 2, 26, t.title, center_title);
+            m_gfx->TextCentered(FontSize::Title, gfx::Gfx::Width / 2, 26, t.title, T(center_title));
 
         (void)kTopBarH;
     }
 
     void Menu::DrawHint(const char *hint) {
         const Theme &t = m_theme.Current();
-        m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, kHintY, t.dim, hint);
+        m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, kHintY, t.dim, T(hint));
     }
 
     void Menu::DrawCarousel(const std::vector<std::string> &labels,
@@ -1028,6 +1196,8 @@ namespace sl::menu::ui {
             case Screen::ThemeEditor: DrawEditor(); break;
             case Screen::ColorPicker: DrawColorPicker(); break;
             case Screen::Fonts:       DrawFonts();  break;
+            case Screen::Widgets:       DrawWidgets(); break;
+            case Screen::WidgetOptions: DrawWidgetOptions(); break;
             case Screen::Keyboard:    DrawKeyboard(); break;
         }
         if (m_options_open) DrawOptions();
@@ -1039,11 +1209,11 @@ namespace sl::menu::ui {
         const Theme &t = m_theme.Current();
         int cx = gfx::Gfx::Width / 2;
         if (m_oobe_step == 0) {
-            m_gfx->TextCentered(FontSize::Title, cx, 240, t.title, "Welcome to sLaunch");
-            m_gfx->TextCentered(FontSize::Small, cx, 380, t.dim, "Let's get you set up.");
+            m_gfx->TextCentered(FontSize::Title, cx, 240, t.title, T("Welcome to sLaunch"));
+            m_gfx->TextCentered(FontSize::Small, cx, 380, t.dim, T("Let's get you set up."));
             DrawHint("A: Continue");
         } else if (m_oobe_step == 1) {
-            m_gfx->TextCentered(FontSize::Large, cx, 120, t.title, "Choose a Theme");
+            m_gfx->TextCentered(FontSize::Large, cx, 120, t.title, T("Choose a Theme"));
             int top = 260;
             for (int i = 0; i < m_theme.Count(); i++) {
                 bool sel = (i == m_theme_cursor);
@@ -1053,18 +1223,44 @@ namespace sl::menu::ui {
             }
             DrawHint("A: Continue    B: Back");
         } else {
-            m_gfx->TextCentered(FontSize::Title, cx, 260, t.title, "All set!");
-            m_gfx->TextCentered(FontSize::Normal, cx, 350, t.fg, "You're ready to go.");
+            m_gfx->TextCentered(FontSize::Title, cx, 260, t.title, T("All set!"));
+            m_gfx->TextCentered(FontSize::Normal, cx, 350, t.fg, T("You're ready to go."));
             DrawHint("A: Finish");
         }
     }
 
     void Menu::DrawMain() {
+        switch (m_ui_mode) {
+            case UiMode::Line:  DrawMainLine();  break;
+            case UiMode::Grid:  DrawMainGrid();  break;
+            case UiMode::Cover: DrawMainCover(); break;
+            default:            DrawMainList();  break;
+        }
+
+        // Widgets overlay every layout, drawn at their own (draggable) positions.
+        if (m_widgets.AnyEnabled()) {
+            const Theme &t = m_theme.Current();
+            m_widgets.Render(m_gfx, t);
+
+            // Accent outline around the widget being dragged, so it reads as "held".
+            int bx, by, bw, bh;
+            if (m_drag_active && m_widgets.GetBox(m_drag_widget, bx, by, bw, bh) && bh > 0) {
+                const SDL_Color a = t.accent;
+                m_gfx->FillRect(bx - 3, by - 3,  bw + 6, 3,      a);
+                m_gfx->FillRect(bx - 3, by + bh, bw + 6, 3,      a);
+                m_gfx->FillRect(bx - 3, by - 3,  3,      bh + 6, a);
+                m_gfx->FillRect(bx + bw, by - 3, 3,      bh + 6, a);
+            }
+        }
+    }
+
+    void Menu::DrawMainList() {
         const Theme &t = m_theme.Current();
+        m_icons.SetScale(gfx::IconCache::GridScale); // small thumbnails: downscaled
         DrawTopBar(nullptr);
 
         if (m_items.empty()) {
-            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, "No apps found");
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
             DrawHint("+: Power");
             return;
         }
@@ -1113,6 +1309,19 @@ namespace sl::menu::ui {
 
             const int lh = m_gfx->LineHeight(fs);
 
+            // Small icon in the left margin (Left alignment only, so it never
+            // clashes with centred/right-aligned text). Games use their cached
+            // app icon; system entries use their black/white icon.
+            if (m_align == TextAlign::Left) {
+                const bool game = (it.kind == ItemKind::Game);
+                SDL_Texture *ic = game ? m_icons.Get(it.app_id) : SystemIcon(it.kind);
+                if (ic) {
+                    const int isz = std::min(lh, 44);
+                    const Uint8 ia = game ? alpha : (Uint8)(alpha * 195 / 255);
+                    m_gfx->DrawImage(ic, 38, y + (lh - isz) / 2, isz, isz, ia);
+                }
+            }
+
             // The suspended game is highlighted with a faint accent pill and a
             // filled dot so it stands out even when it isn't the selected row.
             if (running) {
@@ -1140,15 +1349,12 @@ namespace sl::menu::ui {
             m_gfx->Text(FontSize::Small, gfx::Gfx::Width - pw - 40, 120, t.dim, pos);
         }
 
-        // Widget cards on the side opposite the list text (so they don't clash).
-        if (m_widgets.AnyEnabled()) {
-            const int cw = 300;
-            const int wx = (m_align == TextAlign::Right) ? 40
-                                                         : gfx::Gfx::Width - cw - 30;
-            m_widgets.Render(m_gfx, t, wx, 150, cw);
-        }
+        DrawStatusHint("A: Select    X: Options");
+    }
 
-        // Fresh status (< 3s) else the control hint.
+    void Menu::DrawStatusHint(const char *hint) {
+        const Theme &t = m_theme.Current();
+        // Fresh status (< 3s) shows above the control hint, then fades out.
         if (m_status[0] != '\0') {
             u64 nowt = armGetSystemTick(), freq = armGetSystemTickFreq();
             if ((nowt - m_status_tick) < 3 * freq)
@@ -1156,7 +1362,320 @@ namespace sl::menu::ui {
             else
                 m_status[0] = '\0';
         }
-        DrawHint("A: Select    X: Options");
+        DrawHint(hint);
+    }
+
+    // One square app/entry tile: the cached icon when present, otherwise a
+    // themed placeholder card carrying the item's initial + name so system
+    // entries (Theming, Album, ...) and icon-less titles still read clearly.
+    // Load (and cache) the black/white icon drawn for a non-game menu entry.
+    // Files live at sdmc:/slaunch/icons/<name>.png; missing files -> nullptr and
+    // the tile falls back to its lettered placeholder.
+    SDL_Texture *Menu::SystemIcon(ItemKind kind) {
+        auto it = m_sys_icons.find((int)kind);
+        if (it != m_sys_icons.end()) return it->second;
+
+        const char *file = nullptr;
+        switch (kind) {
+            case ItemKind::Theming:      file = "theming";      break;
+            case ItemKind::Controllers:  file = "controllers";  break;
+            case ItemKind::Album:        file = "album";        break;
+            case ItemKind::UserPage:     file = "user";         break;
+            case ItemKind::WebBrowser:   file = "browser";      break;
+            case ItemKind::MiiEdit:      file = "mii";          break;
+            case ItemKind::Settings:     file = "settings";     break;
+            case ItemKind::Power:        file = "power";        break;
+            case ItemKind::HomebrewMenu: file = "homebrewmenu"; break;
+            default: break;
+        }
+        SDL_Texture *tex = nullptr;
+        if (file) {
+            char path[64];
+            snprintf(path, sizeof(path), "sdmc:/slaunch/icons/%s.png", file);
+            tex = m_gfx->LoadImage(path);
+            // Force alpha blending: an icon PNG with no alpha channel loads with
+            // blend mode NONE, so our alpha-mod (the grey/transparency) is ignored.
+            if (tex) SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        }
+        m_sys_icons[(int)kind] = tex; // cache even nullptr so we don't re-stat
+        return tex;
+    }
+
+    // Item index under a touch point in Grid mode (mirrors DrawMainGrid), or -1.
+    int Menu::GridItemAt(int px, int py) const {
+        const int cols = GridColumns();
+        const int tile = 120, gapX = 18, gapY = 18, pitch = tile + gapY, topBase = 80;
+        const int gridW = cols * tile + (cols - 1) * gapX;
+        const int startX = (gfx::Gfx::Width - gridW) / 2;
+        const float scrollPx = m_grid_scroll * pitch;
+
+        const int relx = px - startX;
+        if (relx < 0) return -1;
+        const int c = relx / (tile + gapX);
+        if (c >= cols || (relx - c * (tile + gapX)) >= tile) return -1; // in the gap
+
+        const float fy = (float)py - topBase + scrollPx;
+        if (fy < 0) return -1;
+        const int r = (int)(fy / pitch);
+        if ((fy - r * pitch) >= tile) return -1;                       // in the gap
+
+        const int idx = r * cols + c;
+        return (idx >= 0 && idx < (int)m_items.size()) ? idx : -1;
+    }
+
+    // Item index under a touch point in List mode (inverts the carousel), or -1.
+    int Menu::ListItemAt(int /*px*/, int py) const {
+        const int center_y = 360, spacing = 48;
+        const int idx = (int)lroundf(m_scroll_pos + (float)(py - center_y) / spacing);
+        return (idx >= 0 && idx < (int)m_items.size()) ? idx : -1;
+    }
+
+    // Item index under a touch point, dispatched by the active layout.
+    int Menu::MainItemAt(int x, int y) const {
+        const int last = (int)m_items.size() - 1;
+        if (m_ui_mode == UiMode::Grid) return GridItemAt(x, y);
+        if (m_ui_mode == UiMode::Line) {           // horizontal covers, spacing 210
+            const int idx = (int)lroundf(m_scroll_pos +
+                                (float)(x - gfx::Gfx::Width / 2) / 210.0f);
+            return (idx >= 0 && idx <= last) ? idx : -1;
+        }
+        if (m_ui_mode == UiMode::Cover) {          // left/right thirds browse
+            if (x < gfx::Gfx::Width / 3)       return (m_cursor > 0)    ? m_cursor - 1 : m_cursor;
+            if (x > gfx::Gfx::Width * 2 / 3)   return (m_cursor < last) ? m_cursor + 1 : m_cursor;
+            return m_cursor;                       // centre -> tap launches
+        }
+        return ListItemAt(x, y);
+    }
+
+    void Menu::DrawAppTile(const MenuItem &it, int x, int y, int size,
+                           bool selected, Uint8 alpha) {
+        const Theme &t = m_theme.Current();
+
+        const bool isGame = (it.kind == ItemKind::Game);
+        SDL_Texture *icon = isGame ? m_icons.Get(it.app_id) : SystemIcon(it.kind);
+
+        if (icon) {
+            // icon fills the tile; game icons opaque, system icons dimmed to grey
+            const Uint8 ia = isGame ? alpha : (Uint8)(alpha * 195 / 255);
+            m_gfx->DrawImage(icon, x, y, size, size, ia);
+        } else {
+            // no icon file: themed panel + big initial
+            m_gfx->FillRect(x, y, size, size, WithAlpha(t.bg_bottom, (Uint8)(alpha * 180 / 255)));
+            char initial[2] = { it.name.empty() ? '?' : it.name[0], '\0' };
+            if (initial[0] >= 'a' && initial[0] <= 'z') initial[0] -= 32;
+            const int iw = m_gfx->TextWidth(FontSize::Title, initial);
+            m_gfx->Text(FontSize::Title, x + (size - iw) / 2, y + size / 2 - 26,
+                        WithAlpha(t.dim, alpha), initial);
+        }
+
+        m_gfx->FillRect(x, y, size, 3, WithAlpha(t.accent, alpha)); // accent strip, same on every tile
+
+        const bool running = (it.kind == ItemKind::Game &&
+                              it.app_id == m_suspended && m_suspended != 0);
+        if (running)
+            m_gfx->FillRect(x + size - 20, y + 10, 10, 10, WithAlpha(t.accent, alpha));
+        if (it.is_favourite)
+            m_gfx->Text(FontSize::Small, x + 8, y + 6, WithAlpha(t.accent, alpha), "*");
+
+        if (selected) {                             // selection frame - thin edges, don't cover the icon
+            const SDL_Color a = t.accent;
+            m_gfx->FillRect(x - 4,        y - 4,        size + 8, 4,        a);
+            m_gfx->FillRect(x - 4,        y + size,     size + 8, 4,        a);
+            m_gfx->FillRect(x - 4,        y - 4,        4,        size + 8, a);
+            m_gfx->FillRect(x + size,     y - 4,        4,        size + 8, a);
+        }
+    }
+
+    // Line mode: a horizontal cover carousel (EmulationStation / WiiFlow). The
+    // selected cover sits centred and full-size; neighbours shrink and fade with
+    // distance, and the whole strip eases toward the cursor.
+    void Menu::DrawMainLine() {
+        const Theme &t = m_theme.Current();
+        m_icons.SetScale(0);   // few large covers -> original resolution (crisp)
+        DrawTopBar(nullptr);
+
+        if (m_items.empty()) {
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
+            DrawHint("+: Power");
+            return;
+        }
+
+        m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
+        if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
+
+        const int center_x = gfx::Gfx::Width / 2;
+        const int center_y = 348;         // vertical centre of the covers
+        const int bigSize  = 240;         // selected cover edge length
+        const int spacing  = 210;         // horizontal gap between cover centres
+        const int span     = 5;           // covers drawn each side of centre
+
+        auto drawCover = [&](int off) {
+            int idx = (int)lroundf(m_scroll_pos) + off;
+            if (idx < 0 || idx >= (int)m_items.size()) return;
+
+            const float hdist = std::abs((float)idx - m_scroll_pos);
+            const float scale = std::max(0.55f, 1.0f - hdist * 0.18f);
+            const int   size  = (int)(bigSize * scale);
+            const Uint8 alpha = (Uint8)std::max(40.0f, 255.0f - hdist * 46.0f);
+            const int   cx    = center_x + (int)((idx - m_scroll_pos) * spacing);
+            const int   x     = cx - size / 2;
+            const int   y     = center_y - size / 2;
+            if (x + size < -40 || x > gfx::Gfx::Width + 40) return;
+
+            DrawAppTile(m_items[idx], x, y, size, idx == m_cursor, alpha);
+        };
+
+        // Paint each side from the outside in, then the centre cover last, so the
+        // enlarged selection always sits on top of its neighbours.
+        for (int d = span; d >= 1; d--) { drawCover(-d); drawCover(+d); }
+        drawCover(0);
+
+        // Selected title name + position, centred beneath the strip.
+        const MenuItem &sel = m_items[m_cursor];
+        m_gfx->TextCentered(FontSize::Large, center_x, center_y + bigSize / 2 + 26,
+                            t.accent, sel.name.c_str());
+        char pos[28];
+        snprintf(pos, sizeof(pos), "%d / %d", m_cursor + 1, (int)m_items.size());
+        m_gfx->TextCentered(FontSize::Small, center_x, center_y + bigSize / 2 + 74, t.dim, pos);
+
+        DrawStatusHint("A: Select    X: Options");
+    }
+
+    // Grid mode: a page of icon tiles. The page scrolls smoothly (an eased row
+    // offset) and the selection is a highlight frame that glides to the cursor,
+    // so both axes animate instead of snapping. Tiles fade as they cross the top
+    // and bottom edges of the viewport.
+    void Menu::DrawMainGrid() {
+        const Theme &t = m_theme.Current();
+        m_icons.SetScale(gfx::IconCache::GridScale); // many tiles: downscaled for perf
+        DrawTopBar(nullptr);
+
+        if (m_items.empty()) {
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
+            DrawHint("+: Power");
+            return;
+        }
+
+        // 8 columns x 4 visible rows. The name text is hidden, so tiles reach
+        // further down. Keep these in sync with GridItemAt (touch hit-testing).
+        const int cols     = GridColumns();               // 8
+        const int tile     = 120;
+        const int gapX     = 18;
+        const int gapY     = 18;
+        const int pitch    = tile + gapY;                 // vertical distance between rows
+        const int rowsVis  = 4;                           // rows fully on screen
+        const int gridW    = cols * tile + (cols - 1) * gapX;
+        const int startX   = (gfx::Gfx::Width - gridW) / 2;
+        const int topBase  = 80;                          // y of row 0 at scroll 0
+        const int total    = (int)m_items.size();
+        const int rows     = (total + cols - 1) / cols;
+
+        const int cur_row = m_cursor / cols;
+        const int cur_col = m_cursor % cols;
+
+        // --- ease the vertical scroll (keep the selected row one row from the top
+        // when possible, clamped so we never scroll past the last page). ---
+        const float maxScroll = (float)std::max(0, rows - rowsVis);
+        float target = (float)std::min(std::max(0, cur_row - 1), (int)maxScroll);
+        m_grid_scroll += (target - m_grid_scroll) * 0.30f;
+        if (std::abs(target - m_grid_scroll) < 0.01f) m_grid_scroll = target;
+        const float scrollPx = m_grid_scroll * pitch;
+
+        // Viewport band used for edge fading (tiles above/below fade out).
+        const int bandTop = topBase;
+        const int bandBot = topBase + (rowsVis - 1) * pitch + tile;
+
+        // Draw a couple of extra rows beyond the visible band so scrolling reveals
+        // tiles gradually rather than popping them in.
+        const int firstR = std::max(0, (int)std::floor(m_grid_scroll) - 1);
+        const int lastR  = std::min(rows - 1, firstR + rowsVis + 2);
+        for (int r = firstR; r <= lastR; r++) {
+            const int y = topBase + (int)lroundf(r * pitch - scrollPx);
+            Uint8 alpha = 255;
+            if (y < bandTop)               alpha = (Uint8)std::max(0, 255 - (bandTop - y) * 4);
+            else if (y + tile > bandBot)   alpha = (Uint8)std::max(0, 255 - (y + tile - bandBot) * 4);
+            if (alpha <= 8) continue;
+            for (int c = 0; c < cols; c++) {
+                const int idx = r * cols + c;
+                if (idx >= total) break;
+                const int x = startX + c * (tile + gapX);
+                DrawAppTile(m_items[idx], x, y, tile, /*selected*/ false, alpha);
+            }
+        }
+
+        // --- glide the selection highlight toward the selected tile. ---
+        const float tHLx = (float)(startX + cur_col * (tile + gapX));
+        const float tHLy = (float)topBase + (float)cur_row * pitch - scrollPx;
+        if (m_grid_hl_x < 0.0f) {                 // first frame: snap into place
+            m_grid_hl_x = tHLx; m_grid_hl_y = tHLy;
+        } else {
+            m_grid_hl_x += (tHLx - m_grid_hl_x) * 0.35f;
+            m_grid_hl_y += (tHLy - m_grid_hl_y) * 0.35f;
+        }
+        const int hx = (int)lroundf(m_grid_hl_x), hy = (int)lroundf(m_grid_hl_y);
+        const SDL_Color a = t.accent;
+        m_gfx->FillRect(hx - 4,        hy - 4,    tile + 8, 4,        a);
+        m_gfx->FillRect(hx - 4,        hy + tile, tile + 8, 4,        a);
+        m_gfx->FillRect(hx - 4,        hy - 4,    4,        tile + 8, a);
+        m_gfx->FillRect(hx + tile,     hy - 4,    4,        tile + 8, a);
+
+        // Position indicator only (name text hidden by request).
+        char pos[28];
+        snprintf(pos, sizeof(pos), "%d / %d", m_cursor + 1, total);
+        int pw = m_gfx->TextWidth(FontSize::Small, pos);
+        m_gfx->Text(FontSize::Small, gfx::Gfx::Width - pw - 40, 120, t.dim, pos);
+
+        DrawStatusHint("A: Select    X: Options    D-Pad: Move");
+    }
+
+    // Cover mode: a fullscreen single-cover pager. One large cover is centred;
+    // browsing slides it out one screen-width while the next slides in.
+    void Menu::DrawMainCover() {
+        const Theme &t = m_theme.Current();
+        m_icons.SetScale(0);   // one large cover -> original resolution
+        DrawTopBar(nullptr);
+
+        if (m_items.empty()) {
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
+            DrawHint("+: Power");
+            return;
+        }
+
+        m_scroll_pos += (m_cursor - m_scroll_pos) * 0.28f;
+        if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
+
+        const int cx = gfx::Gfx::Width / 2;
+        const int cy = 344;
+        const int size = 420;
+        const int pageW = gfx::Gfx::Width;   // one cover per screen width
+        const int total = (int)m_items.size();
+
+        // The centred cover plus its immediate neighbours (only visible mid-slide).
+        for (int off = -1; off <= 1; off++) {
+            int idx = (int)lroundf(m_scroll_pos) + off;
+            if (idx < 0 || idx >= total) continue;
+            const int x = cx + (int)((idx - m_scroll_pos) * pageW);
+            if (x < -size || x > gfx::Gfx::Width + size) continue;
+            const float d = std::abs((float)idx - m_scroll_pos);
+            const Uint8 a = (Uint8)std::max(60.0f, 255.0f - d * 160.0f);
+            DrawAppTile(m_items[idx], x - size / 2, cy - size / 2, size, false, a);
+        }
+
+        // Left/right hint chevrons.
+        if (total > 1) {
+            m_gfx->Text(FontSize::Title, 44, cy - 26, WithAlpha(t.dim, 150), "<");
+            const int rw = m_gfx->TextWidth(FontSize::Title, ">");
+            m_gfx->Text(FontSize::Title, gfx::Gfx::Width - 44 - rw, cy - 26, WithAlpha(t.dim, 150), ">");
+        }
+
+        // Name + position of the centred item.
+        const MenuItem &sel = m_items[m_cursor];
+        m_gfx->TextCentered(FontSize::Large, cx, cy + size / 2 + 22, t.accent, sel.name.c_str());
+        char pos[28];
+        snprintf(pos, sizeof(pos), "%d / %d", m_cursor + 1, total);
+        m_gfx->TextCentered(FontSize::Small, cx, cy + size / 2 + 68, t.dim, pos);
+
+        DrawStatusHint("A: Launch    X: Options    Left/Right: Browse");
     }
 
     void Menu::DrawOptions() {
@@ -1187,21 +1706,74 @@ namespace sl::menu::ui {
 
     void Menu::DrawTheming() {
         DrawTopBar("Theming");
-        const char *aligns[3] = { "Left", "Center", "Right" };
+        const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
+        const char *modes[4]  = { T("List"), T("Line"), T("Grid"), T("Cover") };
         std::vector<std::string> labels = {
-            "Themes", "Fonts", "Text position", "Weather widget", "Weather location",
-            "AuroraChat", "AuroraChat user", "AuroraChat password", "Back"
+            T("Themes"), T("Fonts"), T("Text position"), T("UI mode"), T("Widgets"), T("Back")
         };
         std::vector<std::string> values(labels.size());
         values[TH_TextPos]     = aligns[(int)m_align];
-        values[TH_Weather]     = m_widgets.WeatherEnabled() ? "On" : "Off";
-        values[TH_WeatherCity] = m_widgets.WeatherCity()[0] ? m_widgets.WeatherCity() : "(not set)";
-        values[TH_Aurora]      = m_widgets.AuroraEnabled() ? "On" : "Off";
-        values[TH_AuroraUser]  = m_widgets.AuroraUser()[0] ? m_widgets.AuroraUser() : "(not set)";
-        values[TH_AuroraPass]  = m_widgets.AuroraHasPass() ? "********" : "(not set)";
+        values[TH_UiMode]      = modes[(int)m_ui_mode];
+        {
+            char c[32];
+            snprintf(c, sizeof(c), "%d %s", m_widgets.Count(), T("found"));
+            values[TH_Widgets] = c;
+        }
 
         DrawCarousel(labels, values, m_theming_cursor, m_sub_scroll);
         DrawHint("Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back");
+    }
+
+    // ---- Widgets submenu drawing -------------------------------------------
+    void Menu::DrawWidgets() {
+        const Theme &t = m_theme.Current();
+        DrawTopBar("Widgets");
+
+        const int n = m_widgets.Count();
+        if (n == 0) {
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 320, t.dim,
+                                T("No widgets found"));
+            m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, 372, t.dim,
+                                T("Drop .lua widgets in sdmc:/slaunch/widgets/"));
+            DrawHint("B: Back");
+            return;
+        }
+
+        std::vector<std::string> labels, values;
+        for (int i = 0; i < n; i++) {
+            widgets::IWidget *w = m_widgets.At(i);
+            labels.push_back(w ? w->Name() : "Widget");
+            values.push_back(m_widgets.IsEnabled(i) ? T("On") : T("Off"));
+        }
+        DrawCarousel(labels, values, m_widget_cursor, m_sub_scroll);
+        DrawHint("Left/Right: On/Off   A: Configure   B: Back");
+    }
+
+    void Menu::DrawWidgetOptions() {
+        const Theme &t = m_theme.Current();
+        widgets::IWidget *w = m_widgets.At(m_widget_sel);
+        DrawTopBar(w ? w->Name().c_str() : "Widget");
+
+        const int n = w ? w->OptionCount() : 0;
+        if (n == 0) {
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim,
+                                T("This widget has no options"));
+            DrawHint("B: Back");
+            return;
+        }
+
+        std::vector<std::string> labels, values;
+        for (int i = 0; i < n; i++) {
+            labels.push_back(w->OptionLabel(i));
+            if (w->OptionType(i) == "bool") {
+                values.push_back(w->OptionValue(i) == "1" ? T("On") : T("Off"));
+            } else {
+                std::string v = w->OptionValue(i);
+                values.push_back(v.empty() ? T("(not set)") : v);
+            }
+        }
+        DrawCarousel(labels, values, m_widgetopt_cursor, m_sub_scroll);
+        DrawHint("A: Edit/Toggle   Left/Right: Toggle   B: Back");
     }
 
     void Menu::DrawThemes() {
@@ -1209,9 +1781,9 @@ namespace sl::menu::ui {
         std::vector<std::string> labels, values;
         for (int i = 0; i < m_theme.Count(); i++) {
             labels.push_back(m_theme.At(i).name);
-            values.push_back(i == m_theme.CurrentIndex() ? "current" : "");
+            values.push_back(i == m_theme.CurrentIndex() ? T("current") : "");
         }
-        labels.push_back("+ New custom theme");
+        labels.push_back(T("+ New custom theme"));
         values.push_back("");
         DrawCarousel(labels, values, m_theme_cursor, m_sub_scroll);
 
@@ -1230,8 +1802,9 @@ namespace sl::menu::ui {
         DrawTopBar(c.name);
 
         const char *labels[EF_Count] = {
-            "Background", "Gradient top", "Gradient bottom", "Text",
-            "Accent", "Secondary", "Title", "Rename theme", "Save & Apply", "Delete theme"
+            T("Background"), T("Gradient top"), T("Gradient bottom"), T("Text"),
+            T("Accent"), T("Secondary"), T("Title"), T("Rename theme"),
+            T("Save & Apply"), T("Delete theme")
         };
 
         const int lx = 200, vx = 720, rowH = 50, top = 132;
@@ -1250,7 +1823,7 @@ namespace sl::menu::ui {
                 m_gfx->Text(FontSize::Small, vx + 78, y + 4, t.dim, hex);
             } else if (i == EF_Background) {
                 const char *slash = c.wallpaper[0] ? strrchr(c.wallpaper, '/') : nullptr;
-                const char *bg = (c.wallpaper[0] == '\0') ? "Gradient"
+                const char *bg = (c.wallpaper[0] == '\0') ? T("Gradient")
                                 : (slash ? slash + 1 : c.wallpaper);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, t.dim, "<");
                 m_gfx->Text(FontSize::Normal, vx, y, t.fg, bg);
@@ -1279,7 +1852,7 @@ namespace sl::menu::ui {
                         accent{90, 200, 255, 255}, track{50, 50, 58, 255};
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{12, 12, 16, 255});
 
-        m_gfx->TextCentered(FontSize::Title, cx, 70, white, "Color");
+        m_gfx->TextCentered(FontSize::Title, cx, 70, white, T("Color"));
 
         // Live swatch + hex.
         m_gfx->FillRect(cx - 130, 150, 260, 110, *m_pick_target);
@@ -1305,7 +1878,7 @@ namespace sl::menu::ui {
         }
 
         m_gfx->TextCentered(FontSize::Small, cx, kHintY, dim,
-            "Up/Down: Channel   Left/Right: Adjust   L/R: coarse   A: Done   B: Cancel");
+            "A: Done   B: Cancel");
     }
 
     void Menu::DrawFonts() {
@@ -1315,7 +1888,7 @@ namespace sl::menu::ui {
         std::vector<std::string> labels, values;
         for (int i = 0; i < (int)m_font_names.size(); i++) {
             labels.push_back(m_font_names[i]);
-            values.push_back(i == m_font_applied ? "applied" : "");
+            values.push_back(i == m_font_applied ? T("applied") : "");
         }
         DrawCarousel(labels, values, m_font_cursor, m_sub_scroll);
 
@@ -1337,7 +1910,7 @@ namespace sl::menu::ui {
         // Current text in an input box.
         m_gfx->FillRect(cx - 400, 130, 800, 60, WithAlpha(t.fg, 24));
         m_gfx->FillRect(cx - 400, 186, 800, 3, t.accent);
-        std::string shown = m_kb_text.empty() ? "(empty)" : m_kb_text;
+        std::string shown = m_kb_text.empty() ? T("(empty)") : m_kb_text;
         m_gfx->Text(FontSize::Large, cx - 384, 142,
                     m_kb_text.empty() ? t.dim : t.fg, shown.c_str());
 
@@ -1368,7 +1941,7 @@ namespace sl::menu::ui {
             SDL_Color fill = (c == 0 && m_kb_upper) ? t.accent : t.fg;
             m_gfx->FillRect(kx, y - 4, sw, rowH - 12, WithAlpha(fill, sel ? 90 : 26));
             m_gfx->TextCentered(FontSize::Normal, kx + sw / 2, y + 4,
-                                sel ? t.accent : t.fg, kKbSpecial[c]);
+                                sel ? t.accent : t.fg, T(kKbSpecial[c]));
         }
 
         DrawHint("D-Pad: Move   A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel");
@@ -1384,8 +1957,8 @@ namespace sl::menu::ui {
         m_gfx->FillRect(bx, by, bw, bh, WithAlpha(t.bg_bottom, 245));
         m_gfx->FillRect(bx, by, bw, 4, t.accent);
 
-        m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title, "Close running application?");
-        const char *opts[2] = { "Yes", "No" };
+        m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title, T("Close running application?"));
+        const char *opts[2] = { T("Yes"), T("No") };
         for (int i = 0; i < 2; i++) {
             bool sel = (i == m_dialog_cursor);
             int y = by + 120 + i * 48;

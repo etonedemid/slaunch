@@ -1,0 +1,129 @@
+# sLaunch locale template.
+#
+# English is built in and is always the fallback: any string missing here (or a
+# missing file entirely) simply renders in English. To translate the menu:
+#   1. Copy this file to  <code>.txt  where <code> is your language code, e.g.
+#      fr.txt, de.txt, es.txt, ja.txt, pt-BR.txt (region form is tried first,
+#      then the two-letter form).
+#   2. Put it in  sdmc:/slaunch/lang/  on the SD card.
+#   3. Replace the text on the RIGHT of each '=' with your translation. Leave the
+#      LEFT side (the English key) exactly as it is.
+# Lines starting with '#' and blank lines are ignored. The console's system
+# language selects which file is loaded.
+
+# --- main menu shortcuts ---
+Theming=Theming
+Controllers=Controllers
+Album=Album
+User Page=User Page
+Web Browser=Web Browser
+Mii Edit=Mii Edit
+Settings=Settings
+Power=Power
+Homebrew menu=Homebrew menu
+No apps found=No apps found
+
+# --- theming submenu ---
+Themes=Themes
+Fonts=Fonts
+Text position=Text position
+UI mode=UI mode
+Widgets=Widgets
+Back=Back
+Left=Left
+Center=Center
+Right=Right
+List=List
+Line=Line
+Grid=Grid
+Cover=Cover
+found=found
+
+# --- widgets submenu ---
+No widgets found=No widgets found
+Drop .lua widgets in sdmc:/slaunch/widgets/=Drop .lua widgets in sdmc:/slaunch/widgets/
+options=options
+no options=no options
+This widget has no options=This widget has no options
+On=On
+Off=Off
+(not set)=(not set)
+
+# --- themes + editor ---
+current=current
++ New custom theme=+ New custom theme
+Background=Background
+Gradient top=Gradient top
+Gradient bottom=Gradient bottom
+Text=Text
+Accent=Accent
+Secondary=Secondary
+Title=Title
+Rename theme=Rename theme
+Save & Apply=Save & Apply
+Delete theme=Delete theme
+Gradient=Gradient
+Color=Color
+applied=applied
+
+# --- first-run (OOBE) ---
+Welcome to sLaunch=Welcome to sLaunch
+Let's get you set up.=Let's get you set up.
+Choose a Theme=Choose a Theme
+All set!=All set!
+You're ready to go.=You're ready to go.
+
+# --- dialog + options overlay ---
+Close running application?=Close running application?
+Yes=Yes
+No=No
+Remove from Favourites=Remove from Favourites
+Add to Favourites=Add to Favourites
+Rename=Rename
+Close game=Close game
+Sort: A - Z=Sort: A - Z
+Sort: Default=Sort: Default
+Cancel=Cancel
+
+# --- on-screen keyboard ---
+(empty)=(empty)
+Shift=Shift
+Space=Space
+Done=Done
+
+# --- status messages ---
+Saved=Saved
+Theme renamed=Theme renamed
+Renamed=Renamed
+Dragging widget - double-tap to place=Dragging widget - double-tap to place
+Widget placed=Widget placed
+Added to Favourites=Added to Favourites
+Removed from Favourites=Removed from Favourites
+Theme applied=Theme applied
+Theme saved=Theme saved
+Theme deleted=Theme deleted
+Font applied=Font applied
+
+# --- control hints ---
+A: Continue=A: Continue
+A: Continue    B: Back=A: Continue    B: Back
+A: Finish=A: Finish
++: Power=+: Power
+A: Select    X: Options=A: Select    X: Options
+A: Select    X: Options    D-Pad: Move=A: Select    X: Options    D-Pad: Move
+A: Select    X: Options    Left/Right: Browse=A: Select    X: Options    Left/Right: Browse
+Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back=Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back
+B: Back=B: Back
+Up/Down: Select   A: Configure   B: Back=Up/Down: Select   A: Configure   B: Back
+A: Edit/Toggle   Left/Right: Toggle   B: Back=A: Edit/Toggle   Left/Right: Toggle   B: Back
+A: Create new theme    B: Back=A: Create new theme    B: Back
+A: Apply    Y: Edit    B: Back=A: Apply    Y: Edit    B: Back
+A: Apply    B: Back=A: Apply    B: Back
+Up/Down: Row    Left/Right: Change background    B: Back=Up/Down: Row    Left/Right: Change background    B: Back
+Up/Down: Row    A: Save & apply    B: Back=Up/Down: Row    A: Save & apply    B: Back
+Up/Down: Row    A: Rename    B: Back=Up/Down: Row    A: Rename    B: Back
+Up/Down: Row    A: Delete this theme    B: Back=Up/Down: Row    A: Delete this theme    B: Back
+Up/Down: Row    A: Edit color    B: Back=Up/Down: Row    A: Edit color    B: Back
+Up/Down: Preview    A: Apply    B: Back=Up/Down: Preview    A: Apply    B: Back
+D-Pad: Move   A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel=D-Pad: Move   A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel
+Up/Down: Choose    A: Confirm    B: Cancel=Up/Down: Choose    A: Confirm    B: Cancel

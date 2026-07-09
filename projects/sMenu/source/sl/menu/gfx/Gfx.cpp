@@ -188,8 +188,36 @@ namespace sl::menu::gfx {
         return IMG_LoadTexture(m_renderer, path);
     }
 
+    SDL_Texture *Gfx::LoadImageScaled(const char *path, int w, int h) {
+        SDL_Texture *src = IMG_LoadTexture(m_renderer, path);
+        if (!src) return nullptr;
+
+        SDL_Texture *dst = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_RGBA8888,
+                                             SDL_TEXTUREACCESS_TARGET, w, h);
+        if (!dst) return src;   // no render-target support: keep the full-size one
+
+        SDL_SetTextureBlendMode(dst, SDL_BLENDMODE_BLEND);
+        SDL_Texture *prev = SDL_GetRenderTarget(m_renderer);
+        SDL_SetRenderTarget(m_renderer, dst);
+        SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 0);
+        SDL_RenderClear(m_renderer);
+        SDL_RenderCopy(m_renderer, src, nullptr, nullptr); // downscale once
+        SDL_SetRenderTarget(m_renderer, prev);
+
+        SDL_DestroyTexture(src);
+        return dst;
+    }
+
     void Gfx::FreeImage(SDL_Texture *tex) {
         if (tex) SDL_DestroyTexture(tex);
+    }
+
+    void Gfx::DrawImage(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha) {
+        if (!tex || w <= 0 || h <= 0) return;
+        SDL_Rect dst { x, y, w, h };
+        SDL_SetTextureAlphaMod(tex, alpha);
+        SDL_RenderCopy(m_renderer, tex, nullptr, &dst);
+        SDL_SetTextureAlphaMod(tex, 255); // don't leak the mod to other blits
     }
 
     void Gfx::DrawCover(SDL_Texture *tex, Uint8 alpha) {

@@ -8,6 +8,9 @@ namespace sl::sys::app {
     bool              g_AppRunning  = false;
     bool              g_AppHasFocus = false;
 
+    // Tick when the current app was launched, for the suspend-stabilization guard.
+    static u64        g_LaunchTick  = 0;
+
     // Build the 0x88-byte preselected-user launch parameter expected by games.
     // Layout (from qlaunch / uLaunch): magic(4) + is_user_selected(1) + pad(3) +
     // uid(16) + padding. The is_user_selected byte MUST be 1 -- leaving it 0
@@ -61,7 +64,16 @@ namespace sl::sys::app {
         g_AppId       = app_id;
         g_AppRunning  = true;
         g_AppHasFocus = true;
+        g_LaunchTick  = armGetSystemTick();
         return 0;
+    }
+
+    bool CanSuspend() {
+        if (!g_AppRunning) return false;
+        // Give the app ~1.5s to finish launching and take the foreground before a
+        // HOME press is allowed to suspend it (otherwise am faults).
+        const u64 settle = armGetSystemTickFreq() * 3 / 2;
+        return (armGetSystemTick() - g_LaunchTick) >= settle;
     }
 
     Result Resume() {

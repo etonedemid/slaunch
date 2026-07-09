@@ -31,6 +31,10 @@ namespace sl::menu::smi {
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenNetConnect);
     }
 
+    inline Result OpenSystemSettings() {
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenSystemSettings);
+    }
+
     inline Result OpenMiiEdit() {
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenMiiEdit);
     }

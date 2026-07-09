@@ -32,6 +32,7 @@ namespace sl::smi {
         RestartMenu,
         ReloadAppList,
         TerminateMenu,
+        OpenSystemSettings,    // full System Settings ("set" applet, id 0x16)
     };
 
     // Events: sSystem → sMenu (async)
@@ -84,11 +85,12 @@ namespace sl::smi {
     // are shared by both sides.
     enum KbPurpose : u32 {
         Kb_RenameGame = 0,
-        Kb_WeatherCity,
-        Kb_AuroraUser,
-        Kb_AuroraPass,
+        Kb_WeatherCity,   // legacy (hardcoded weather widget removed; kept for enum stability)
+        Kb_AuroraUser,    // legacy
+        Kb_AuroraPass,    // legacy
         Kb_ThemeName,
-        Kb_AuroraSend,
+        Kb_AuroraSend,    // legacy
+        Kb_WidgetOption,  // editing a Lua widget's exposed string option
     };
     constexpr const char *KbRequestPath = "sdmc:/slaunch/config/kb_req.txt";
     constexpr const char *KbResultPath  = "sdmc:/slaunch/config/kb_result.txt";

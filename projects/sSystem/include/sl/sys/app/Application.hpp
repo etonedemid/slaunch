@@ -30,4 +30,9 @@ namespace sl::sys::app {
     // Take foreground back from the application (bring menu up)
     Result FocusSystem();
 
+    // True once a freshly launched app has had time to acquire the foreground.
+    // Suspending (HOME) before this races the app's launch/foreground handshake
+    // and faults am, so the daemon must wait for it.
+    bool   CanSuspend();
+
 } // namespace sl::sys::app

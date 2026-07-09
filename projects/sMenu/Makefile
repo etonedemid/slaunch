@@ -43,7 +43,7 @@ ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
 # --- Lua / sol2 configuration ---------------------------------------------------
 # 1. Switch newlib lacks BSD _longjmp / _setjmp; map to standard variants.
-# 2. Do NOT define LUA_USE_DLOPEN=0 — defined() checks are true even when 0.
+# 2. Do NOT define LUA_USE_DLOPEN=0 - defined() checks are true even when 0.
 # 3. Exclude standalone interpreter files (lua.c, luac.c) from the library build.
 # 4. Force LUAI_MAXSTACK if llimits.h is not being included properly.
 # 5. SOL_NO_EXCEPTIONS is mandatory because we compile with -fno-exceptions.
