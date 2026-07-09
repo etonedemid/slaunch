@@ -3,9 +3,11 @@
 #include <sl/os/Applications.hpp>
 #include <sl/menu/ui/Theme.hpp>
 #include <sl/menu/gfx/Gfx.hpp>
+#include <sl/menu/gfx/IconCache.hpp>
 #include <sl/menu/widgets/Widgets.hpp>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 // SDL2 menu for sLaunch.
 // Screen state machine: Oobe -> Main / Themes / ThemeEditor, with an optional
@@ -23,6 +25,12 @@ namespace sl::menu::ui {
 
     // Horizontal alignment of the main list text.
     enum class TextAlign { Left, Center, Right };
+
+    // Main-screen layout. List is the original text carousel; Line is a
+    // horizontal cover carousel (EmulationStation / WiiFlow style); Grid is a
+    // page of icon tiles; Cover is a fullscreen single-cover pager. Line, Grid
+    // and Cover render the cached app icons.
+    enum class UiMode { List, Line, Grid, Cover, Count };
 
     struct MenuItem {
         ItemKind    kind;
@@ -61,6 +69,12 @@ namespace sl::menu::ui {
         // Handle one logical button press. Returns an action (+ app id for launch).
         Action OnButton(Btn b, u64 &out_app_id);
 
+        // Touch input from the host loop. phase: 0 = down, 1 = move, 2 = up.
+        // Drives keyboard/color-picker taps, long-press drag for home widgets,
+        // and double-tap-to-launch on the main screen. Returns an action (e.g.
+        // LaunchApp) the same way OnButton does.
+        Action OnTouch(int phase, int x, int y, u64 &out_app_id);
+
         // Draw the current frame.
         void Render();
 
@@ -78,7 +92,8 @@ namespace sl::menu::ui {
         bool WantsExit() const { return m_want_exit; }
 
     private:
-        enum class Screen { Oobe, Main, Theming, Themes, ThemeEditor, ColorPicker, Fonts, Keyboard };
+        enum class Screen { Oobe, Main, Theming, Themes, ThemeEditor, ColorPicker,
+                            Fonts, Widgets, WidgetOptions, Keyboard };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame };
 
         void RebuildItems();
@@ -91,8 +106,13 @@ namespace sl::menu::ui {
         Action OnButtonEditor(Btn b);
         Action OnButtonColorPicker(Btn b);
         Action OnButtonFonts(Btn b);
+        Action OnButtonWidgets(Btn b);
+        Action OnButtonWidgetOptions(Btn b);
         Action OnButtonKeyboard(Btn b);
         void DrawKeyboard();
+        // Which on-screen key is at (x,y)? Fills row/col to match DrawKeyboard's
+        // layout (row kKbSpecialRow is the special row). Returns false on a miss.
+        bool KbKeyAt(int x, int y, int &row, int &col) const;
         Action OnButtonDialog(Btn b, u64 &out_app_id);
 
         // Theme editor helpers.
@@ -124,6 +144,7 @@ namespace sl::menu::ui {
         void DrawBackground();
         void DrawTopBar(const char *center_title);
         void DrawHint(const char *hint);
+        void DrawStatusHint(const char *hint); // fresh status line (if any) + hint
         // Shared main-menu-style carousel used by the sub-screens too. Each row
         // is a label plus an optional right-hand value string.
         void DrawCarousel(const std::vector<std::string> &labels,
@@ -131,12 +152,29 @@ namespace sl::menu::ui {
                           int cursor, float &scroll_pos);
         void DrawOobe();
         void DrawMain();
+        void DrawMainList();        // original text carousel
+        void DrawMainLine();        // horizontal cover carousel (ES / WiiFlow)
+        void DrawMainGrid();        // page of icon tiles
+        void DrawMainCover();       // fullscreen single-cover pager
+        // Draw one app/entry as a square tile: cached icon if present, else a
+        // themed placeholder with the name. Used by the Line and Grid modes.
+        void DrawAppTile(const MenuItem &it, int x, int y, int size,
+                         bool selected, Uint8 alpha);
+        int  GridColumns() const { return 8; }  // tiles per row in Grid mode
+        // Item index under a touch point (or -1), for touch-to-select/launch.
+        int  MainItemAt(int x, int y) const;   // dispatches by UI mode
+        int  GridItemAt(int x, int y) const;
+        int  ListItemAt(int x, int y) const;
+        // Load (cached) the black/white icon for a non-game menu entry, or null.
+        SDL_Texture *SystemIcon(ItemKind kind);
         void DrawOptions();
         void DrawTheming();
         void DrawThemes();
         void DrawEditor();
         void DrawColorPicker();
         void DrawFonts();
+        void DrawWidgets();         // list detected Lua widgets
+        void DrawWidgetOptions();   // exposed options of the selected widget
         void DrawDialog();
 
         // Font selection
@@ -167,15 +205,18 @@ namespace sl::menu::ui {
 
         // Appearance: main-list text alignment + user-renamed games.
         TextAlign m_align = TextAlign::Left;
+        UiMode    m_ui_mode = UiMode::List;   // main-screen layout
+        gfx::IconCache m_icons;               // app icon texture cache (Line/Grid)
+        std::unordered_map<int, SDL_Texture*> m_sys_icons; // Icons
         std::vector<std::pair<u64, std::string>> m_names; // app_id -> custom name
         int  m_theming_cursor = 0;
         bool m_jumped_to_suspended = false;
         bool m_want_exit = false;   // asked the daemon to show the keyboard
 
-        // Home-screen network widgets (weather, chat).
+        // Home screen widgets
         widgets::Widgets m_widgets;
 
-        // X "Options" overlay for the selected item.
+        // Options overlay for the selected item.
         struct OptionEntry { std::string label; int action; };
         std::vector<OptionEntry> m_options;
         bool m_options_open   = false;
@@ -186,15 +227,33 @@ namespace sl::menu::ui {
         float m_scroll_pos = 0.0f; // animated carousel position, eases to m_cursor
         float m_sub_scroll = 0.0f; // animated position for the sub-screen carousels
         bool  m_nav_fresh  = true; // is the current directional press fresh?
+
+        // Grid anim
+        float m_grid_scroll = 0.0f;
+        float m_grid_hl_x   = -1.0f;
+        float m_grid_hl_y   = 0.0f;
         int m_theme_cursor   = 0;
         int m_edit_cursor    = 0;
         int m_editing_theme  = -1; // global index of the custom theme being edited
         int m_oobe_step      = 0;
 
+        // Widgets submenu
+        int m_widget_cursor  = 0;  // cursor in the widget list
+        int m_widget_sel     = 0;  // widget whose options are being edited
+        int m_widgetopt_cursor = 0;
+
         // Soft-keyboard state.
         int  m_kb_purpose = 0;   // sl::smi::Kb_* constants
-        u64  m_kb_app     = 0;   // context (app_id or theme index)
+        u64  m_kb_app     = 0;   // context (app_id, theme index, or widget index)
+        int  m_kb_opt     = 0;   // widget option index (Kb_WidgetOption)
         std::string m_kb_text; // current input buffer
+
+        // touch: a touch on a widget grabs it for dragging
+        bool m_drag_active   = false;
+        int  m_drag_widget   = -1;
+        bool m_touching      = false;
+        int  m_touch_lx = 0, m_touch_ly = 0;   // last touch position
+        int  m_touch_widget  = -1;             // widget under the touch, or -1
         int  m_kb_row    = 0;  // 0-3 char rows, 4 special
         int  m_kb_col    = 0;
         bool m_kb_upper  = false;

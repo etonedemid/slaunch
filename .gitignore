@@ -19,3 +19,4 @@ slaunch.zip
 *.npdm
 assets/fonts/Wingdings.ttf
 projects/sInstaller/romfs/payload
+graphify-out

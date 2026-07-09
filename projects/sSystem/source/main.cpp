@@ -34,6 +34,7 @@ static bool       g_Running      = true;
 enum class Pending {
     None, LaunchApp, ResumeApp, OpenAlbum, OpenUserPage, OpenNetConnect,
     OpenMiiEdit, OpenWebBrowser, OpenControllers, OpenHomebrewMenu,
+    OpenSystemSettings,
 };
 static Pending g_Pending      = Pending::None;
 static u64     g_PendingAppId = 0;
@@ -85,6 +86,7 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
             break;
         case SystemMessage::OpenAlbum:        g_Pending = Pending::OpenAlbum;        break;
         case SystemMessage::OpenNetConnect:   g_Pending = Pending::OpenNetConnect;   break;
+        case SystemMessage::OpenSystemSettings: g_Pending = Pending::OpenSystemSettings; break;
         case SystemMessage::OpenMiiEdit:      g_Pending = Pending::OpenMiiEdit;      break;
         case SystemMessage::OpenUserPage:     g_Pending = Pending::OpenUserPage;     break;
         case SystemMessage::OpenWebBrowser:   g_Pending = Pending::OpenWebBrowser;   break;
@@ -149,6 +151,16 @@ static void RunPendingAction() {
             // NetConnect: version 1, 4-byte type = HomeMenu(1).
             const u32 type = 1;
             la::OpenSystemApplet(AppletId_LibraryAppletNetConnect, 1, &type, sizeof(type));
+            LaunchMenu();
+            break;
+        }
+        case Pending::OpenSystemSettings: {
+            // Full System Settings via the "set" applet (id 0x16). On retail this
+            // applet (010000000000100E) is NOT installed -- settings are built
+            // into stock qlaunch, which we replace -- so the launch just errors
+            // out and we fall back to the menu. Works on dev/emulator units.
+            Result rc = la::OpenSystemApplet(AppletId_LibraryAppletSet, 1);
+            DaemonLog("settings: OpenSystemApplet(set) rc=0x%x", rc);
             LaunchMenu();
             break;
         }
@@ -251,6 +263,13 @@ static void HandleSleep() {
 //    a suspended game -> close the menu and resume the game
 static void HandleHomeButton() {
     if (app::g_AppRunning && app::g_AppHasFocus) {
+        // Ignore HOME while the app is still coming up: suspending mid-launch
+        // races the foreground handshake and faults am (crash). The user can
+        // press HOME again a moment later.
+        if (!app::CanSuspend()) {
+            DaemonLog("home: ignored (app still launching)");
+            return;
+        }
         // In a game: suspend (do NOT terminate) and bring the menu up over it.
         app::FocusSystem();
         if (!la::IsMenuAlive())

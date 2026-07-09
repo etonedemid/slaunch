@@ -8,7 +8,10 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>
 #include <vector>
+#include <string>
+#include <unordered_map>
 #include <sys/stat.h>
 
 #include <sl/smi/Protocol.hpp>
@@ -86,6 +89,63 @@ static Btn TranslateButton(int b) {
 }
 
 // ---------------------------------------------------------------------------
+// Icon cache (uLaunch-style): the JPEG embedded in a title's control data is
+// written to slaunch/cache/icons/<id>.jpg so the menu's icon UI modes can load
+// it as a texture without re-querying NS every frame. "Fetch and compare": we
+// only rewrite when the file is missing or its size differs from the icon NS
+// just returned, so an unchanged title costs one stat() and no write.
+static constexpr const char *IconCacheDir = "sdmc:/slaunch/cache/icons";
+
+static void CacheAppIcon(u64 app_id, const NsApplicationControlData &ctrl, u64 ctrl_size) {
+    const size_t icon_len = os::IconSize(ctrl_size);
+    if (icon_len == 0) return; // icon-less title
+
+    char path[64];
+    snprintf(path, sizeof(path), "%s/%016llX.jpg", IconCacheDir,
+             (unsigned long long)app_id);
+
+    struct stat st;
+    if (stat(path, &st) == 0 && (size_t)st.st_size == icon_len)
+        return; // already cached and unchanged
+
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return;
+    fwrite(ctrl.icon, 1, icon_len, fp);
+    fclose(fp);
+}
+
+// Title-name cache (app_id -> display name). nsGetApplicationControlData is a
+// synchronous per-title read that dominates menu start-up when a big library is
+// installed; caching the resolved names lets a repeat launch skip it for every
+// title we have already seen. New/uncached titles are the only ones that hit NS.
+static constexpr const char *NameCachePath = "sdmc:/slaunch/cache/names.txt";
+
+static std::unordered_map<u64, std::string> LoadNameCache() {
+    std::unordered_map<u64, std::string> m;
+    FILE *fp = fopen(NameCachePath, "r");
+    if (!fp) return m;
+    char line[320];
+    while (fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        char *eq = strchr(line, '=');       // split on the FIRST '=' (names may contain '=')
+        if (!eq) continue;
+        *eq = '\0';
+        u64 id = strtoull(line, nullptr, 16);
+        if (id != 0) m[id] = eq + 1;
+    }
+    fclose(fp);
+    return m;
+}
+
+static void SaveNameCache(const std::vector<std::pair<u64, std::string>> &entries) {
+    FILE *fp = fopen(NameCachePath, "w");
+    if (!fp) return;
+    for (auto &e : entries)
+        fprintf(fp, "%016llX=%s\n", (unsigned long long)e.first, e.second.c_str());
+    fclose(fp);
+}
+
+// ---------------------------------------------------------------------------
 static void ReloadApps() {
     std::vector<NsApplicationRecord> records;
     if (R_FAILED(os::ListApplicationRecords(records)) || records.empty()) {
@@ -98,6 +158,18 @@ static void ReloadApps() {
     for (auto &r : records) ids.push_back(r.application_id);
     std::vector<NsApplicationView> views;
     os::ListApplicationViews(ids, views);
+
+    // Ensure the icon cache directory exists before extracting any icons.
+    mkdir("sdmc:/slaunch", 0777);
+    mkdir("sdmc:/slaunch/cache", 0777);
+    mkdir(IconCacheDir, 0777);
+
+    // Prior run's resolved names; a title with a cached name AND a cached icon
+    // needs no NS control fetch this launch.
+    std::unordered_map<u64, std::string> nameCache = LoadNameCache();
+    std::vector<std::pair<u64, std::string>> freshCache; // current titles, for rewrite
+    freshCache.reserve(records.size());
+    bool hitNs = false;
 
     std::vector<menu::ui::AppEntry> entries;
     entries.reserve(records.size());
@@ -116,16 +188,40 @@ static void ReloadApps() {
             needs_upd = (f & BIT(4)) != 0;
         }
 
-        NsApplicationControlData ctrl = {};
+        // Fast path: reuse the cached name when its icon is already on disk. Only
+        // fall back to the (expensive) NS control fetch for new/uncached titles.
         std::string name;
-        if (R_SUCCEEDED(os::GetApplicationControl(app_id, ctrl)))
-            name = os::GetAppName(ctrl.nacp);
-        else {
-            char tmp[32]; snprintf(tmp, sizeof(tmp), "0x%016llX", (unsigned long long)app_id);
-            name = tmp;
+        char iconPath[64];
+        snprintf(iconPath, sizeof(iconPath), "%s/%016llX.jpg", IconCacheDir,
+                 (unsigned long long)app_id);
+        struct stat ist;
+        const bool iconCached = (stat(iconPath, &ist) == 0 && ist.st_size > 0);
+        auto cached = nameCache.find(app_id);
+
+        if (iconCached && cached != nameCache.end()) {
+            name = cached->second;
+        } else {
+            NsApplicationControlData ctrl = {};
+            u64 ctrl_size = 0;
+            if (R_SUCCEEDED(os::GetApplicationControl(app_id, ctrl, ctrl_size))) {
+                name = os::GetAppName(ctrl.nacp);
+                CacheAppIcon(app_id, ctrl, ctrl_size); // extract JPEG for the icon UI
+            } else {
+                char tmp[32]; snprintf(tmp, sizeof(tmp), "0x%016llX", (unsigned long long)app_id);
+                name = tmp;
+            }
+            hitNs = true;
         }
+
+        freshCache.emplace_back(app_id, name);
         entries.push_back({ app_id, std::move(name), gamecard, needs_upd });
     }
+
+    // Rewrite the name cache when we resolved anything new or the library set
+    // changed size (prunes uninstalled titles).
+    if (hitNs || freshCache.size() != nameCache.size())
+        SaveNameCache(freshCache);
+
     if (g_UI) g_UI->SetApps(std::move(entries));
     g_NeedAppReload = false;
 }
@@ -248,6 +344,14 @@ int main() {
 
     SDL_Joystick *joy = SDL_JoystickOpen(0);
 
+    // Re-arm the touchscreen after SDL_Init (which reconfigures HID for its own
+    // pad handling and can leave the touch screen unconfigured for our reads).
+    hidInitializeTouchScreen();
+
+    // Scope the Menu so its destructor (which frees icon/widget textures) runs
+    // while the SDL renderer is still alive - gfx.Exit() is called after this
+    // block closes.
+    {
     Menu ui;
     g_UI = &ui;
     ui.Init(&gfx, status.selected_user, status.suspended_app_id, IsFirstRun());
@@ -283,6 +387,10 @@ int main() {
         menu::smi::PollMessages(cbs);
 
         // Action buttons via events (no repeat); directions are polled below.
+        // SDL maps touch to mouse events; keep the button state across frames --
+        // a still finger sends no motion, so otherwise a held touch reads as a
+        // release each frame and a long-press never accumulates.
+        static bool mouse_down = false; static int mouse_x = 0, mouse_y = 0;
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { g_Running = false; continue; }
@@ -293,6 +401,36 @@ int main() {
                     continue;
                 u64 launch_id = 0;
                 run(ui.OnButton(b, launch_id), launch_id);
+            } else if (ev.type == SDL_MOUSEBUTTONDOWN) {
+                mouse_down = true;  mouse_x = ev.button.x; mouse_y = ev.button.y;
+            } else if (ev.type == SDL_MOUSEBUTTONUP) {
+                mouse_down = false;
+            } else if (ev.type == SDL_MOUSEMOTION) {
+                mouse_x = ev.motion.x; mouse_y = ev.motion.y;
+            }
+        }
+
+        // Touch: prefer libnx HID, fall back to the mouse-mapped touch. Coords
+        // are already in 1280x720 render space.
+        {
+            static bool was_touching = false;
+            static int  last_tx = 0, last_ty = 0;
+            HidTouchScreenState ts = {0};
+            bool now_touch = false; int nx = 0, ny = 0;
+            if (hidGetTouchScreenStates(&ts, 1) && ts.count > 0) {
+                now_touch = true; nx = (int)ts.touches[0].x; ny = (int)ts.touches[0].y;
+            } else if (mouse_down) {
+                now_touch = true; nx = mouse_x; ny = mouse_y;
+            }
+
+            u64 tlaunch = 0;
+            if (now_touch) {
+                last_tx = nx; last_ty = ny;
+                run(ui.OnTouch(was_touching ? 1 : 0, nx, ny, tlaunch), tlaunch);
+                was_touching = true;
+            } else if (was_touching) {
+                run(ui.OnTouch(2, last_tx, last_ty, tlaunch), tlaunch);
+                was_touching = false;
             }
         }
 
@@ -334,6 +472,7 @@ int main() {
         step(dir_h, held_h, next_h, start_h, Btn::Left, Btn::Right);
         ui.Render();
     }
+    } // ui destroyed here, before gfx.Exit(), so its textures free cleanly
 
     if (joy) SDL_JoystickClose(joy);
     gfx.Exit();

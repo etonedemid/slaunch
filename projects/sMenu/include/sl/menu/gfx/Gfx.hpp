@@ -39,8 +39,16 @@ namespace sl::menu::gfx {
 
         // Images
         SDL_Texture *LoadImage(const char *path);   // nullptr on failure
+        // Load an image and downscale it once into a wxh static texture, so later
+        // per-frame blits are cheap and it uses far less VRAM than the full-size
+        // source (used for grid/line app icons). Falls back to the full image if
+        // a render target can't be made.
+        SDL_Texture *LoadImageScaled(const char *path, int w, int h);
         void         FreeImage(SDL_Texture *tex);
         void         DrawCover(SDL_Texture *tex, Uint8 alpha = 255); // fullscreen cover-fit
+        // Blit a texture into the dst rect (scaled to fit exactly; app icons are
+        // square so this preserves them). alpha modulates the whole image.
+        void         DrawImage(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha = 255);
 
         // Fonts
         // The system (pl) font is always loaded and used as the "default".
