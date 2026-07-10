@@ -213,7 +213,7 @@ static void RunPendingAction() {
         case Pending::OpenWebBrowser: {
             // Build a normal web-page config and start the web applet with it.
             WebCommonConfig cfg;
-            if (R_SUCCEEDED(webPageCreate(&cfg, "https://www.google.com/"))) {
+            if (R_SUCCEEDED(webPageCreate(&cfg, "https://https://etonedemid.github.io/slaunch/"))) {
                 webConfigSetWhitelist(&cfg, "^http*");
                 la::OpenSystemApplet(AppletId_LibraryAppletWeb, cfg.version,
                                      &cfg.arg, sizeof(cfg.arg));
