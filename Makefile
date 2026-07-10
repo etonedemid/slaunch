@@ -38,7 +38,7 @@ all: ssystem smenu sinstaller assets
 # SD layout so they land at sdmc:/slaunch/... on the device.
 assets:
 	@echo "--- Staging assets ---"
-	@mkdir -p SdOut/slaunch/fonts SdOut/slaunch/themes SdOut/slaunch/bin/hbloader SdOut/slaunch/widgets SdOut/slaunch/lang
+	@mkdir -p SdOut/slaunch/fonts SdOut/slaunch/themes SdOut/slaunch/bin/hbloader SdOut/slaunch/bin/hbloader_app SdOut/slaunch/widgets SdOut/slaunch/lang
 	@cp -f assets/fonts/*.ttf SdOut/slaunch/fonts/ 2>/dev/null || true
 	@cp -f assets/fonts/*.otf SdOut/slaunch/fonts/ 2>/dev/null || true
 	@cp -f assets/fonts/LICENSE-OFL.txt assets/fonts/ATTRIBUTION.md SdOut/slaunch/fonts/ 2>/dev/null || true
@@ -51,8 +51,17 @@ assets:
 	@cp -f assets/theming.png assets/controllers.png assets/album.png assets/user.png \
 	       assets/browser.png assets/mii.png assets/settings.png assets/power.png \
 	       assets/homebrewmenu.png SdOut/slaunch/icons/ 2>/dev/null || true
-	@# nx-hbloader exefs served via ECS for the Homebrew menu (loads hbmenu.nro)
+	@# nx-hbloader exefs served via ECS for the Homebrew menu (loads hbmenu.nro).
+	@# Applet variant (application_type=2) runs homebrew as a library applet.
 	@cp -f assets/hbloader/main assets/hbloader/main.npdm SdOut/slaunch/bin/hbloader/ 2>/dev/null || true
+	@# Application variant: same loader, npdm with application_type=1 so the donor
+	@# process is a real application (am grants an application proxy -> full RAM).
+	@cp -f assets/hbloader/main SdOut/slaunch/bin/hbloader_app/main 2>/dev/null || true
+	@cp -f assets/hbloader/main_app.npdm SdOut/slaunch/bin/hbloader_app/main.npdm 2>/dev/null || true
+	@# Background music tracks + UI sound effects (welcome / page turn).
+	@mkdir -p SdOut/slaunch/music SdOut/slaunch/sounds
+	@cp -f assets/music/*.mp3 assets/music/*.ogg assets/music/*.flac SdOut/slaunch/music/ 2>/dev/null || true
+	@cp -f assets/UI/*.wav SdOut/slaunch/sounds/ 2>/dev/null || true
 
 ssystem:
 	@echo "--- Building sSystem ---"

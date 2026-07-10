@@ -21,6 +21,7 @@ namespace sl::smi {
         ResumeApplication,
         TerminateApplication,
         OpenHomebrew,          // launch an NRO as an applet
+        LaunchHomebrewApplication, // launch an NRO as an application (donor slot)
         OpenAlbum,
         OpenNetConnect,
         OpenUserPage,
@@ -65,6 +66,7 @@ namespace sl::smi {
     struct PayloadHomebrew {
         char nro_path[FS_MAX_PATH];
         char argv[512];
+        u64  donor_id;   // LaunchHomebrewApplication: game slot to run the NRO in
     };
 
     // Passed from sSystem → sMenu at startup via input storage

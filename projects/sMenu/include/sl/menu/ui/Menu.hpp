@@ -4,6 +4,9 @@
 #include <sl/menu/ui/Theme.hpp>
 #include <sl/menu/gfx/Gfx.hpp>
 #include <sl/menu/gfx/IconCache.hpp>
+#include <sl/menu/audio/Music.hpp>
+#include <sl/menu/audio/Sound.hpp>
+#include <sl/menu/hb/Homebrew.hpp>
 #include <sl/menu/widgets/Widgets.hpp>
 #include <vector>
 #include <string>
@@ -20,7 +23,7 @@ namespace sl::menu::ui {
 
     enum class ItemKind {
         Game, Theming, Themes, Fonts, Controllers, Album, UserPage,
-        WebBrowser, MiiEdit, HomebrewMenu, Settings, Power,
+        WebBrowser, MiiEdit, HomebrewMenu, Homebrew, Settings, Power,
     };
 
     // Horizontal alignment of the main list text.
@@ -40,6 +43,8 @@ namespace sl::menu::ui {
         bool        is_gamecard  = false;
         bool        needs_update = false;
         bool        is_favourite = false;
+        std::string hb_path;   // ItemKind::Homebrew: the .nro to launch
+        u64         hb_icon = 0;
     };
 
     // Order games are listed in (favourites are always pinned above the rest).
@@ -58,8 +63,12 @@ namespace sl::menu::ui {
             None, LaunchApp, ResumeApp, TerminateApp,
             OpenAlbum, OpenUserPage, OpenNetConnect, OpenMiiEdit,
             OpenWebBrowser, OpenControllers, OpenHomebrewMenu, OpenPower,
-            FinishSetup, Quit,
+            LaunchHomebrew, LaunchHomebrewApp, FinishSetup, Quit,
         };
+
+        // Path of the .nro to launch, valid when OnButton returns LaunchHomebrew[App].
+        const std::string &HomebrewPath() const { return m_hb_launch_path; }
+        u64 HomebrewDonor() const { return m_hb_donor; }
 
         ~Menu();
 
@@ -102,7 +111,7 @@ namespace sl::menu::ui {
 
     private:
         enum class Screen { Oobe, Main, Theming, Themes, ThemeEditor, ColorPicker,
-                            Fonts, Widgets, WidgetOptions, Keyboard };
+                            Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame };
 
         void RebuildItems();
@@ -117,6 +126,16 @@ namespace sl::menu::ui {
         Action OnButtonFonts(Btn b);
         Action OnButtonWidgets(Btn b);
         Action OnButtonWidgetOptions(Btn b);
+        Action OnButtonMusic(Btn b);
+        Action OnButtonHomebrew(Btn b);
+        void OpenHomebrewBrowser();       // scan (lazily) + show the .nro list
+        void LoadHbPins();                // pinned homebrew paths (main-menu entries)
+        void SaveHbPins();
+        void ResolvePins();               // parse each pinned .nro -> name + cached icon
+        bool IsHbPinned(const std::string &path) const;
+        void ToggleHbPin(const std::string &path);
+        void LoadHbDonor();               // the game slot used to run homebrew as an app
+        void SaveHbDonor();
         Action OnButtonKeyboard(Btn b);
         void DrawKeyboard();
         // Which on-screen key is at (x,y)? Fills row/col to match DrawKeyboard's
@@ -136,6 +155,11 @@ namespace sl::menu::ui {
         void SaveFavourites();
         void LoadSort();
         void SaveSort();
+        void LoadOrder();           // custom entry order (applied in Default sort)
+        void SaveOrder();
+        void MoveSelected(int dir); // move mode: shift the held entry by dir (+1/-1)
+        std::string ItemKey(const MenuItem &it) const; // stable per-entry order key
+        void SelectByKey(const std::string &key);      // move cursor to that entry
         bool SelectApp(u64 app_id); // move cursor to the item for app_id; false if absent
         void BuildOptions();        // populate the X-menu for the current selection
 
@@ -188,6 +212,8 @@ namespace sl::menu::ui {
         void DrawFonts();
         void DrawWidgets();         // list detected Lua widgets
         void DrawWidgetOptions();   // exposed options of the selected widget
+        void DrawMusic();           // menu-music controls
+        void DrawHomebrew();        // .nro browser
         void DrawDialog();
 
         // Font selection
@@ -215,6 +241,9 @@ namespace sl::menu::ui {
         // Favourites (app ids, pinned to the top) + current sort order.
         std::vector<u64> m_favourites;
         SortMode         m_sort = SortMode::Default;
+        std::vector<std::string> m_order;     // custom entry order (Default sort), by key
+        bool             m_move_mode = false; // reordering the held entry
+        std::string      m_move_key;          // ItemKey of the entry being moved
 
         // Appearance: main-list text alignment + user-renamed games.
         TextAlign m_align = TextAlign::Left;
@@ -222,6 +251,15 @@ namespace sl::menu::ui {
         UiMode    m_ui_mode = UiMode::List;   // main-screen layout
         bool      m_loading = false;          // app list still loading in the background
         gfx::IconCache m_icons;               // app icon texture cache (Line/Grid)
+        audio::Music   m_music;               // background menu music
+        audio::Sound   m_sfx;                 // UI sound effects (nav, welcome)
+        gfx::IconCache m_hb_icons;            // homebrew .nro icon cache
+        std::vector<hb::HbEntry> m_hb;        // scanned homebrew (browser)
+        std::vector<hb::HbEntry> m_hb_pins;   // homebrew pinned to the main menu (resolved)
+        std::string    m_hb_launch_path;      // set on LaunchHomebrew[App]
+        u64  m_hb_donor = 0;                  // donor game id for "run as app"
+        int  m_hb_cursor = 0;
+        bool m_hb_scanned = false;
         std::unordered_map<int, SDL_Texture*> m_sys_icons; // Icons
         std::vector<std::pair<u64, std::string>> m_names; // app_id -> custom name
         int  m_theming_cursor = 0;
@@ -253,7 +291,8 @@ namespace sl::menu::ui {
         int m_editing_theme  = -1; // global index of the custom theme being edited
         int m_oobe_step      = 0;
 
-        // Widgets submenu
+        // Music + Widgets submenus
+        int m_music_cursor  = 0;   // cursor in the music submenu
         int m_widget_cursor  = 0;  // cursor in the widget list
         int m_widget_sel     = 0;  // widget whose options are being edited
         int m_widgetopt_cursor = 0;

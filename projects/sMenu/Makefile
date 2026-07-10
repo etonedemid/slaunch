@@ -8,7 +8,8 @@ TARGET   := sMenu
 BUILD    := build
 
 SOURCES  := source source/sl/menu/ui source/sl/menu/gfx source/sl/menu/smi \
-            source/sl/menu/net source/sl/menu/widgets ../../libs/Lua
+            source/sl/menu/net source/sl/menu/widgets source/sl/menu/audio \
+            source/sl/menu/hb ../../libs/Lua
 
 INCLUDES := include ../../libs/sCommon/include \
             ../../libs/Lua ../../libs/sol2/include
@@ -18,8 +19,8 @@ COMMON_SRC := ../../libs/sCommon/source/sl/os/Applications.cpp
 
 # SDL2 (+ ttf/image) compile & link flags from the switch portlibs pkg-config.
 PKGCONF  := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
-SDL_CFLAGS := $(shell $(PKGCONF) --cflags sdl2 SDL2_ttf SDL2_image)
-SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image)
+SDL_CFLAGS := $(shell $(PKGCONF) --cflags sdl2 SDL2_ttf SDL2_image SDL2_mixer)
+SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image SDL2_mixer)
 
 # libcurl (+ mbedtls/zlib) for the network widgets (weather, chat).
 CURL_CFLAGS := $(shell $(PKGCONF) --cflags libcurl)

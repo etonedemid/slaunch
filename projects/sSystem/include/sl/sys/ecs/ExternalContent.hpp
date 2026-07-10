@@ -27,6 +27,11 @@ namespace sl::sys::ecs {
     constexpr AppletId HbloaderAppletId  = AppletId_LibraryAppletPhotoViewer;
     constexpr u64      HbloaderProgramId = 0x010000000000100DULL; // album applet
     constexpr const char *HbloaderExefsDir = "/slaunch/bin/hbloader";
+    // Same loader with an application_type=1 npdm: when served into a donor game's
+    // slot the process becomes a real application, so the loaded .nro's libnx can
+    // open an application proxy (am) and run with full RAM instead of failing
+    // InitFail_AM. Used only for "run homebrew as an application".
+    constexpr const char *HbloaderAppExefsDir = "/slaunch/bin/hbloader_app";
 
     // Start the sf server thread that serves ECS filesystem sessions. Idempotent.
     Result InitializeServer();

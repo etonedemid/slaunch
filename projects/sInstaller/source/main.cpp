@@ -239,22 +239,6 @@ static void DrawConfirmDialog(const char *title, const char *subtitle,
 }
 
 // ---- mock home menu data ---------------------------------------------------
-static std::vector<MockItem> BuildMockItems() {
-    return {
-        {"The Legend of Zelda: Tears of the Kingdom", false, true},
-        {"Controllers",  false, false},
-        {"Album",        false, false},
-        {"User Page",    false, false},
-        {"Web Browser",  false, false},
-        {"Mii Edit",     false, false},
-        {"Settings",     false, false},
-        {"Power",        false, false},
-        {"Homebrew Menu",false, false},
-        {"Hollow Knight",false, false},
-        {"Celeste",      false, false},
-    };
-}
-
 // ---------------------------------------------------------------------------
 int main() {
     romfsInit();
@@ -280,7 +264,7 @@ int main() {
     SDL_Texture *icon = IMG_LoadTexture(g_ren, "romfs:/icon.png");
 
     // --- installer state ---
-    enum class Screen { MainMenu, MockMenu, ConfirmInstall, ConfirmRemove,
+    enum class Screen { MainMenu, ConfirmInstall, ConfirmRemove,
                         Installing, Removing, Done, Failed };
     Screen screen = Screen::MainMenu;
 
@@ -290,17 +274,11 @@ int main() {
     struct InstallerItem { const char *label; };
     std::vector<InstallerItem> installerItems = {
         {installed ? "Re-install sLaunch" : "Install sLaunch"},
-        {"Try it out"},
         {installed ? "Remove sLaunch" : " "},
         {"Exit installer"},
     };
     int instCursor = 0;
     float instScroll = 0.0f;
-
-    // Mock home menu
-    std::vector<MockItem> mockItems = BuildMockItems();
-    int mockCursor = 2;
-    float mockScroll = 2.0f;
 
     // Dialog state
     int dialogCursor = 1; // 0 = Yes, 1 = No (default to No for safety)
@@ -361,16 +339,13 @@ int main() {
                         dialogCursor = 1;
                         screen = Screen::ConfirmInstall;
                         break;
-                    case 1: // Try it out
-                        screen = Screen::MockMenu;
-                        mockCursor = 2;
-                        mockScroll = 2.0f;
+                    case 1: // Remove (blank + ignored when not installed)
+                        if (installed) {
+                            dialogCursor = 1;
+                            screen = Screen::ConfirmRemove;
+                        }
                         break;
-                    case 2: // Remove / Disable
-                        dialogCursor = 1;
-                        screen = Screen::ConfirmRemove;
-                        break;
-                    case 3: // Exit
+                    case 2: // Exit
                         goto cleanup;
                 }
             }
@@ -393,23 +368,6 @@ int main() {
                 } else { // No
                     screen = Screen::MainMenu;
                 }
-            }
-
-        } else if (screen == Screen::MockMenu) {
-            const int last = (int)mockItems.size() - 1;
-            if (move_up)   mockCursor = mockCursor > 0 ? mockCursor - 1 : last;
-            if (move_down) mockCursor = mockCursor < last ? mockCursor + 1 : 0;
-            
-            // Map horizontal stick inputs to pagination as well, to make navigating massive lists easier
-            if (down & (HidNpadButton_L | HidNpadButton_Left | HidNpadButton_StickLLeft))  
-                mockCursor = std::max(0, mockCursor - 5);
-            if (down & (HidNpadButton_R | HidNpadButton_Right | HidNpadButton_StickLRight)) 
-                mockCursor = std::min(last, mockCursor + 5);
-
-            if (down & HidNpadButton_A || down & HidNpadButton_B) {
-                screen = Screen::MainMenu;
-                instCursor = 1; // back to "Try it out"
-                instScroll = 1.0f;
             }
 
         } else if (screen == Screen::Installing || screen == Screen::Removing) {
@@ -491,30 +449,6 @@ int main() {
             DrawConfirmDialog(installed ? "Remove sLaunch?" : "Do nothing?",
                 installed ? "This will delete all sLaunch files." : "This will do nothing.",
                 dialogCursor, true);
-
-        } else if (screen == Screen::MockMenu) {
-            time_t now = time(nullptr);
-            struct tm tm_now;
-            localtime_r(&now, &tm_now);
-            char clock[32];
-            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
-            Text(g_fS, 40, 16, kDim, clock);
-            u32 charge = 0;
-            psmGetBatteryChargePercentage(&charge);
-            char batt[16];
-            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
-            int bw = TextWidth(g_fS, batt);
-            Text(g_fS, W - 40 - bw, 16, kDim, batt);
-
-            if ((int)mockItems.size() > 1) {
-                char pos[28];
-                snprintf(pos, sizeof(pos), "%d / %d", mockCursor + 1, (int)mockItems.size());
-                int pw = TextWidth(g_fS, pos);
-                Text(g_fS, W - pw - 40, 50, kDim, pos);
-            }
-
-            DrawCarousel(mockItems, mockCursor, mockScroll, H / 2, 48, true);
-            Text(g_fS, 120, H - 40, kDim, "A/B: Back to installer");
 
         } else if (screen == Screen::Installing) {
             Text(g_fM, 120, H / 2 - 30, kFg, "Installing sLaunch...");

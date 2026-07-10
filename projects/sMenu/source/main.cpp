@@ -313,6 +313,7 @@ extern "C" {
 }
 
 extern "C" void __appInit() {
+    g_BootTick0 = armGetSystemTick();   // base for boot.log ms stamps
     smInitialize();
     fsInitialize();
     fsdevMountSdmc();             // sdmc: available -> BootLog works from here
@@ -381,6 +382,14 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
         case Menu::Action::OpenWebBrowser:   menu::smi::OpenWebBrowser();   g_Running = false; break;
         case Menu::Action::OpenControllers:  menu::smi::OpenControllers();  g_Running = false; break;
         case Menu::Action::OpenHomebrewMenu: menu::smi::OpenHomebrewMenu(); g_Running = false; break;
+        case Menu::Action::LaunchHomebrew:
+            menu::smi::OpenHomebrew(g_UI->HomebrewPath().c_str());
+            g_Running = false;
+            break;
+        case Menu::Action::LaunchHomebrewApp:
+            menu::smi::LaunchHomebrewApp(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str());
+            g_Running = false;
+            break;
         case Menu::Action::OpenPower:        menu::smi::OpenPowerMenu();    break; // sleep; menu stays
         case Menu::Action::FinishSetup:
             MarkSetupDone();
@@ -396,15 +405,25 @@ int main() {
     // sSystem hands us the selected user + suspended-app state at launch.
     smi::SystemStatus status = {};
     {
-        AppletStorage st;
-        if (R_SUCCEEDED(appletPopInData(&st))) {
-            appletStorageRead(&st, 0, &status, sizeof(status));
+        // The daemon pushes a LibAppletArgs common-args storage (0x20 bytes)
+        // FIRST, then our SystemStatus. Pop a couple of InData storages and read
+        // whichever one matches SystemStatus by size (the common-args blob is a
+        // different size), so we don't mistake the args header for the status
+        // (that left the whole status zeroed -> no user, no suspended highlight).
+        for (int i = 0; i < 3; i++) {
+            AppletStorage st;
+            if (R_FAILED(appletPopInData(&st))) break;
+            s64 sz = 0;
+            appletStorageGetSize(&st, &sz);
+            if (sz == (s64)sizeof(status))
+                appletStorageRead(&st, 0, &status, sizeof(status));
             appletStorageClose(&st);
         }
     }
 
-    BootLog("applet: main enter (status user_valid=%d suspended=%d)",
-            (int)accountUidIsValid(&status.selected_user), (int)status.has_suspended_app);
+    BootLog("applet: main enter (status user_valid=%d suspended=%d id=%016llX)",
+            (int)accountUidIsValid(&status.selected_user), (int)status.has_suspended_app,
+            (unsigned long long)status.suspended_app_id);
 
     menu::ui::g_sd_ok = true; // applet NPDM grants SD access
 
