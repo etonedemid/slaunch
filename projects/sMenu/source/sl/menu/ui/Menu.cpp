@@ -71,18 +71,24 @@ namespace sl::menu::ui {
         LoadSort();
         LoadSettings();
         LoadNames();
-        m_widgets.Init();   // loads widget config, starts the network thread
+        // Widget loading (Lua parse + curl init) is deferred to InitDeferred so it
+        // doesn't sit on the suspend->first-frame critical path.
 
         m_screen = start_oobe ? Screen::Oobe : Screen::Main;
         RebuildItems();
     }
 
+    void Menu::InitDeferred() {
+        if (m_deferred_done) return;
+        m_deferred_done = true;
+        m_widgets.Init();   // loads widget config, starts the network thread
+    }
+
     Menu::~Menu() {
-        // Stop the widget network thread before the process (and sockets) tear
-        // down.
+        // Stop the network thread before curl/sockets tear down.
         m_widgets.Exit();
-        // Free icon textures while the renderer is still alive (main() calls
-        // gfx.Exit() only after the Menu is destroyed).
+        // Free textures while the renderer is still alive (main() runs gfx.Exit()
+        // only after the Menu is destroyed).
         m_icons.Exit();
         for (auto &kv : m_sys_icons)
             if (kv.second) m_gfx->FreeImage(kv.second);
@@ -104,13 +110,32 @@ namespace sl::menu::ui {
             it.is_favourite = IsFavourite(a.app_id);
             (it.is_favourite ? favs : rest).push_back(std::move(it));
         }
-        if (m_sort == SortMode::Alpha) {
-            auto by_alpha = [](const MenuItem &x, const MenuItem &y) {
-                return strcasecmp(x.name.c_str(), y.name.c_str()) < 0;
+        auto sort_group = [this](std::vector<MenuItem> &v) {
+            auto title = [](const MenuItem &x, const MenuItem &y) {
+                return strcasecmp(x.name.c_str(), y.name.c_str());
             };
-            std::sort(favs.begin(), favs.end(), by_alpha);
-            std::sort(rest.begin(), rest.end(), by_alpha);
-        }
+            switch (m_sort) {
+                case SortMode::TitleAsc:
+                    std::sort(v.begin(), v.end(),
+                              [&](const MenuItem &x, const MenuItem &y){ return title(x, y) < 0; });
+                    break;
+                case SortMode::TitleDesc:
+                    std::sort(v.begin(), v.end(),
+                              [&](const MenuItem &x, const MenuItem &y){ return title(x, y) > 0; });
+                    break;
+                case SortMode::GamecardFirst:
+                    // Physical carts grouped on top, each group A-Z.
+                    std::sort(v.begin(), v.end(),
+                              [&](const MenuItem &x, const MenuItem &y){
+                                  if (x.is_gamecard != y.is_gamecard) return x.is_gamecard;
+                                  return title(x, y) < 0;
+                              });
+                    break;
+                default: break;   // Default: keep enumeration order
+            }
+        };
+        sort_group(favs);
+        sort_group(rest);
 
         // Favourites pinned at the very top for quick access.
         for (auto &it : favs) m_items.push_back(std::move(it));
@@ -187,25 +212,27 @@ namespace sl::menu::ui {
         fclose(fp);
     }
 
-    void Menu::SelectApp(u64 app_id) {
+    bool Menu::SelectApp(u64 app_id) {
         for (int i = 0; i < (int)m_items.size(); i++) {
             if (m_items[i].kind == ItemKind::Game && m_items[i].app_id == app_id) {
                 m_cursor = i;
                 m_scroll_pos = (float)i;
-                return;
+                m_grid_scroll = (float)(i / GridColumns());
+                return true;
             }
         }
+        return false;
     }
 
     void Menu::SetApps(std::vector<AppEntry> apps) {
         m_apps = std::move(apps);
         RebuildItems();
-        // On first load, drop the cursor onto the suspended game so it's one
-        // button away.
-        if (m_suspended != 0 && !m_jumped_to_suspended) {
-            SelectApp(m_suspended);
+        // Drop the cursor onto the suspended game so it's one button away. Only
+        // mark it done once the jump actually lands - the game may not be in the
+        // first (cached) list yet (e.g. a gamecard just inserted), and we want to
+        // retry on the next SetApps once it shows up.
+        if (m_suspended != 0 && !m_jumped_to_suspended && SelectApp(m_suspended))
             m_jumped_to_suspended = true;
-        }
     }
     void Menu::SetSuspendedApp(u64 app_id) { m_suspended = app_id; }
     void Menu::ClearSuspendedApp()          { m_suspended = 0; }
@@ -222,6 +249,8 @@ namespace sl::menu::ui {
             else if (sscanf(line, "ui_mode=%d", &v) == 1 &&
                      v >= 0 && v < (int)UiMode::Count)
                 m_ui_mode = (UiMode)v;
+            else if (sscanf(line, "list_icons=%d", &v) == 1)
+                m_list_icons = (v != 0);
         }
         fclose(fp);
     }
@@ -233,6 +262,7 @@ namespace sl::menu::ui {
         if (!fp) return;
         fprintf(fp, "align=%d\n", (int)m_align);
         fprintf(fp, "ui_mode=%d\n", (int)m_ui_mode);
+        fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
         fclose(fp);
     }
 
@@ -564,7 +594,8 @@ namespace sl::menu::ui {
             if (b == Btn::Up)    { if (m_cursor - cols >= 0) m_cursor -= cols; return Action::None; }
             if (b == Btn::R) { step(cols * 3);  return Action::None; }
             if (b == Btn::L) { step(-cols * 3); return Action::None; }
-        } else if (m_ui_mode == UiMode::Line || m_ui_mode == UiMode::Cover) {
+        } else if (m_ui_mode == UiMode::Line || m_ui_mode == UiMode::Cover ||
+                   m_ui_mode == UiMode::Shelf) {
             if (b == Btn::Right || b == Btn::Down) { wrapNext(); return Action::None; }
             if (b == Btn::Left  || b == Btn::Up)   { wrapPrev(); return Action::None; }
             if (b == Btn::R) { step(5);  return Action::None; }
@@ -637,9 +668,17 @@ namespace sl::menu::ui {
             if (m_suspended != 0 && it.app_id == m_suspended)
                 m_options.push_back({ T("Close game"), OptCloseGame });
         }
-        m_options.push_back({ m_sort == SortMode::Alpha ? T("Sort: A - Z")
-                                                        : T("Sort: Default"), OptSort });
+        m_options.push_back({ std::string(T("Sort: ")) + SortLabel(), OptSort });
         m_options.push_back({ T("Cancel"), OptDismiss });
+    }
+
+    const char *Menu::SortLabel() const {
+        switch (m_sort) {
+            case SortMode::TitleAsc:      return T("Title A - Z");
+            case SortMode::TitleDesc:     return T("Title Z - A");
+            case SortMode::GamecardFirst: return T("Game card first");
+            default:                      return T("Default");
+        }
     }
 
     Menu::Action Menu::OnButtonOptions(Btn b, u64 &out_app_id) {
@@ -690,8 +729,8 @@ namespace sl::menu::ui {
     }
 
     // ---- Theming submenu (appearance + widgets) ----------------------------
-    namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_UiMode, TH_Widgets,
-                       TH_Back, TH_Count }; }
+    namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_UiMode, TH_ListIcons,
+                       TH_Widgets, TH_Back, TH_Count }; }
 
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto cycleAlign = [&](int dir) {
@@ -719,12 +758,16 @@ namespace sl::menu::ui {
             if (b == Btn::Right) cycleUiMode(+1);
             if (b == Btn::Left)  cycleUiMode(-1);
         }
+        auto toggleListIcons = [&]() { m_list_icons = !m_list_icons; SaveSettings(); };
+        if (m_theming_cursor == TH_ListIcons && (b == Btn::Left || b == Btn::Right))
+            toggleListIcons();
         if (b == Btn::A) {
             switch (m_theming_cursor) {
                 case TH_Themes:  m_screen = Screen::Themes; m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
                 case TH_Fonts:   m_screen = Screen::Fonts;  m_font_cursor = m_font_applied; m_sub_scroll = m_font_cursor; break;
                 case TH_TextPos: cycleAlign(+1); break;
                 case TH_UiMode:  cycleUiMode(+1); break;
+                case TH_ListIcons: toggleListIcons(); break;
                 case TH_Widgets: openWidgets(); break;
                 case TH_Back:    m_screen = Screen::Main; break;
             }
@@ -1229,12 +1272,20 @@ namespace sl::menu::ui {
         }
     }
 
+    void Menu::DrawMainEmpty() {
+        const Theme &t = m_theme.Current();
+        m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim,
+                            m_loading ? T("Loading games...") : T("No apps found"));
+        DrawHint("+: Power");
+    }
+
     void Menu::DrawMain() {
         switch (m_ui_mode) {
-            case UiMode::Line:  DrawMainLine();  break;
-            case UiMode::Grid:  DrawMainGrid();  break;
-            case UiMode::Cover: DrawMainCover(); break;
-            default:            DrawMainList();  break;
+            case UiMode::Line:    DrawMainLine();    break;
+            case UiMode::Grid:    DrawMainGrid();    break;
+            case UiMode::Cover:   DrawMainCover();   break;
+            case UiMode::Shelf:   DrawMainShelf();   break;
+            default:              DrawMainList();    break;
         }
 
         // Widgets overlay every layout, drawn at their own (draggable) positions.
@@ -1259,11 +1310,7 @@ namespace sl::menu::ui {
         m_icons.SetScale(gfx::IconCache::GridScale); // small thumbnails: downscaled
         DrawTopBar(nullptr);
 
-        if (m_items.empty()) {
-            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
-            DrawHint("+: Power");
-            return;
-        }
+        if (m_items.empty()) { DrawMainEmpty(); return; }
 
         // Niagara-style vertical carousel: the item at the vertical centre is
         // enlarged with a '>' cursor; neighbours shrink and fade with distance.
@@ -1312,7 +1359,7 @@ namespace sl::menu::ui {
             // Small icon in the left margin (Left alignment only, so it never
             // clashes with centred/right-aligned text). Games use their cached
             // app icon; system entries use their black/white icon.
-            if (m_align == TextAlign::Left) {
+            if (m_list_icons && m_align == TextAlign::Left) {
                 const bool game = (it.kind == ItemKind::Game);
                 SDL_Texture *ic = game ? m_icons.Get(it.app_id) : SystemIcon(it.kind);
                 if (ic) {
@@ -1430,13 +1477,26 @@ namespace sl::menu::ui {
         return (idx >= 0 && idx < (int)m_items.size()) ? idx : -1;
     }
 
+    // Shelf mode geometry (Xbox-360 "My Games" style): uniform covers in a row,
+    // the selected one anchored near the left. Shared by the draw + hit-test.
+    namespace {
+        constexpr int kShelfTile    = 208;   // cover edge
+        constexpr int kShelfGap     = 20;
+        constexpr int kShelfPitch   = kShelfTile + kShelfGap;
+        constexpr int kShelfAnchorX = 88;    // left edge of the selected cover
+        constexpr int kShelfTop     = 150;   // top edge of the cover row
+    }
+
     // Item index under a touch point, dispatched by the active layout.
     int Menu::MainItemAt(int x, int y) const {
         const int last = (int)m_items.size() - 1;
         if (m_ui_mode == UiMode::Grid) return GridItemAt(x, y);
-        if (m_ui_mode == UiMode::Line) {           // horizontal covers, spacing 210
-            const int idx = (int)lroundf(m_scroll_pos +
-                                (float)(x - gfx::Gfx::Width / 2) / 210.0f);
+        if (m_ui_mode == UiMode::Line) {
+            const int idx = (int)lroundf(m_scroll_pos + (float)(x - gfx::Gfx::Width / 2) / 210.0f);
+            return (idx >= 0 && idx <= last) ? idx : -1;
+        }
+        if (m_ui_mode == UiMode::Shelf) {   // left-anchored uniform row (see DrawMainShelf)
+            const int idx = (int)lroundf(m_scroll_pos + (float)(x - kShelfAnchorX) / kShelfPitch);
             return (idx >= 0 && idx <= last) ? idx : -1;
         }
         if (m_ui_mode == UiMode::Cover) {          // left/right thirds browse
@@ -1486,7 +1546,7 @@ namespace sl::menu::ui {
         }
     }
 
-    // Line mode: a horizontal cover carousel (EmulationStation / WiiFlow). The
+    // Line mode: a horizontal cover carousel (EmulationStation style). The
     // selected cover sits centred and full-size; neighbours shrink and fade with
     // distance, and the whole strip eases toward the cursor.
     void Menu::DrawMainLine() {
@@ -1494,11 +1554,7 @@ namespace sl::menu::ui {
         m_icons.SetScale(0);   // few large covers -> original resolution (crisp)
         DrawTopBar(nullptr);
 
-        if (m_items.empty()) {
-            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
-            DrawHint("+: Power");
-            return;
-        }
+        if (m_items.empty()) { DrawMainEmpty(); return; }
 
         m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
@@ -1550,11 +1606,7 @@ namespace sl::menu::ui {
         m_icons.SetScale(gfx::IconCache::GridScale); // many tiles: downscaled for perf
         DrawTopBar(nullptr);
 
-        if (m_items.empty()) {
-            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
-            DrawHint("+: Power");
-            return;
-        }
+        if (m_items.empty()) { DrawMainEmpty(); return; }
 
         // 8 columns x 4 visible rows. The name text is hidden, so tiles reach
         // further down. Keep these in sync with GridItemAt (touch hit-testing).
@@ -1625,7 +1677,7 @@ namespace sl::menu::ui {
         int pw = m_gfx->TextWidth(FontSize::Small, pos);
         m_gfx->Text(FontSize::Small, gfx::Gfx::Width - pw - 40, 120, t.dim, pos);
 
-        DrawStatusHint("A: Select    X: Options    D-Pad: Move");
+        DrawStatusHint("A: Select    X: Options");
     }
 
     // Cover mode: a fullscreen single-cover pager. One large cover is centred;
@@ -1635,11 +1687,7 @@ namespace sl::menu::ui {
         m_icons.SetScale(0);   // one large cover -> original resolution
         DrawTopBar(nullptr);
 
-        if (m_items.empty()) {
-            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim, T("No apps found"));
-            DrawHint("+: Power");
-            return;
-        }
+        if (m_items.empty()) { DrawMainEmpty(); return; }
 
         m_scroll_pos += (m_cursor - m_scroll_pos) * 0.28f;
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
@@ -1678,6 +1726,79 @@ namespace sl::menu::ui {
         DrawStatusHint("A: Launch    X: Options    Left/Right: Browse");
     }
 
+    // Shelf mode: an Xbox-360 "My Games" style row of uniform covers. The selected
+    // cover is anchored near the left inside a highlight card that shows its name
+    // and platform; the rest of the row scrolls behind it. Unselected covers carry
+    // a small caption underneath.
+    void Menu::DrawMainShelf() {
+        const Theme &t = m_theme.Current();
+        m_icons.SetScale(0);
+        DrawTopBar(nullptr);
+
+        if (m_items.empty()) { DrawMainEmpty(); return; }
+
+        m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
+        if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
+
+        const int total = (int)m_items.size();
+        const int tile  = kShelfTile;
+        const int top   = kShelfTop;
+        const int pitch = kShelfPitch;
+
+        // Fit text into a pixel width, trailing "..." if it overflows.
+        auto ellipsize = [&](std::string s, int maxw, gfx::FontSize fs) {
+            if (m_gfx->TextWidth(fs, s.c_str()) <= maxw) return s;
+            while (!s.empty() && m_gfx->TextWidth(fs, (s + "...").c_str()) > maxw)
+                s.pop_back();
+            return s + "...";
+        };
+
+        // Header row below the top bar: sort on the left, position on the right.
+        m_gfx->Text(FontSize::Small,  kShelfAnchorX, 64, t.dim, T("sort"));
+        m_gfx->Text(FontSize::Normal, kShelfAnchorX, 82, t.fg,  SortLabel());
+        {
+            char cnt[32];
+            snprintf(cnt, sizeof(cnt), "%d / %d", m_cursor + 1, total);
+            const int cw = m_gfx->TextWidth(FontSize::Large, cnt);
+            m_gfx->Text(FontSize::Large, gfx::Gfx::Width - 44 - cw, 70, t.dim, cnt);
+        }
+
+        // Highlight card behind the anchored (selected) cover.
+        const int pad   = 14;
+        const int infoH = 104;
+        m_gfx->FillRect(kShelfAnchorX - pad, top - pad,
+                        tile + pad * 2, tile + pad + infoH, WithAlpha(t.fg, 20));
+
+        // Covers, painted right-to-left so the selected one lands on top of its
+        // neighbours during a slide.
+        int firstv = (int)m_scroll_pos - 1;
+        if (firstv < 0) firstv = 0;
+        int lastv = (int)m_scroll_pos + (gfx::Gfx::Width - kShelfAnchorX) / pitch + 2;
+        if (lastv > total - 1) lastv = total - 1;
+        for (int idx = lastv; idx >= firstv; idx--) {
+            const int x = kShelfAnchorX + (int)((idx - m_scroll_pos) * pitch);
+            if (x + tile < 0 || x > gfx::Gfx::Width) continue;
+            const bool selg = (idx == m_cursor);
+            DrawAppTile(m_items[idx], x, top, tile, selg, selg ? 255 : 225);
+            if (!selg)
+                m_gfx->Text(FontSize::Small, x, top + tile + 12, t.dim,
+                            ellipsize(m_items[idx].name, tile, FontSize::Small).c_str());
+        }
+
+        // Selected item's info block inside the card.
+        const MenuItem &sel = m_items[m_cursor];
+        m_gfx->Text(FontSize::Normal, kShelfAnchorX, top + tile + 12, t.title,
+                    ellipsize(sel.name, tile, FontSize::Normal).c_str());
+        const char *sub = sel.is_gamecard ? T("Game card")
+                        : (sel.kind == ItemKind::Game ? T("Nintendo Switch") : "");
+        if (sub[0])
+            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 54, t.dim, sub);
+        if (sel.app_id == m_suspended && m_suspended != 0)
+            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 76, t.accent, T("Running"));
+
+        DrawStatusHint("A: Launch    X: Options    Left/Right: Browse");
+    }
+
     void Menu::DrawOptions() {
         const Theme &t = m_theme.Current();
         const int n = (int)m_options.size();
@@ -1707,13 +1828,15 @@ namespace sl::menu::ui {
     void Menu::DrawTheming() {
         DrawTopBar("Theming");
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
-        const char *modes[4]  = { T("List"), T("Line"), T("Grid"), T("Cover") };
+        const char *modes[5]  = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
         std::vector<std::string> labels = {
-            T("Themes"), T("Fonts"), T("Text position"), T("UI mode"), T("Widgets"), T("Back")
+            T("Themes"), T("Fonts"), T("Text position"), T("UI mode"), T("List icons"),
+            T("Widgets"), T("Back")
         };
         std::vector<std::string> values(labels.size());
         values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_UiMode]      = modes[(int)m_ui_mode];
+        values[TH_ListIcons]   = m_list_icons ? T("On") : T("Off");
         {
             char c[32];
             snprintf(c, sizeof(c), "%d %s", m_widgets.Count(), T("found"));
@@ -1944,7 +2067,7 @@ namespace sl::menu::ui {
                                 sel ? t.accent : t.fg, T(kKbSpecial[c]));
         }
 
-        DrawHint("D-Pad: Move   A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel");
+        DrawHint("A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel");
     }
 
     void Menu::DrawDialog() {

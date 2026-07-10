@@ -27,10 +27,11 @@ namespace sl::menu::ui {
     enum class TextAlign { Left, Center, Right };
 
     // Main-screen layout. List is the original text carousel; Line is a
-    // horizontal cover carousel (EmulationStation / WiiFlow style); Grid is a
-    // page of icon tiles; Cover is a fullscreen single-cover pager. Line, Grid
-    // and Cover render the cached app icons.
-    enum class UiMode { List, Line, Grid, Cover, Count };
+    // horizontal cover carousel (EmulationStation style); Grid is a page of icon
+    // tiles; Cover is a fullscreen single-cover pager; Shelf is an Xbox-360-style
+    // row of uniform covers with a highlighted selection card. Line, Grid, Cover
+    // and Shelf render the cached app icons.
+    enum class UiMode { List, Line, Grid, Cover, Shelf, Count };
 
     struct MenuItem {
         ItemKind    kind;
@@ -42,7 +43,7 @@ namespace sl::menu::ui {
     };
 
     // Order games are listed in (favourites are always pinned above the rest).
-    enum class SortMode { Default, Alpha, Count };
+    enum class SortMode { Default, TitleAsc, TitleDesc, GamecardFirst, Count };
 
     struct AppEntry {
         u64         app_id;
@@ -64,6 +65,11 @@ namespace sl::menu::ui {
 
         void Init(gfx::Gfx *gfx, AccountUid user, u64 suspended_app_id, bool start_oobe);
 
+        // Heavier init (widgets: Lua parse + network) run after the first frame is
+        // on screen, so a HOME press shows the menu sooner. Call each frame; no-ops
+        // after the first call.
+        void InitDeferred();
+
         void SetApps(std::vector<AppEntry> apps);
 
         // Handle one logical button press. Returns an action (+ app id for launch).
@@ -80,6 +86,9 @@ namespace sl::menu::ui {
 
         void SetSuspendedApp(u64 app_id);
         void ClearSuspendedApp();
+        // The host loads the app list on a worker thread; this shows a "Loading"
+        // message on the home screen until it's ready.
+        void SetLoading(bool v) { m_loading = v; }
         void SetUser(AccountUid uid, const char *nickname);
         void SetStatus(const char *msg);
 
@@ -127,7 +136,7 @@ namespace sl::menu::ui {
         void SaveFavourites();
         void LoadSort();
         void SaveSort();
-        void SelectApp(u64 app_id); // move cursor to the item for app_id
+        bool SelectApp(u64 app_id); // move cursor to the item for app_id; false if absent
         void BuildOptions();        // populate the X-menu for the current selection
 
         // Appearance settings (text alignment) + custom game names.
@@ -153,9 +162,13 @@ namespace sl::menu::ui {
         void DrawOobe();
         void DrawMain();
         void DrawMainList();        // original text carousel
-        void DrawMainLine();        // horizontal cover carousel (ES / WiiFlow)
+        void DrawMainLine();        // horizontal cover carousel (EmulationStation)
         void DrawMainGrid();        // page of icon tiles
         void DrawMainCover();       // fullscreen single-cover pager
+        void DrawMainShelf();       // Xbox-360-style uniform cover row
+        // Sort mode -> short label for the shelf header / options menu.
+        const char *SortLabel() const;
+        void DrawMainEmpty();       // "Loading..." / "No apps found" placeholder
         // Draw one app/entry as a square tile: cached icon if present, else a
         // themed placeholder with the name. Used by the Line and Grid modes.
         void DrawAppTile(const MenuItem &it, int x, int y, int size,
@@ -205,12 +218,15 @@ namespace sl::menu::ui {
 
         // Appearance: main-list text alignment + user-renamed games.
         TextAlign m_align = TextAlign::Left;
+        bool      m_list_icons = true;         // show the icon column in List mode
         UiMode    m_ui_mode = UiMode::List;   // main-screen layout
+        bool      m_loading = false;          // app list still loading in the background
         gfx::IconCache m_icons;               // app icon texture cache (Line/Grid)
         std::unordered_map<int, SDL_Texture*> m_sys_icons; // Icons
         std::vector<std::pair<u64, std::string>> m_names; // app_id -> custom name
         int  m_theming_cursor = 0;
         bool m_jumped_to_suspended = false;
+        bool m_deferred_done = false; // InitDeferred (widgets) has run
         bool m_want_exit = false;   // asked the daemon to show the keyboard
 
         // Home screen widgets

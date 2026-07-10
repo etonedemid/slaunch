@@ -48,9 +48,9 @@ namespace sl::menu::gfx {
         for (auto &kv : m_map) if (kv.second.tex) live++;
         if (live >= Capacity) EvictOldest();
 
-        char path[64];
-        snprintf(path, sizeof(path), "sdmc:/slaunch/cache/icons/%016llX.jpg",
-                 (unsigned long long)app_id);
+        char path[80];
+        snprintf(path, sizeof(path), "sdmc:/slaunch/%s/%016llX.jpg",
+                 m_dir, (unsigned long long)app_id);
         SDL_Texture *tex = (m_scale > 0)
                                ? m_gfx->LoadImageScaled(path, m_scale, m_scale)
                                : m_gfx->LoadImage(path);   // full resolution
