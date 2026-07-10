@@ -40,6 +40,7 @@ namespace sl::menu::ui {
         m_user      = user;
         m_suspended = suspended_app_id;
         m_icons.Init(gfx);
+        m_hb_icons.Init(gfx, hb::IconDir);
         LocaleInit();   // load the system-language locale (English is the fallback)
 
         // Resolve the user's nickname; if the launcher handed us an invalid uid,
@@ -69,6 +70,9 @@ namespace sl::menu::ui {
 
         LoadFavourites();
         LoadSort();
+        LoadOrder();
+        LoadHbPins();
+        LoadHbDonor();
         LoadSettings();
         LoadNames();
         // Widget loading (Lua parse + curl init) is deferred to InitDeferred so it
@@ -82,14 +86,25 @@ namespace sl::menu::ui {
         if (m_deferred_done) return;
         m_deferred_done = true;
         m_widgets.Init();   // loads widget config, starts the network thread
+        const bool audio = m_music.Init();  // opens the mixer + resumes background music
+        m_sfx.Init(audio);                  // UI sounds share the mixer
+        // Welcome chime only on a fresh open (no game suspended behind us), so it
+        // isn't heard every single time you HOME out of a game.
+        if (audio && m_suspended == 0) m_sfx.Play(audio::Sfx::Welcome);
+        // Resolve pinned homebrew names/icons (parses their .nro) off the hot path.
+        if (!m_hb_pins.empty()) ResolvePins();
     }
 
     Menu::~Menu() {
-        // Stop the network thread before curl/sockets tear down.
+        // Free SFX chunks before Music::Exit() closes the mixer, then stop the
+        // network thread.
+        m_sfx.Exit();
+        m_music.Exit();
         m_widgets.Exit();
         // Free textures while the renderer is still alive (main() runs gfx.Exit()
         // only after the Menu is destroyed).
         m_icons.Exit();
+        m_hb_icons.Exit();
         for (auto &kv : m_sys_icons)
             if (kv.second) m_gfx->FreeImage(kv.second);
         m_sys_icons.clear();
@@ -110,7 +125,7 @@ namespace sl::menu::ui {
             it.is_favourite = IsFavourite(a.app_id);
             (it.is_favourite ? favs : rest).push_back(std::move(it));
         }
-        auto sort_group = [this](std::vector<MenuItem> &v) {
+        auto sort_group = [&](std::vector<MenuItem> &v) {
             auto title = [](const MenuItem &x, const MenuItem &y) {
                 return strcasecmp(x.name.c_str(), y.name.c_str());
             };
@@ -131,7 +146,8 @@ namespace sl::menu::ui {
                                   return title(x, y) < 0;
                               });
                     break;
-                default: break;   // Default: keep enumeration order
+                default: break;   // Default: keep the built arrangement (custom
+                                  // move-order is applied to the whole list below)
             }
         };
         sort_group(favs);
@@ -139,6 +155,17 @@ namespace sl::menu::ui {
 
         // Favourites pinned at the very top for quick access.
         for (auto &it : favs) m_items.push_back(std::move(it));
+
+        // Homebrew pinned to the main menu (name + cached icon resolved by
+        // ResolvePins; fallback file-base name until then).
+        for (auto &p : m_hb_pins) {
+            MenuItem it;
+            it.kind    = ItemKind::Homebrew;
+            it.hb_path = p.path;
+            it.name    = p.name;
+            it.hb_icon = p.icon_key;
+            m_items.push_back(std::move(it));
+        }
 
         // System shortcuts.
         auto add = [&](ItemKind k, const char *name) {
@@ -156,6 +183,22 @@ namespace sl::menu::ui {
 
         // The remaining (non-favourite) games.
         for (auto &it : rest) m_items.push_back(std::move(it));
+
+        // Custom arrangement (from Move): reorder the whole list by the saved key
+        // order. Seeded from the built arrangement, so it starts as a no-op and
+        // only reflects entries the user has actually moved; new/unlisted entries
+        // sort stably to the end in their default position. Default sort only.
+        if (m_sort == SortMode::Default && !m_order.empty()) {
+            auto rank = [this](const std::string &key) {
+                for (int i = 0; i < (int)m_order.size(); i++)
+                    if (m_order[i] == key) return i;
+                return (int)m_order.size() + 1;
+            };
+            std::stable_sort(m_items.begin(), m_items.end(),
+                [&](const MenuItem &x, const MenuItem &y){
+                    return rank(ItemKey(x)) < rank(ItemKey(y));
+                });
+        }
 
         if (m_cursor >= (int)m_items.size())
             m_cursor = m_items.empty() ? 0 : (int)m_items.size() - 1;
@@ -210,6 +253,77 @@ namespace sl::menu::ui {
         if (!fp) return;
         fprintf(fp, "%d\n", (int)m_sort);
         fclose(fp);
+    }
+
+    // Stable per-entry key for the custom order: games by title id, homebrew by
+    // .nro path, system shortcuts by kind. Kept text so order.txt is one key/line.
+    std::string Menu::ItemKey(const MenuItem &it) const {
+        char b[40];
+        switch (it.kind) {
+            case ItemKind::Game:
+                snprintf(b, sizeof(b), "g%016llX", (unsigned long long)it.app_id);
+                return b;
+            case ItemKind::Homebrew:
+                return "h" + it.hb_path;
+            default:
+                snprintf(b, sizeof(b), "s%d", (int)it.kind);
+                return b;
+        }
+    }
+
+    void Menu::SelectByKey(const std::string &key) {
+        for (int i = 0; i < (int)m_items.size(); i++)
+            if (ItemKey(m_items[i]) == key) {
+                m_cursor = i;
+                m_scroll_pos = (float)i;
+                m_grid_scroll = (float)(i / GridColumns());
+                return;
+            }
+    }
+
+    void Menu::LoadOrder() {
+        m_order.clear();
+        FILE *fp = fopen("sdmc:/slaunch/config/order.txt", "r");
+        if (!fp) return;
+        char line[FS_MAX_PATH + 4];
+        while (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (line[0]) m_order.push_back(line);
+        }
+        fclose(fp);
+    }
+
+    void Menu::SaveOrder() {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/config", 0777);
+        FILE *fp = fopen("sdmc:/slaunch/config/order.txt", "w");
+        if (!fp) return;
+        for (auto &k : m_order) fprintf(fp, "%s\n", k.c_str());
+        fclose(fp);
+    }
+
+    // Reorder the held entry one slot in the given direction, swapping with the
+    // adjacent entry (any kind), then persist. Keeps the cursor on the moved item.
+    void Menu::MoveSelected(int dir) {
+        if (!m_move_mode || m_move_key.empty()) return;
+        int cur = -1;
+        for (int i = 0; i < (int)m_items.size(); i++)
+            if (ItemKey(m_items[i]) == m_move_key) { cur = i; break; }
+        const int nb = cur + dir;
+        if (cur < 0 || nb < 0 || nb >= (int)m_items.size()) return;
+
+        // Seed m_order from the full current arrangement the first time, so the
+        // ranking is complete (a single move is otherwise ambiguous).
+        if (m_order.empty())
+            for (auto &it : m_items) m_order.push_back(ItemKey(it));
+
+        auto pos = [&](const std::string &key) {
+            for (int i = 0; i < (int)m_order.size(); i++) if (m_order[i] == key) return i;
+            m_order.push_back(key); return (int)m_order.size() - 1;
+        };
+        std::swap(m_order[pos(m_move_key)], m_order[pos(ItemKey(m_items[nb]))]);
+        RebuildItems();
+        SelectByKey(m_move_key);   // keep the cursor on the moved entry
     }
 
     bool Menu::SelectApp(u64 app_id) {
@@ -326,19 +440,20 @@ namespace sl::menu::ui {
 
     // ---- On-screen keyboard (rename) ---------------------------------------
     namespace {
-        // 4 character rows + a special bottom row (Shift/Space/Back/Done).
+        // 4 character rows + a special bottom row (Shift/Space/Back/Clear/Done).
         const char *kKbRows[4] = {
             "1234567890",
             "qwertyuiop",
             "asdfghjkl",
             "zxcvbnm",
         };
-        const char *kKbSpecial[4] = { "Shift", "Space", "Back", "Done" };
-        constexpr int kKbSpecialRow = 4;
+        const char *kKbSpecial[5] = { "Shift", "Space", "Back", "Clear", "Done" };
+        constexpr int kKbSpecialRow  = 4;
+        constexpr int kKbSpecialCols = 5;
 
         int KbRowLen(int row) {
             if (row < 4) return (int)strlen(kKbRows[row]);
-            return 4; // special row
+            return kKbSpecialCols; // special row
         }
     }
 
@@ -389,7 +504,8 @@ namespace sl::menu::ui {
                     case 0: m_kb_upper = !m_kb_upper; break;         // Shift
                     case 1: if (m_kb_text.size() < 60) m_kb_text.push_back(' '); break; // Space
                     case 2: backspace(); break;                     // Back
-                    case 3: commit(); break;                        // Done
+                    case 3: m_kb_text.clear(); break;               // Clear
+                    case 4: commit(); break;                        // Done
                 }
             }
         }
@@ -423,11 +539,12 @@ namespace sl::menu::ui {
             }
         }
 
-        // Special row (Shift / Space / Back / Done).
+        // Special row (Shift / Space / Back / Clear / Done).
         const int sy = top + 4 * rowH;
-        const int sw = 200, gap = 12, totW = 4 * sw + 3 * gap, sx0 = cx - totW / 2;
+        const int sw = 176, gap = 12;
+        const int totW = kKbSpecialCols * sw + (kKbSpecialCols - 1) * gap, sx0 = cx - totW / 2;
         if (y >= sy - 8 && y < sy + rowH - 8) {
-            for (int c = 0; c < 4; c++) {
+            for (int c = 0; c < kKbSpecialCols; c++) {
                 const int kx = sx0 + c * (sw + gap);
                 if (x >= kx && x < kx + sw) { row = kKbSpecialRow; col = c; return true; }
             }
@@ -545,20 +662,32 @@ namespace sl::menu::ui {
             case Screen::Widgets:       return OnButtonWidgets(b);
             case Screen::WidgetOptions: return OnButtonWidgetOptions(b);
             case Screen::Keyboard:    return OnButtonKeyboard(b);
+            case Screen::Music:         return OnButtonMusic(b);
+            case Screen::Homebrew:      return OnButtonHomebrew(b);
         }
         return Action::None;
     }
 
     Menu::Action Menu::OnButtonOobe(Btn b) {
-        constexpr int LastStep = 2;
-        if (m_oobe_step == 1) {
+        constexpr int LastStep = 4;
+        if (m_oobe_step == 1) {   // theme - applies live
             const int n = m_theme.Count();
             if (b == Btn::Down) { m_theme_cursor = (m_theme_cursor + 1) % n; m_theme.Select(m_theme_cursor); }
             if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + n - 1) % n; m_theme.Select(m_theme_cursor); }
         }
+        if (m_oobe_step == 2) {   // layout
+            const int n = (int)UiMode::Count;
+            if (b == Btn::Right) m_ui_mode = (UiMode)(((int)m_ui_mode + 1) % n);
+            if (b == Btn::Left)  m_ui_mode = (UiMode)(((int)m_ui_mode + n - 1) % n);
+        }
         if (b == Btn::A) {
             if (m_oobe_step < LastStep) { m_oobe_step++; }
-            else { m_theme.Save(); m_screen = Screen::Main; return Action::FinishSetup; }
+            else {
+                m_theme.Save();
+                SaveSettings();   // persist the chosen layout (ui_mode)
+                m_screen = Screen::Main;
+                return Action::FinishSetup;
+            }
         }
         if (b == Btn::B && m_oobe_step > 0) m_oobe_step--;
         return Action::None;
@@ -569,6 +698,16 @@ namespace sl::menu::ui {
             if (b == Btn::Plus) return Action::OpenPower;
             return Action::None;
         }
+        // Move mode: the D-pad reorders the held entry instead of navigating.
+        if (m_move_mode) {
+            if (b == Btn::Left  || b == Btn::Up)   { MoveSelected(-1); return Action::None; }
+            if (b == Btn::Right || b == Btn::Down) { MoveSelected(+1); return Action::None; }
+            if (b == Btn::A) { m_move_mode = false; SaveOrder(); SetStatus("Order saved"); }
+            if (b == Btn::B) { m_move_mode = false; LoadOrder(); RebuildItems(); SelectByKey(m_move_key); }
+            return Action::None;
+        }
+        if (b == Btn::L) m_sfx.Play(audio::Sfx::PageLeft);
+        if (b == Btn::R) m_sfx.Play(audio::Sfx::PageRight);
         // Carousel navigation: the selected item is always centred, so we only
         // move the cursor. Scrolling stops at the ends; a *fresh* press (not an
         // auto-repeat) at an end wraps around, so holding the stick can't spin
@@ -639,7 +778,11 @@ namespace sl::menu::ui {
                 case ItemKind::WebBrowser:   return Action::OpenWebBrowser;
                 case ItemKind::MiiEdit:      return Action::OpenMiiEdit;
                 case ItemKind::Controllers:  return Action::OpenControllers;
-                case ItemKind::HomebrewMenu: return Action::OpenHomebrewMenu;
+                case ItemKind::HomebrewMenu: OpenHomebrewBrowser(); return Action::None;
+                case ItemKind::Homebrew:
+                    m_hb_launch_path = it.hb_path;
+                    // Run as an application if a donor is set, else as an applet.
+                    return m_hb_donor ? Action::LaunchHomebrewApp : Action::LaunchHomebrew;
                 case ItemKind::Settings:     return Action::OpenNetConnect;
                 case ItemKind::Power:        return Action::OpenPower;
             }
@@ -655,7 +798,8 @@ namespace sl::menu::ui {
     }
 
     // ---- X "Options" overlay ------------------------------------------------
-    namespace { enum { OptFav = 0, OptRename, OptSort, OptCloseGame, OptDismiss }; }
+    namespace { enum { OptFav = 0, OptRename, OptMove, OptUnpinHb, OptSetDonor,
+                       OptSort, OptCloseGame, OptDismiss }; }
 
     void Menu::BuildOptions() {
         m_options.clear();
@@ -665,9 +809,15 @@ namespace sl::menu::ui {
             m_options.push_back({ IsFavourite(it.app_id) ? T("Remove from Favourites")
                                                          : T("Add to Favourites"), OptFav });
             m_options.push_back({ T("Rename"), OptRename });
-            if (m_suspended != 0 && it.app_id == m_suspended)
-                m_options.push_back({ T("Close game"), OptCloseGame });
+            m_options.push_back({ m_hb_donor == it.app_id ? T("Homebrew donor (set)")
+                                                          : T("Use as homebrew donor"), OptSetDonor });
         }
+        if (it.kind == ItemKind::Homebrew)
+            m_options.push_back({ T("Remove from menu"), OptUnpinHb });
+        // Any entry can be reordered.
+        m_options.push_back({ T("Move"), OptMove });
+        if (it.kind == ItemKind::Game && m_suspended != 0 && it.app_id == m_suspended)
+            m_options.push_back({ T("Close game"), OptCloseGame });
         m_options.push_back({ std::string(T("Sort: ")) + SortLabel(), OptSort });
         m_options.push_back({ T("Cancel"), OptDismiss });
     }
@@ -694,6 +844,8 @@ namespace sl::menu::ui {
         const MenuItem &sel = m_items[m_cursor];
         const bool sel_is_game = (sel.kind == ItemKind::Game);
         const u64  sel_id      = sel.app_id;
+        const std::string sel_key  = ItemKey(sel);
+        const std::string sel_hb   = sel.hb_path;
 
         switch (m_options[m_options_cursor].action) {
             case OptFav: {
@@ -709,11 +861,32 @@ namespace sl::menu::ui {
                 m_options_open = false;
                 RenameSelected();   // shows the software keyboard, then rebuilds
                 return Action::None;
+            case OptMove:
+                // Custom order only takes effect in Default sort.
+                if (m_sort != SortMode::Default) { m_sort = SortMode::Default; SaveSort(); RebuildItems(); }
+                m_move_mode = true;
+                m_move_key  = sel_key;
+                SelectByKey(sel_key);
+                SetStatus("Move: D-pad to reorder, A to place");
+                m_options_open = false;
+                return Action::None;
+            case OptUnpinHb:
+                ToggleHbPin(sel_hb);   // remove from the main menu
+                SetStatus("Removed from menu");
+                m_options_open = false;
+                return Action::None;
+            case OptSetDonor:
+                m_hb_donor = (m_hb_donor == sel_id) ? 0 : sel_id;   // toggle
+                SaveHbDonor();
+                SetStatus(m_hb_donor ? "Homebrew donor set (browser Y = run as app)"
+                                     : "Homebrew donor cleared");
+                m_options_open = false;
+                return Action::None;
             case OptSort:
                 m_sort = (SortMode)(((int)m_sort + 1) % (int)SortMode::Count);
                 SaveSort();
                 RebuildItems();
-                if (sel_is_game) SelectApp(sel_id);
+                SelectByKey(sel_key);
                 BuildOptions(); // refresh the sort label, keep the menu open
                 if (m_options_cursor >= (int)m_options.size())
                     m_options_cursor = (int)m_options.size() - 1;
@@ -730,7 +903,7 @@ namespace sl::menu::ui {
 
     // ---- Theming submenu (appearance + widgets) ----------------------------
     namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_UiMode, TH_ListIcons,
-                       TH_Widgets, TH_Back, TH_Count }; }
+                       TH_Widgets, TH_Music, TH_Back, TH_Count }; }
 
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto cycleAlign = [&](int dir) {
@@ -769,6 +942,7 @@ namespace sl::menu::ui {
                 case TH_UiMode:  cycleUiMode(+1); break;
                 case TH_ListIcons: toggleListIcons(); break;
                 case TH_Widgets: openWidgets(); break;
+                case TH_Music:   m_screen = Screen::Music; m_music_cursor = 0; m_sub_scroll = 0; break;
                 case TH_Back:    m_screen = Screen::Main; break;
             }
         }
@@ -1225,6 +1399,8 @@ namespace sl::menu::ui {
     }
 
     void Menu::Render() {
+        m_music.Update();   // advance playback position / roll to the next track
+
         // The Fonts and Color-picker screens always render their chrome in the
         // default system font so they can never make themselves unreadable.
         m_gfx->UseDefaultFont(m_screen == Screen::Fonts || m_screen == Screen::ColorPicker ||
@@ -1242,6 +1418,8 @@ namespace sl::menu::ui {
             case Screen::Widgets:       DrawWidgets(); break;
             case Screen::WidgetOptions: DrawWidgetOptions(); break;
             case Screen::Keyboard:    DrawKeyboard(); break;
+            case Screen::Music:       DrawMusic(); break;
+            case Screen::Homebrew:    DrawHomebrew(); break;
         }
         if (m_options_open) DrawOptions();
         if (m_dialog != Dialog::None) DrawDialog();
@@ -1250,25 +1428,94 @@ namespace sl::menu::ui {
 
     void Menu::DrawOobe() {
         const Theme &t = m_theme.Current();
-        int cx = gfx::Gfx::Width / 2;
-        if (m_oobe_step == 0) {
-            m_gfx->TextCentered(FontSize::Title, cx, 240, t.title, T("Welcome to sLaunch"));
-            m_gfx->TextCentered(FontSize::Small, cx, 380, t.dim, T("Let's get you set up."));
-            DrawHint("A: Continue");
-        } else if (m_oobe_step == 1) {
-            m_gfx->TextCentered(FontSize::Large, cx, 120, t.title, T("Choose a Theme"));
-            int top = 260;
-            for (int i = 0; i < m_theme.Count(); i++) {
-                bool sel = (i == m_theme_cursor);
-                int y = top + i * 52;
-                if (sel) m_gfx->FillRect(cx - 200, y - 4, 400, 46, WithAlpha(t.accent, 40));
-                m_gfx->TextCentered(FontSize::Normal, cx, y, sel ? t.accent : t.fg, m_theme.At(i).name);
+        const int cx = gfx::Gfx::Width / 2;
+
+        switch (m_oobe_step) {
+            case 0: // Welcome
+                m_gfx->TextCentered(FontSize::Title, cx, 210, t.title, "sLaunch");
+                m_gfx->FillRect(cx - 130, 288, 260, 3, t.accent);
+                m_gfx->TextCentered(FontSize::Normal, cx, 336, t.fg, T("A clean HOME Menu replacement"));
+                m_gfx->TextCentered(FontSize::Small, cx, 392, t.dim,
+                                    T("Let's set it up - just a few seconds."));
+                DrawHint("A: Get started");
+                break;
+
+            case 1: { // Theme
+                m_gfx->TextCentered(FontSize::Large, cx, 108, t.title, T("Pick a theme"));
+                m_gfx->TextCentered(FontSize::Small, cx, 158, t.dim,
+                                    T("The whole menu updates as you choose."));
+                const int n = m_theme.Count();
+                const int top = 250;
+                for (int i = 0; i < n; i++) {
+                    const bool sel = (i == m_theme_cursor);
+                    const int y = top + i * 52;
+                    if (y > 560) break;
+                    if (sel) m_gfx->FillRect(cx - 220, y - 6, 440, 46, WithAlpha(t.accent, 45));
+                    m_gfx->TextCentered(FontSize::Normal, cx, y, sel ? t.accent : t.fg,
+                                        m_theme.At(i).name);
+                }
+                DrawHint("Up/Down: Choose    A: Next    B: Back");
+                break;
             }
-            DrawHint("A: Continue    B: Back");
-        } else {
-            m_gfx->TextCentered(FontSize::Title, cx, 260, t.title, T("All set!"));
-            m_gfx->TextCentered(FontSize::Normal, cx, 350, t.fg, T("You're ready to go."));
-            DrawHint("A: Finish");
+
+            case 2: { // Layout
+                m_gfx->TextCentered(FontSize::Large, cx, 108, t.title, T("Choose a layout"));
+                m_gfx->TextCentered(FontSize::Small, cx, 158, t.dim,
+                                    T("You can change this later in Theming."));
+                const char *names[5] = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
+                const char *desc[5]  = { T("A simple scrolling text list"),
+                                         T("A cover carousel (EmulationStation)"),
+                                         T("A grid of app icons"),
+                                         T("One fullscreen cover at a time"),
+                                         T("An Xbox-360-style cover shelf") };
+                const int m = (int)m_ui_mode;
+                m_gfx->Text(FontSize::Title, cx - 250, 300, WithAlpha(t.dim, 150), "<");
+                const int rw = m_gfx->TextWidth(FontSize::Title, ">");
+                m_gfx->Text(FontSize::Title, cx + 250 - rw, 300, WithAlpha(t.dim, 150), ">");
+                m_gfx->TextCentered(FontSize::Title, cx, 300, t.accent, names[m]);
+                m_gfx->TextCentered(FontSize::Normal, cx, 388, t.fg, desc[m]);
+                DrawHint("Left/Right: Choose    A: Next    B: Back");
+                break;
+            }
+
+            case 3: { // Good to know
+                m_gfx->TextCentered(FontSize::Large, cx, 100, t.title, T("Good to know"));
+                struct Tip { const char *key; const char *val; };
+                const Tip tips[] = {
+                    { "X",        T("Options on any entry: favourite, rename, move") },
+                    { "Theming",  T("Fonts, colours, background music, widgets") },
+                    { "Homebrew", T("Browse .nro files and pin them to this menu") },
+                    { "HOME",     T("Suspends your game and brings this back") },
+                };
+                const int lx = cx - 340, top = 190;
+                for (int i = 0; i < 4; i++) {
+                    const int y = top + i * 74;
+                    const int kw = m_gfx->TextWidth(FontSize::Small, tips[i].key) + 24;
+                    m_gfx->FillRect(lx, y - 4, kw, 40, WithAlpha(t.accent, 40));
+                    m_gfx->Text(FontSize::Small, lx + 12, y + 4, t.accent, tips[i].key);
+                    m_gfx->Text(FontSize::Normal, lx + 130, y, t.fg, tips[i].val);
+                }
+                DrawHint("A: Next    B: Back");
+                break;
+            }
+
+            default: // Done
+                m_gfx->TextCentered(FontSize::Title, cx, 240, t.title, T("You're all set"));
+                m_gfx->FillRect(cx - 100, 318, 200, 3, t.accent);
+                m_gfx->TextCentered(FontSize::Normal, cx, 366, t.fg, T("Enjoy sLaunch."));
+                DrawHint("A: Finish");
+                break;
+        }
+
+        // Progress dots.
+        constexpr int kSteps = 5;
+        const int gap = 28;
+        const int x0 = cx - (kSteps - 1) * gap / 2;
+        for (int i = 0; i < kSteps; i++) {
+            const bool cur = (i == m_oobe_step);
+            const int sz = cur ? 12 : 8;
+            m_gfx->FillRect(x0 + i * gap - sz / 2, 596 - sz / 2, sz, sz,
+                            cur ? t.accent : WithAlpha(t.dim, 110));
         }
     }
 
@@ -1361,7 +1608,9 @@ namespace sl::menu::ui {
             // app icon; system entries use their black/white icon.
             if (m_list_icons && m_align == TextAlign::Left) {
                 const bool game = (it.kind == ItemKind::Game);
-                SDL_Texture *ic = game ? m_icons.Get(it.app_id) : SystemIcon(it.kind);
+                SDL_Texture *ic = game ? m_icons.Get(it.app_id)
+                                 : it.kind == ItemKind::Homebrew ? m_hb_icons.Get(it.hb_icon)
+                                 : SystemIcon(it.kind);
                 if (ic) {
                     const int isz = std::min(lh, 44);
                     const Uint8 ia = game ? alpha : (Uint8)(alpha * 195 / 255);
@@ -1512,11 +1761,14 @@ namespace sl::menu::ui {
         const Theme &t = m_theme.Current();
 
         const bool isGame = (it.kind == ItemKind::Game);
-        SDL_Texture *icon = isGame ? m_icons.Get(it.app_id) : SystemIcon(it.kind);
+        const bool isHb   = (it.kind == ItemKind::Homebrew);
+        SDL_Texture *icon = isGame ? m_icons.Get(it.app_id)
+                          : isHb   ? m_hb_icons.Get(it.hb_icon)
+                          : SystemIcon(it.kind);
 
         if (icon) {
-            // icon fills the tile; game icons opaque, system icons dimmed to grey
-            const Uint8 ia = isGame ? alpha : (Uint8)(alpha * 195 / 255);
+            // icon fills the tile; game/homebrew opaque, system icons dimmed to grey
+            const Uint8 ia = (isGame || isHb) ? alpha : (Uint8)(alpha * 195 / 255);
             m_gfx->DrawImage(icon, x, y, size, size, ia);
         } else {
             // no icon file: themed panel + big initial
@@ -1796,7 +2048,7 @@ namespace sl::menu::ui {
         if (sel.app_id == m_suspended && m_suspended != 0)
             m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 76, t.accent, T("Running"));
 
-        DrawStatusHint("A: Launch    X: Options    Left/Right: Browse");
+        DrawStatusHint("A: Launch    X: Options");
     }
 
     void Menu::DrawOptions() {
@@ -1831,12 +2083,13 @@ namespace sl::menu::ui {
         const char *modes[5]  = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
         std::vector<std::string> labels = {
             T("Themes"), T("Fonts"), T("Text position"), T("UI mode"), T("List icons"),
-            T("Widgets"), T("Back")
+            T("Widgets"), T("Music"), T("Back")
         };
         std::vector<std::string> values(labels.size());
         values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_UiMode]      = modes[(int)m_ui_mode];
         values[TH_ListIcons]   = m_list_icons ? T("On") : T("Off");
+        values[TH_Music]       = m_music.Enabled() ? T("On") : T("Off");
         {
             char c[32];
             snprintf(c, sizeof(c), "%d %s", m_widgets.Count(), T("found"));
@@ -1845,6 +2098,208 @@ namespace sl::menu::ui {
 
         DrawCarousel(labels, values, m_theming_cursor, m_sub_scroll);
         DrawHint("Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back");
+    }
+
+    // ---- Music submenu -----------------------------------------------------
+    namespace { enum { MU_Enabled = 0, MU_Track, MU_Volume, MU_Shuffle, MU_Back, MU_Count }; }
+
+    Menu::Action Menu::OnButtonMusic(Btn b) {
+        if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = TH_Music; return Action::None; }
+        if (b == Btn::Down) m_music_cursor = (m_music_cursor + 1) % MU_Count;
+        if (b == Btn::Up)   m_music_cursor = (m_music_cursor + MU_Count - 1) % MU_Count;
+
+        const bool left = (b == Btn::Left), right = (b == Btn::Right), a = (b == Btn::A);
+        switch (m_music_cursor) {
+            case MU_Enabled:
+                if (left || right || a) m_music.SetEnabled(!m_music.Enabled());
+                break;
+            case MU_Track:
+                if (right || a) m_music.Next();
+                else if (left)  m_music.Prev();
+                break;
+            case MU_Volume:
+                if (right || a) m_music.SetVolume(m_music.Volume() + 5);
+                else if (left)  m_music.SetVolume(m_music.Volume() - 5);
+                break;
+            case MU_Shuffle:
+                if (left || right || a) m_music.ToggleShuffle();
+                break;
+            case MU_Back:
+                if (a) { m_screen = Screen::Theming; m_sub_scroll = TH_Music; }
+                break;
+        }
+        return Action::None;
+    }
+
+    void Menu::DrawMusic() {
+        DrawTopBar("Music");
+        const Theme &t = m_theme.Current();
+
+        std::vector<std::string> labels = {
+            T("Enabled"), T("Track"), T("Volume"), T("Shuffle"), T("Back")
+        };
+        std::vector<std::string> values(labels.size());
+        values[MU_Enabled] = m_music.Enabled() ? T("On") : T("Off");
+        if (m_music.TrackCount() == 0) {
+            values[MU_Track] = T("No music found");
+        } else {
+            std::string nm = m_music.CurrentName();
+            if (nm.size() > 30) nm = nm.substr(0, 29) + "...";
+            char c[64];
+            snprintf(c, sizeof(c), "%s  (%d/%d)", nm.c_str(),
+                     m_music.TrackIndex() + 1, m_music.TrackCount());
+            values[MU_Track] = c;
+        }
+        char vol[16];
+        snprintf(vol, sizeof(vol), "%d%%", m_music.Volume());
+        values[MU_Volume]  = vol;
+        values[MU_Shuffle] = m_music.Shuffle() ? T("On") : T("Off");
+
+        DrawCarousel(labels, values, m_music_cursor, m_sub_scroll);
+        if (m_music.TrackCount() == 0)
+            m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, 612, t.dim,
+                                T("Put mp3/ogg files in sdmc:/slaunch/music"));
+        DrawHint("Up/Down: Select   A/Left/Right: Change   B: Back");
+    }
+
+    // ---- Homebrew (.nro) browser -------------------------------------------
+    void Menu::LoadHbPins() {
+        m_hb_pins.clear();
+        FILE *fp = fopen("sdmc:/slaunch/config/homebrew.txt", "r");
+        if (!fp) return;
+        char line[FS_MAX_PATH + 2];
+        while (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (!line[0]) continue;
+            hb::HbEntry e;                 // fallback name until ResolvePins runs
+            e.path = line;
+            size_t slash = e.path.find_last_of('/');
+            std::string base = (slash == std::string::npos) ? e.path : e.path.substr(slash + 1);
+            size_t dot = base.find_last_of('.');
+            e.name = (dot == std::string::npos) ? base : base.substr(0, dot);
+            m_hb_pins.push_back(std::move(e));
+        }
+        fclose(fp);
+    }
+
+    // Parse each pinned .nro so it shows its real name + (cached) icon on the main
+    // menu without needing the browser opened. Runs off the boot path (InitDeferred).
+    void Menu::ResolvePins() {
+        for (auto &p : m_hb_pins) {
+            hb::HbEntry r = hb::ReadOne(p.path);
+            p.name = r.name;
+            p.icon_key = r.icon_key;
+        }
+        RebuildItems();
+    }
+
+    void Menu::SaveHbPins() {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/config", 0777);
+        FILE *fp = fopen("sdmc:/slaunch/config/homebrew.txt", "w");
+        if (!fp) return;
+        for (auto &p : m_hb_pins) fprintf(fp, "%s\n", p.path.c_str());
+        fclose(fp);
+    }
+
+    bool Menu::IsHbPinned(const std::string &path) const {
+        for (auto &p : m_hb_pins) if (p.path == path) return true;
+        return false;
+    }
+
+    void Menu::LoadHbDonor() {
+        m_hb_donor = 0;
+        FILE *fp = fopen("sdmc:/slaunch/config/hb_donor.txt", "r");
+        if (!fp) return;
+        char line[32];
+        if (fgets(line, sizeof(line), fp)) m_hb_donor = strtoull(line, nullptr, 16);
+        fclose(fp);
+    }
+
+    void Menu::SaveHbDonor() {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/config", 0777);
+        FILE *fp = fopen("sdmc:/slaunch/config/hb_donor.txt", "w");
+        if (!fp) return;
+        fprintf(fp, "%016llX\n", (unsigned long long)m_hb_donor);
+        fclose(fp);
+    }
+
+    void Menu::ToggleHbPin(const std::string &path) {
+        auto it = std::find_if(m_hb_pins.begin(), m_hb_pins.end(),
+                               [&](const hb::HbEntry &e){ return e.path == path; });
+        if (it != m_hb_pins.end()) {
+            m_hb_pins.erase(it);
+        } else {
+            // Resolve now so the pinned entry gets its name + icon immediately.
+            hb::HbEntry e;
+            for (auto &h : m_hb) if (h.path == path) { e = h; break; }
+            if (e.path.empty()) e = hb::ReadOne(path);
+            m_hb_pins.push_back(std::move(e));
+        }
+        SaveHbPins();
+        RebuildItems();
+    }
+
+    void Menu::OpenHomebrewBrowser() {
+        if (!m_hb_scanned) { m_hb = hb::Scan(); m_hb_scanned = true; RebuildItems(); }
+        m_screen = Screen::Homebrew;
+        m_hb_cursor = 0;
+    }
+
+    Menu::Action Menu::OnButtonHomebrew(Btn b) {
+        const int n = (int)m_hb.size();
+        if (b == Btn::B) { m_screen = Screen::Main; return Action::None; }
+        if (n == 0) return Action::None;
+        if (b == Btn::Down) m_hb_cursor = (m_hb_cursor + 1) % n;
+        if (b == Btn::Up)   m_hb_cursor = (m_hb_cursor + n - 1) % n;
+        if (b == Btn::A) {   // launch: as an application if a donor is set, else applet
+            m_hb_launch_path = m_hb[m_hb_cursor].path;
+            return m_hb_donor ? Action::LaunchHomebrewApp : Action::LaunchHomebrew;
+        }
+        if (b == Btn::Y) {   // force applet mode (fallback when app mode misbehaves)
+            m_hb_launch_path = m_hb[m_hb_cursor].path;
+            return Action::LaunchHomebrew;
+        }
+        if (b == Btn::X) {   // pin / unpin from the main menu
+            ToggleHbPin(m_hb[m_hb_cursor].path);
+            SetStatus(IsHbPinned(m_hb[m_hb_cursor].path) ? "Pinned to menu" : "Unpinned");
+        }
+        return Action::None;
+    }
+
+    void Menu::DrawHomebrew() {
+        const Theme &t = m_theme.Current();
+        DrawTopBar("Homebrew");
+        if (m_hb.empty()) {
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 320, t.dim,
+                                T("No .nro found in sdmc:/switch"));
+            DrawHint("B: Back");
+            return;
+        }
+        m_hb_icons.SetScale(gfx::IconCache::GridScale);
+
+        const int rowH = 84, top = 118, visible = 6;
+        int start = std::max(0, m_hb_cursor - visible / 2);
+        if (start + visible > (int)m_hb.size()) start = std::max(0, (int)m_hb.size() - visible);
+        for (int i = 0; i < visible && start + i < (int)m_hb.size(); i++) {
+            const int idx = start + i;
+            const hb::HbEntry &h = m_hb[idx];
+            const int y = top + i * rowH;
+            const bool sel = (idx == m_hb_cursor);
+            if (sel) m_gfx->FillRect(60, y - 6, gfx::Gfx::Width - 120, rowH - 12, WithAlpha(t.accent, 40));
+            SDL_Texture *ic = h.icon_key ? m_hb_icons.Get(h.icon_key) : nullptr;
+            if (ic) m_gfx->DrawImage(ic, 80, y, 64, 64, 255);
+            else    m_gfx->FillRect(80, y, 64, 64, WithAlpha(t.bg_bottom, 180));
+            m_gfx->Text(FontSize::Normal, 164, y + 16, sel ? t.accent : t.fg, h.name.c_str());
+            if (IsHbPinned(h.path))
+                m_gfx->Text(FontSize::Small, gfx::Gfx::Width - 210, y + 22, t.accent, T("pinned"));
+        }
+        char pos[28];
+        snprintf(pos, sizeof(pos), "%d / %d", m_hb_cursor + 1, (int)m_hb.size());
+        m_gfx->Text(FontSize::Small, gfx::Gfx::Width - 150, 74, t.dim, pos);
+        DrawHint(m_hb_donor ? "A: Run as app   Y: Applet mode   X: Pin   B: Back"
+                            : "A: Launch   X: Pin to menu   B: Back");
     }
 
     // ---- Widgets submenu drawing -------------------------------------------
@@ -2057,8 +2512,9 @@ namespace sl::menu::ui {
 
         // Special row.
         const int y = top + 4 * rowH;
-        const int sw = 200, gap = 12, totW = 4 * sw + 3 * gap, x0 = cx - totW / 2;
-        for (int c = 0; c < 4; c++) {
+        const int sw = 176, gap = 12;
+        const int totW = kKbSpecialCols * sw + (kKbSpecialCols - 1) * gap, x0 = cx - totW / 2;
+        for (int c = 0; c < kKbSpecialCols; c++) {
             const bool sel = (m_kb_row == kKbSpecialRow && m_kb_col == c);
             const int kx = x0 + c * (sw + gap);
             SDL_Color fill = (c == 0 && m_kb_upper) ? t.accent : t.fg;

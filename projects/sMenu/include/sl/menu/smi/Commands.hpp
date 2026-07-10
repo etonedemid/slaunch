@@ -51,6 +51,23 @@ namespace sl::menu::smi {
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenHomebrewMenu);
     }
 
+    // Launch a specific .nro (as an applet, via hbloader).
+    inline Result OpenHomebrew(const char *nro_path, const char *argv = nullptr) {
+        sl::smi::PayloadHomebrew p {};
+        strncpy(p.nro_path, nro_path ? nro_path : "", sizeof(p.nro_path) - 1);
+        strncpy(p.argv, argv ? argv : (nro_path ? nro_path : ""), sizeof(p.argv) - 1);
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenHomebrew, p);
+    }
+
+    // Launch a .nro as an application in a donor game's slot (full RAM / perms).
+    inline Result LaunchHomebrewApp(u64 donor_id, const char *nro_path) {
+        sl::smi::PayloadHomebrew p {};
+        strncpy(p.nro_path, nro_path ? nro_path : "", sizeof(p.nro_path) - 1);
+        strncpy(p.argv, nro_path ? nro_path : "", sizeof(p.argv) - 1);
+        p.donor_id = donor_id;
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::LaunchHomebrewApplication, p);
+    }
+
     inline Result OpenUserPage() {
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenUserPage);
     }

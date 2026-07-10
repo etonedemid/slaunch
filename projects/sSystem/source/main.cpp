@@ -34,10 +34,16 @@ static bool       g_Running      = true;
 enum class Pending {
     None, LaunchApp, ResumeApp, OpenAlbum, OpenUserPage, OpenNetConnect,
     OpenMiiEdit, OpenWebBrowser, OpenControllers, OpenHomebrewMenu,
-    OpenSystemSettings,
+    OpenHomebrew, LaunchHomebrewApp, OpenSystemSettings,
 };
 static Pending g_Pending      = Pending::None;
 static u64     g_PendingAppId = 0;
+static char    g_PendingHbPath[FS_MAX_PATH] = {};
+static char    g_PendingHbArgv[512] = {};
+static u64     g_PendingDonorId = 0;
+// While an NRO runs as an application in a donor's slot, this is the donor id so
+// we can unregister the ECS override (restore the game) once it exits.
+static u64     g_HbOverrideDonor = 0;
 
 static void LaunchMenu();   // defined below
 
@@ -61,6 +67,16 @@ static void PushMenuEvent(MenuMessage evt) {
     CommandHeader hdr { Magic, static_cast<u32>(evt) };
     appletStorageWrite(&st, 0, &hdr, sizeof(hdr));
     la::PushStorage(st);
+}
+
+// Drop the active homebrew-as-app ECS override (restore the donor game). Safe to
+// call unconditionally; a no-op when no override is active.
+static void CleanupHbOverride() {
+    if (g_HbOverrideDonor == 0) return;
+    ecs::UnregisterExternalContent(g_HbOverrideDonor);
+    remove("sdmc:/slaunch/hbtarget.txt");
+    DaemonLog("hbapp: donor 0x%016lx restored", g_HbOverrideDonor);
+    g_HbOverrideDonor = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,9 +108,27 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
         case SystemMessage::OpenWebBrowser:   g_Pending = Pending::OpenWebBrowser;   break;
         case SystemMessage::OpenControllers:  g_Pending = Pending::OpenControllers;  break;
         case SystemMessage::OpenHomebrewMenu: g_Pending = Pending::OpenHomebrewMenu; break;
+        case SystemMessage::OpenHomebrew: {
+            auto *hb = static_cast<const PayloadHomebrew*>(payload);
+            g_Pending = Pending::OpenHomebrew;
+            strncpy(g_PendingHbPath, hb->nro_path, sizeof(g_PendingHbPath) - 1);
+            g_PendingHbPath[sizeof(g_PendingHbPath) - 1] = '\0';
+            strncpy(g_PendingHbArgv, hb->argv, sizeof(g_PendingHbArgv) - 1);
+            g_PendingHbArgv[sizeof(g_PendingHbArgv) - 1] = '\0';
+            break;
+        }
+        case SystemMessage::LaunchHomebrewApplication: {
+            auto *hb = static_cast<const PayloadHomebrew*>(payload);
+            g_Pending = Pending::LaunchHomebrewApp;
+            strncpy(g_PendingHbPath, hb->nro_path, sizeof(g_PendingHbPath) - 1);
+            g_PendingHbPath[sizeof(g_PendingHbPath) - 1] = '\0';
+            g_PendingDonorId = hb->donor_id;
+            break;
+        }
 
         case SystemMessage::TerminateApplication:
             if (app::g_AppRunning) app::Terminate();
+            CleanupHbOverride();   // if it was a homebrew-as-app, restore the donor
             break;
         case SystemMessage::OpenPowerMenu:
             appletStartSleepSequence(true);
@@ -122,6 +156,7 @@ static void RunPendingAction() {
     switch (p) {
         case Pending::LaunchApp:
             if (app::g_AppRunning) app::Terminate();
+            CleanupHbOverride();   // dropping an override before a normal launch
             if (R_FAILED(app::Launch(g_PendingAppId, g_SelectedUser)))
                 LaunchMenu(); // launch failed -> back to the menu
             break;
@@ -202,6 +237,7 @@ static void RunPendingAction() {
             // no target it loads sdmc:/hbmenu.nro. Then unregister so the real
             // Album shortcut is restored. The menu (sMenu) has already exited,
             // so this doesn't touch its own ECS slot.
+            remove("sdmc:/slaunch/hbtarget.txt"); // ensure no stale target -> hbmenu.nro
             Result rc = ecs::RegisterExternalContent(ecs::HbloaderProgramId, ecs::HbloaderExefsDir);
             DaemonLog("hbmenu: register hbloader rc=0x%x", rc);
             if (R_SUCCEEDED(rc)) {
@@ -209,6 +245,47 @@ static void RunPendingAction() {
                 ecs::UnregisterExternalContent(ecs::HbloaderProgramId);
             }
             LaunchMenu();
+            break;
+        }
+        case Pending::OpenHomebrew: {
+            // Launch the chosen .nro via our target-aware hbloader fork: it reads
+            // this one-shot file at startup and loads that .nro instead of hbmenu.
+            if (FILE *tf = fopen("sdmc:/slaunch/hbtarget.txt", "w")) {
+                fprintf(tf, "%s\n", g_PendingHbPath);
+                fclose(tf);
+            }
+            Result rc = ecs::RegisterExternalContent(ecs::HbloaderProgramId, ecs::HbloaderExefsDir);
+            DaemonLog("hb: register rc=0x%x nro=%s", rc, g_PendingHbPath);
+            if (R_SUCCEEDED(rc)) {
+                la::OpenSystemApplet(ecs::HbloaderAppletId, 0); // blocks until it exits
+                ecs::UnregisterExternalContent(ecs::HbloaderProgramId);
+            }
+            remove("sdmc:/slaunch/hbtarget.txt"); // one-shot: don't retarget hbmenu
+            LaunchMenu();
+            break;
+        }
+        case Pending::LaunchHomebrewApp: {
+            // Run the .nro as an APPLICATION (full RAM/perms): serve hbloader into
+            // a donor game's slot via ECS, then launch that title. hbloader reads
+            // hbtarget.txt and boots the .nro. The ECS override is unregistered
+            // when the app exits (see the main loop), restoring the game. ECS is
+            // runtime-only, so a reboot also clears any stuck override.
+            if (app::g_AppRunning) app::Terminate();
+            CleanupHbOverride();   // drop any previous override first
+            if (FILE *tf = fopen("sdmc:/slaunch/hbtarget.txt", "w")) {
+                fprintf(tf, "%s\n", g_PendingHbPath);
+                fclose(tf);
+            }
+            Result rc = ecs::RegisterExternalContent(g_PendingDonorId, ecs::HbloaderAppExefsDir);
+            DaemonLog("hbapp: donor=0x%016lx register rc=0x%x nro=%s",
+                      g_PendingDonorId, rc, g_PendingHbPath);
+            if (R_SUCCEEDED(rc) && R_SUCCEEDED(app::Launch(g_PendingDonorId, g_SelectedUser))) {
+                g_HbOverrideDonor = g_PendingDonorId;   // app runs; cleaned up on exit
+            } else {
+                ecs::UnregisterExternalContent(g_PendingDonorId);
+                remove("sdmc:/slaunch/hbtarget.txt");
+                LaunchMenu();
+            }
             break;
         }
         case Pending::None:
@@ -435,8 +512,10 @@ namespace ams {
             // when the menu is NOT up: while the menu is open over a suspended
             // game the game is intentionally backgrounded, and its suspend
             // state-change must not be misread as an exit (which would close it).
-            if (!la::IsMenuAlive() && app::g_AppRunning && app::Update())
+            if (!la::IsMenuAlive() && app::g_AppRunning && app::Update()) {
+                CleanupHbOverride();  // homebrew-as-app exited -> restore the donor
                 ::LaunchMenu();
+            }
 
             // The menu applet closed -> carry out whatever it asked for.
             if (la::g_MenuRunning && !la::IsMenuAlive()) {
