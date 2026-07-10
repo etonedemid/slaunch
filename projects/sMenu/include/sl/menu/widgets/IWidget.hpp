@@ -100,6 +100,14 @@ namespace sl::menu::widgets {
         std::unordered_map<std::string, SDL_Texture*> m_images; // gfx_image cache, keyed by path
         std::vector<int> m_socks;                               // open net_tcp sockets, closed in dtor
 
+        // Cached render. render() draws into this offscreen texture while holding
+        // the Lua lock. On frames where the update thread holds the lock, we blit
+        // the last cached texture instead of drawing nothing - so the widget never
+        // blinks out for a frame (that was the flicker). Sized m_cacheW x screen H.
+        SDL_Texture *m_cacheTex = nullptr;
+        int m_cacheW = 0;   // width the cache texture was allocated for
+        int m_lastH  = 0;   // last measured content height (for the blit + hit-test)
+
         // ---- theme + config helpers -------------------------------------------
         SDL_Color ThemeColor(const std::string& name) const {
             const ui::Theme* t = m_currentTheme;
@@ -360,6 +368,7 @@ namespace sl::menu::widgets {
         ~LuaWidget() override {
             for (auto& kv : m_images)
                 if (kv.second) SDL_DestroyTexture(kv.second);
+            if (m_cacheTex) SDL_DestroyTexture(m_cacheTex);
             for (int s : m_socks)
                 if (s >= 0) close(s);
         }
@@ -398,27 +407,67 @@ namespace sl::menu::widgets {
         }
 
         int Render(gfx::Gfx* gfx, const ui::Theme& t, int x, int y, int w) override {
-            int newY = y;
-            // Never block the render thread: if update() holds the lock (it's mid
-            // network fetch, which can take seconds), skip drawing this frame. The
-            // widget pops in once its fetch returns instead of freezing the menu.
+            SDL_Renderer* ren = gfx->Renderer();
+
+            // Never block the render thread: if update() holds the lock (it may be
+            // mid network fetch, which can take seconds), don't wait. But instead
+            // of drawing nothing this frame - which made the widget blink out - we
+            // blit the last rendered texture, so it stays put until update() frees
+            // the lock and we can redraw. That is the flicker fix.
             std::unique_lock<std::mutex> lock(m_luaLock, std::try_to_lock);
-            if (!lock.owns_lock()) return y;
+            if (!lock.owns_lock()) {
+                if (m_cacheTex && m_lastH > 0) {
+                    SDL_Rect src{ 0, 0, m_cacheW, m_lastH };
+                    SDL_Rect dst{ x, y, m_cacheW, m_lastH };
+                    SDL_RenderCopy(ren, m_cacheTex, &src, &dst);
+                    return y + m_lastH;
+                }
+                return y;   // nothing cached yet (first frames)
+            }
+
+            // (Re)allocate the offscreen texture (screen-tall so no widget clips).
+            if (ren && (!m_cacheTex || m_cacheW != w)) {
+                if (m_cacheTex) SDL_DestroyTexture(m_cacheTex);
+                m_cacheTex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA8888,
+                                               SDL_TEXTUREACCESS_TARGET, w, gfx::Gfx::Height);
+                if (m_cacheTex) SDL_SetTextureBlendMode(m_cacheTex, SDL_BLENDMODE_BLEND);
+                m_cacheW = w;
+            }
 
             m_currentGfx   = gfx;
             m_currentTheme = &t;
             m_inRender = true;
 
-            if (m_luaRender.valid()) {
-                auto result = m_luaRender(x, y, w);
-                if (result.valid()) {
-                    // render() returns the HEIGHT it used; the caller wants the
-                    // new bottom Y, so add it to the start y. (Without the "+ y"
-                    // the measured box height came out negative -> 0, which broke
-                    // widget hit-testing / dragging.)
-                    sol::optional<int> h = result;
-                    if (h) newY = y + *h;
+            int newY = y;
+            if (m_cacheTex && m_luaRender.valid()) {
+                // Draw into the texture at a local (0,0) origin, then blit it at
+                // (x,y). Widgets draw everything relative to the passed x,y, so
+                // rendering at 0,0 places the content at the texture's top-left.
+                SDL_Texture* prev = SDL_GetRenderTarget(ren);
+                SDL_SetRenderTarget(ren, m_cacheTex);
+                SDL_SetRenderDrawColor(ren, 0, 0, 0, 0);
+                SDL_RenderClear(ren);                       // transparent
+
+                auto result = m_luaRender(0, 0, w);
+
+                SDL_SetRenderTarget(ren, prev);
+
+                int h = m_lastH;
+                if (result.valid()) { sol::optional<int> ho = result; if (ho) h = *ho; }
+                if (h < 0) h = 0;
+                if (h > gfx::Gfx::Height) h = gfx::Gfx::Height;
+                m_lastH = h;
+
+                if (h > 0) {
+                    SDL_Rect src{ 0, 0, w, h };
+                    SDL_Rect dst{ x, y, w, h };
+                    SDL_RenderCopy(ren, m_cacheTex, &src, &dst);
                 }
+                newY = y + h;
+            } else if (m_luaRender.valid()) {
+                // No render target available: draw straight to the screen (old path).
+                auto result = m_luaRender(x, y, w);
+                if (result.valid()) { sol::optional<int> h = result; if (h) newY = y + *h; }
             }
 
             m_inRender = false;
