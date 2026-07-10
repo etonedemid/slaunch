@@ -3,9 +3,10 @@
 A fast, clean, **SDL2-based HOME Menu replacement** for the Nintendo Switch
 (Atmosphère CFW). Themes with wallpapers, custom fonts, lua widgets and 3 UI modes.`
 
-<img width="1280" height="720" alt="2026070918061000-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/20c5c1b6-f5b7-4ba9-93a7-1c1019b0f1b8" />
-<img width="1280" height="720" alt="2026070916401300-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/55ef290c-78d6-49e1-914b-a81c403e71d3" />
-<img width="1280" height="720" alt="2026070916394300-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/92f867ea-29f5-4dc9-a509-27059f1e9ed9" />
+<img width="1280" height="720" alt="2026070921590300-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/9c3aa4d1-c9ff-41ca-945d-d5ce29a8a62e" />
+<img width="1280" height="720" alt="2026070921570800-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/26b3a5eb-b4ce-4b73-889d-3b2b4f53a4bf" />
+<img width="1280" height="720" alt="2026070918061000-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/62ee0f5f-bca9-490e-a31c-4c54e586b867" />
+<img width="1280" height="720" alt="2026070918054600-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/4b8bd1fa-57e0-4b81-996a-7c6dbc3a559c" />
 
 
 ## Architecture
