@@ -1,9 +1,7 @@
 -- AuroraChat widget. Ported from the old hardcoded C++ widget.
--- Configure it in  Theming > Widgets > AuroraChat  (Enabled, Username,
--- Password). To send a message, edit the "Send message" option - it is sent
--- once and then cleared.
-
--- Enable/disable is controlled by the home menu (Theming > Widgets), not here.
+-- Set the Username/Password in  Theming > Widgets > AuroraChat. To send a
+-- message, edit the "Send message" option - it's sent once, then cleared.
+-- Enable/disable is done by the home menu (Theming > Widgets), not here.
 widget = {
   name = "AuroraChat",
   options = {
@@ -28,7 +26,7 @@ local function add_line(user, msg)
   local line = user .. ": " .. msg
   -- Strip the server's "auroracross:  from <user>" prefix so only the message
   -- (e.g. "ERROR: Connection failed") is shown.
-  local stripped = line:gsub("^auroracross:  from %s*", "")
+  local stripped = line:gsub("^auroracross: from %s*", "")
   lines[#lines + 1] = stripped
   while #lines > MAX_LINES do table.remove(lines, 1) end
 end

@@ -318,7 +318,7 @@ int main() {
         u64 down = padGetButtonsDown(&pad);
         u64 held = padGetButtons(&pad); 
 
-        // Map both D-Pad and Left/Right analog sticks
+
         int dir_v = 0;
         if (held & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) dir_v = -1;
         else if (held & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) dir_v = 1;

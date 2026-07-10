@@ -271,9 +271,16 @@ static void HandleHomeButton() {
             return;
         }
         // In a game: suspend (do NOT terminate) and bring the menu up over it.
+        const u64 t0 = armGetSystemTick();
         app::FocusSystem();
+        const u64 t1 = armGetSystemTick();
         if (!la::IsMenuAlive())
             LaunchMenu();
+        const u64 t2 = armGetSystemTick();
+        const u64 hz = armGetSystemTickFreq();
+        DaemonLog("home: FocusSystem=%llums LaunchMenu=%llums",
+                  (unsigned long long)((t1 - t0) * 1000 / hz),
+                  (unsigned long long)((t2 - t1) * 1000 / hz));
     } else if (la::IsMenuAlive() && app::g_AppRunning) {
         // In the menu with a game suspended: resume the game.
         la::StopMenu();

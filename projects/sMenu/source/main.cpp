@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <vector>
 #include <string>
+#include <memory>
 #include <unordered_map>
 #include <sys/stat.h>
 
@@ -46,12 +47,28 @@ static Menu *g_UI            = nullptr;
 static bool  g_NeedAppReload = true;
 static bool  g_Running       = true;
 
+// Background app loader (so HOME shows the menu immediately, then fills in).
+static Thread                       g_LoadThread = {};
+static std::vector<menu::ui::AppEntry> g_LoadResult;
+static std::vector<u64>             g_CachedIds;    // ids of the currently-shown list
+static volatile bool                g_LoadDone = false;
+static volatile bool                g_LoadNoChange = false; // list unchanged -> keep cache
+static bool                         g_LoadRunning = false;
+
 static constexpr const char *SetupMarker = "sdmc:/slaunch/config/setup_done";
+
+static u64 g_BootTick0 = 0;   // set at the top of __appInit; boot.log is ms-stamped
+
+static u64 BootMs() {
+    if (!g_BootTick0) return 0;
+    return (armGetSystemTick() - g_BootTick0) * 1000 / armGetSystemTickFreq();
+}
 
 static void BootLog(const char *fmt, ...) {
     mkdir("sdmc:/slaunch", 0777);
     FILE *fp = fopen("sdmc:/slaunch/boot.log", "a");
     if (!fp) return;
+    fprintf(fp, "[+%4llums] ", (unsigned long long)BootMs());
     va_list ap; va_start(ap, fmt);
     vfprintf(fp, fmt, ap);
     va_end(ap);
@@ -146,20 +163,20 @@ static void SaveNameCache(const std::vector<std::pair<u64, std::string>> &entrie
 }
 
 // ---------------------------------------------------------------------------
-static void ReloadApps() {
+// The heavy part of a reload: enumerate installed titles and resolve their
+// names/icons. No UI or global state is touched, so this is safe to run on a
+// worker thread while the menu keeps rendering a "Loading" screen (see main()).
+static std::vector<menu::ui::AppEntry> LoadAppEntries() {
     std::vector<NsApplicationRecord> records;
-    if (R_FAILED(os::ListApplicationRecords(records)) || records.empty()) {
-        if (g_UI) g_UI->SetApps({});
-        g_NeedAppReload = false;
-        return;
-    }
+    if (R_FAILED(os::ListApplicationRecords(records)) || records.empty())
+        return {};
+
     std::vector<u64> ids;
     ids.reserve(records.size());
     for (auto &r : records) ids.push_back(r.application_id);
     std::vector<NsApplicationView> views;
     os::ListApplicationViews(ids, views);
 
-    // Ensure the icon cache directory exists before extracting any icons.
     mkdir("sdmc:/slaunch", 0777);
     mkdir("sdmc:/slaunch/cache", 0777);
     mkdir(IconCacheDir, 0777);
@@ -167,9 +184,13 @@ static void ReloadApps() {
     // Prior run's resolved names; a title with a cached name AND a cached icon
     // needs no NS control fetch this launch.
     std::unordered_map<u64, std::string> nameCache = LoadNameCache();
-    std::vector<std::pair<u64, std::string>> freshCache; // current titles, for rewrite
+    std::vector<std::pair<u64, std::string>> freshCache;
     freshCache.reserve(records.size());
     bool hitNs = false;
+
+    // Heap, not stack: NsApplicationControlData is ~144KB, too big for a worker
+    // thread's stack. Reused across titles (GetApplicationControl memsets it).
+    auto ctrl = std::make_unique<NsApplicationControlData>();
 
     std::vector<menu::ui::AppEntry> entries;
     entries.reserve(records.size());
@@ -201,11 +222,10 @@ static void ReloadApps() {
         if (iconCached && cached != nameCache.end()) {
             name = cached->second;
         } else {
-            NsApplicationControlData ctrl = {};
             u64 ctrl_size = 0;
-            if (R_SUCCEEDED(os::GetApplicationControl(app_id, ctrl, ctrl_size))) {
-                name = os::GetAppName(ctrl.nacp);
-                CacheAppIcon(app_id, ctrl, ctrl_size); // extract JPEG for the icon UI
+            if (R_SUCCEEDED(os::GetApplicationControl(app_id, *ctrl, ctrl_size))) {
+                name = os::GetAppName(ctrl->nacp);
+                CacheAppIcon(app_id, *ctrl, ctrl_size); // extract JPEG for the icon UI
             } else {
                 char tmp[32]; snprintf(tmp, sizeof(tmp), "0x%016llX", (unsigned long long)app_id);
                 name = tmp;
@@ -222,8 +242,61 @@ static void ReloadApps() {
     if (hitNs || freshCache.size() != nameCache.size())
         SaveNameCache(freshCache);
 
-    if (g_UI) g_UI->SetApps(std::move(entries));
-    g_NeedAppReload = false;
+    return entries;
+}
+
+// Persisted copy of the fully-resolved list, so a relaunch shows games on the
+// first frame instead of re-enumerating. Format per line: hexid<TAB>gc<TAB>upd<TAB>name.
+static constexpr const char *AppListCache = "sdmc:/slaunch/cache/applist.txt";
+
+static void SaveAppList(const std::vector<menu::ui::AppEntry> &e) {
+    mkdir("sdmc:/slaunch", 0777);
+    mkdir("sdmc:/slaunch/cache", 0777);
+    FILE *fp = fopen(AppListCache, "w");
+    if (!fp) return;
+    for (auto &a : e)
+        fprintf(fp, "%016llX\t%d\t%d\t%s\n", (unsigned long long)a.app_id,
+                a.is_gamecard ? 1 : 0, a.needs_update ? 1 : 0, a.name.c_str());
+    fclose(fp);
+}
+
+static std::vector<menu::ui::AppEntry> LoadAppList() {
+    std::vector<menu::ui::AppEntry> e;
+    FILE *fp = fopen(AppListCache, "r");
+    if (!fp) return e;
+    char line[320];
+    while (fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        char *t1 = strchr(line,   '\t'); if (!t1) continue; *t1 = '\0';
+        char *t2 = strchr(t1 + 1, '\t'); if (!t2) continue; *t2 = '\0';
+        char *t3 = strchr(t2 + 1, '\t'); if (!t3) continue; *t3 = '\0';
+        u64 id = strtoull(line, nullptr, 16);
+        if (id) e.push_back({ id, std::string(t3 + 1), atoi(t1 + 1) != 0, atoi(t2 + 1) != 0 });
+    }
+    fclose(fp);
+    return e;
+}
+
+// One cheap NS call: just the installed title ids, for change detection.
+static std::vector<u64> CurrentAppIds() {
+    std::vector<NsApplicationRecord> records;
+    std::vector<u64> ids;
+    if (R_SUCCEEDED(os::ListApplicationRecords(records)))
+        for (auto &r : records) ids.push_back(r.application_id);
+    return ids;
+}
+
+static void LoadAppsTrampoline(void *) {
+    // Cheap check first: if the installed title set matches what we're already
+    // showing, do nothing (no per-app work). Only re-resolve when it changed.
+    std::vector<u64> ids = CurrentAppIds();
+    if (!ids.empty() && ids == g_CachedIds) {
+        g_LoadNoChange = true;
+    } else {
+        g_LoadResult = LoadAppEntries();
+        SaveAppList(g_LoadResult);
+    }
+    g_LoadDone = true;
 }
 
 static void OnSdEjected()      { g_NeedAppReload = true; }
@@ -356,6 +429,20 @@ int main() {
     g_UI = &ui;
     ui.Init(&gfx, status.selected_user, status.suspended_app_id, IsFirstRun());
 
+    // Instant: show last run's cached game list on the very first frame. The
+    // background loader then just verifies the ids and only re-resolves if the
+    // installed set actually changed. g_NeedAppReload (true) drives that check.
+    {
+        auto cached = LoadAppList();
+        if (!cached.empty()) {
+            g_CachedIds.clear();
+            for (auto &a : cached) g_CachedIds.push_back(a.app_id);
+            ui.SetApps(std::move(cached));
+        } else {
+            ui.SetLoading(true);
+        }
+    }
+
     bool has_suspended = status.has_suspended_app;
     u64  suspended_id  = status.suspended_app_id;
     if (has_suspended) ui.SetSuspendedApp(suspended_id);
@@ -382,8 +469,43 @@ int main() {
     u64 next_v = 0, next_h = 0;                   // tick of the next repeat
     u64 start_v = 0, start_h = 0;                 // tick the hold began (for accel)
 
+    u64 g_NextVerify = armGetSystemTick();   // periodic app-list re-verify
+
     while (g_Running && appletMainLoop()) {
-        if (g_NeedAppReload) ReloadApps();
+        // Re-verify the installed set every ~2s: the daemon doesn't push gamecard
+        // events, so poll instead. The check is cheap (one NS list + id compare)
+        // and only does real work when something actually changed (card in/out,
+        // install, uninstall).
+        if (!g_LoadRunning && armGetSystemTick() >= g_NextVerify) {
+            g_NeedAppReload = true;
+            g_NextVerify = armGetSystemTick() + armGetSystemTickFreq() * 2;
+        }
+        // Load the app list on a worker thread so the menu draws immediately
+        // (with a "Loading" screen) instead of hanging until it's done.
+        if (g_NeedAppReload && !g_LoadRunning) {
+            g_NeedAppReload = false;
+            g_LoadDone = false;
+            g_LoadNoChange = false;
+            g_LoadResult.clear();
+            if (R_SUCCEEDED(threadCreate(&g_LoadThread, LoadAppsTrampoline, nullptr,
+                                         nullptr, 0x10000, 0x3B, -2))) {
+                threadStart(&g_LoadThread);
+                g_LoadRunning = true;
+            } else {
+                ui.SetApps(LoadAppEntries());   // fallback: synchronous
+            }
+        }
+        if (g_LoadRunning && g_LoadDone) {
+            threadWaitForExit(&g_LoadThread);
+            threadClose(&g_LoadThread);
+            g_LoadRunning = false;
+            if (!g_LoadNoChange) {              // list changed -> apply the fresh one
+                g_CachedIds.clear();
+                for (auto &a : g_LoadResult) g_CachedIds.push_back(a.app_id);
+                ui.SetApps(std::move(g_LoadResult));
+            }
+            ui.SetLoading(false);
+        }
         menu::smi::PollMessages(cbs);
 
         // Action buttons via events (no repeat); directions are polled below.
@@ -471,6 +593,8 @@ int main() {
         step(dir_v, held_v, next_v, start_v, Btn::Up,   Btn::Down);
         step(dir_h, held_h, next_h, start_h, Btn::Left, Btn::Right);
         ui.Render();
+        // First frame is up; now do the heavier init (widgets) off the hot path.
+        ui.InitDeferred();
     }
     } // ui destroyed here, before gfx.Exit(), so its textures free cleanly
 

@@ -399,7 +399,11 @@ namespace sl::menu::widgets {
 
         int Render(gfx::Gfx* gfx, const ui::Theme& t, int x, int y, int w) override {
             int newY = y;
-            std::lock_guard<std::mutex> lock(m_luaLock);
+            // Never block the render thread: if update() holds the lock (it's mid
+            // network fetch, which can take seconds), skip drawing this frame. The
+            // widget pops in once its fetch returns instead of freezing the menu.
+            std::unique_lock<std::mutex> lock(m_luaLock, std::try_to_lock);
+            if (!lock.owns_lock()) return y;
 
             m_currentGfx   = gfx;
             m_currentTheme = &t;

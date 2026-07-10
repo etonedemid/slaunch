@@ -1,6 +1,7 @@
 #include <sl/menu/net/Http.hpp>
 #include <curl/curl.h>
 #include <cstring>
+#include <cstdio>
 
 namespace sl::menu::net {
 
@@ -91,6 +92,41 @@ namespace sl::menu::net {
         curl_easy_cleanup(curl);
 
         return rc == CURLE_OK && http >= 200 && http < 300;
+    }
+
+    namespace {
+        size_t WriteFileCb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+            return fwrite(ptr, size, nmemb, static_cast<FILE *>(userdata)) * size;
+        }
+    }
+
+    bool Download(const char *url, const char *path, long timeout_s) {
+        FILE *fp = fopen(path, "wb");
+        if (!fp) return false;
+
+        CURL *curl = curl_easy_init();
+        if (!curl) { fclose(fp); remove(path); return false; }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteFileCb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_s);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "sLaunch/0.1");
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
+        const CURLcode rc = curl_easy_perform(curl);
+        long http = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+        curl_easy_cleanup(curl);
+        fclose(fp);
+
+        const bool ok = rc == CURLE_OK && http >= 200 && http < 300;
+        if (!ok) remove(path);   // don't leave a 404 page or partial file behind
+        return ok;
     }
 
 } // namespace sl::menu::net

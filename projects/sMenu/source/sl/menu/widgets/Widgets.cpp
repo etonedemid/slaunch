@@ -100,8 +100,7 @@ namespace sl::menu::widgets {
     }
 
     void Widgets::LoadPositions() {
-        // Default layout: a right-hand column starting near the top. Widgets are
-        // draggable, so this is only a first-run starting point.
+        // default first-run layout: a right-hand column (draggable afterwards)
         m_box.assign(m_widgets.size(), Box{});
         for (size_t i = 0; i < m_widgets.size(); i++)
             m_box[i] = Box{ gfx::Gfx::Width - kWidgetW - 28, 96 + (int)i * 190, kWidgetW, 0 };

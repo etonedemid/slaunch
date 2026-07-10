@@ -18,7 +18,8 @@ namespace sl::menu::gfx {
 
     class IconCache {
     public:
-        void Init(Gfx *gfx) { m_gfx = gfx; }
+        // subdir is under sdmc:/slaunch/ (e.g. "cache/icons" or "cache/boxart").
+        void Init(Gfx *gfx, const char *subdir = "cache/icons") { m_gfx = gfx; m_dir = subdir; }
         void Exit();                       // free every texture (call before Gfx::Exit)
 
         // Returns the icon texture for app_id, loading it if needed, or nullptr
@@ -40,9 +41,10 @@ namespace sl::menu::gfx {
             uint64_t     used = 0;      // last-access tick for LRU
         };
 
-        Gfx     *m_gfx  = nullptr;
-        uint64_t m_clock = 0;
-        int      m_scale = GridScale;   // current load size (0 = original)
+        Gfx        *m_gfx  = nullptr;
+        const char *m_dir  = "cache/icons";
+        uint64_t    m_clock = 0;
+        int         m_scale = GridScale;   // current load size (0 = original)
         std::unordered_map<u64, Entry> m_map;
 
         void EvictOldest();

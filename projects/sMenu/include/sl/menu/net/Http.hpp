@@ -20,4 +20,8 @@ namespace sl::menu::net {
     bool Post(const char *url, const char *body, const char *content_type,
               const char *authorization, std::string &out, long timeout_s = 8);
 
+    // GET url straight to a file (streamed, so it isn't size-capped like Get).
+    // Returns true on HTTP 2xx; a failed/partial download leaves no file.
+    bool Download(const char *url, const char *path, long timeout_s = 15);
+
 } // namespace sl::menu::net
