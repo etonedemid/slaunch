@@ -2,6 +2,7 @@
 #include <switch.h>
 #include <string>
 #include <vector>
+#include <atomic>
 
 // Background music for the main menu. Tracks are loaded from sdmc:/slaunch/music
 // (mp3/ogg/flac/opus/mod). The current track + play position are persisted so
@@ -42,6 +43,17 @@ namespace sl::menu::audio {
         void LoadState();
         void PlayCurrent(double start_seconds = 0.0);
         void ApplyVolume();
+
+        // Loading + seeking an MP3 to resume position can take ~2s, so the initial
+        // resume runs on a worker thread instead of blocking the menu-start path.
+        // While it runs, m_loading is set and the main thread leaves the mixer alone.
+        static void ResumeTrampoline(void *self);
+        void StartResumeLoad(double start_seconds);
+
+        Thread m_load_thread{};
+        bool   m_load_running = false;
+        std::atomic<bool> m_loading{false};
+        double m_load_pos = 0.0;
 
         bool   m_ok       = false;   // Mix_OpenAudio succeeded
         bool   m_enabled  = true;
