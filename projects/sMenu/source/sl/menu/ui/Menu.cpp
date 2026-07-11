@@ -92,11 +92,24 @@ namespace sl::menu::ui {
         // Welcome chime only on a fresh open (no game suspended behind us), so it
         // isn't heard every single time you HOME out of a game.
         if (audio && m_suspended == 0) m_sfx.Play(audio::Sfx::Welcome);
-        // Resolve pinned homebrew names/icons (parses their .nro) off the hot path.
-        if (!m_hb_pins.empty()) ResolvePins();
+        // Resolve pinned homebrew names/icons on a worker thread (never blocks the
+        // menu-start path); they show fallback names until it lands.
+        StartResolvePins();
     }
 
     Menu::~Menu() {
+        // Let the homebrew workers finish before we tear down (they write into
+        // members and would outlive them otherwise).
+        if (m_hb_scan_running) {
+            threadWaitForExit(&m_hb_thread);
+            threadClose(&m_hb_thread);
+            m_hb_scan_running = false;
+        }
+        if (m_pin_running) {
+            threadWaitForExit(&m_pin_thread);
+            threadClose(&m_pin_thread);
+            m_pin_running = false;
+        }
         // Free SFX chunks before Music::Exit() closes the mixer, then stop the
         // network thread.
         m_sfx.Exit();
@@ -1445,6 +1458,9 @@ namespace sl::menu::ui {
     }
 
     void Menu::Render() {
+        PollHbScan();       // swap in the homebrew browser list when its worker finishes
+        PollResolvePins();  // fold in pinned-homebrew names/icons when its worker finishes
+
         // SD card pulled while powered on: nothing else matters, show the warning
         // (in the always-loaded system font) until the daemon reboots the console.
         if (m_sd_removed) {
@@ -2256,14 +2272,41 @@ namespace sl::menu::ui {
         fclose(fp);
     }
 
-    // Parse each pinned .nro so it shows its real name + (cached) icon on the main
-    // menu without needing the browser opened. Runs off the boot path (InitDeferred).
-    void Menu::ResolvePins() {
-        for (auto &p : m_hb_pins) {
-            hb::HbEntry r = hb::ReadOne(p.path);
-            p.name = r.name;
-            p.icon_key = r.icon_key;
+    // Give pinned .nro their real name + (cached) icon on the main menu without
+    // opening the browser. Runs on a worker thread so it never sits on the menu
+    // -start path: pins show their fallback (file-base) name for a moment, then
+    // PollResolvePins folds the resolved names/icons in. Manifest-backed, so in
+    // steady state the worker only stat()s each pin.
+    void Menu::ResolvePinsTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        hb::Resolve(m->m_pin_result);
+        m->m_pin_done.store(true, std::memory_order_release);
+    }
+
+    void Menu::StartResolvePins() {
+        if (m_hb_pins.empty() || m_pin_running) return;
+        m_pin_result = m_hb_pins;   // copy paths (+ fallback names) for the worker
+        m_pin_done.store(false, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_pin_thread, &Menu::ResolvePinsTrampoline, this,
+                                     nullptr, 0x20000, 0x3B, -2))) {
+            threadStart(&m_pin_thread);
+            m_pin_running = true;
+        } else {
+            hb::Resolve(m_hb_pins);   // fallback: synchronous
+            RebuildItems();
         }
+    }
+
+    void Menu::PollResolvePins() {
+        if (!m_pin_running || !m_pin_done.load(std::memory_order_acquire)) return;
+        threadWaitForExit(&m_pin_thread);
+        threadClose(&m_pin_thread);
+        m_pin_running = false;
+        // Fold resolved name/icon into the live pins by path (a merge, so a pin the
+        // user toggled meanwhile isn't clobbered).
+        for (auto &r : m_pin_result)
+            for (auto &p : m_hb_pins)
+                if (p.path == r.path) { p.name = r.name; p.icon_key = r.icon_key; break; }
         RebuildItems();
     }
 
@@ -2315,8 +2358,43 @@ namespace sl::menu::ui {
         RebuildItems();
     }
 
+    // Scan homebrew on a worker thread: parsing NROs + extracting icons off the SD
+    // can take a second or two, and doing it inline froze the menu on open. The
+    // browser shows "Scanning..." until PollHbScan swaps the finished list in.
+    void Menu::HbScanTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        m->m_hb_scan_result = hb::Scan();
+        m->m_hb_scan_done.store(true, std::memory_order_release);
+    }
+
+    void Menu::StartHbScan() {
+        if (m_hb_scanned || m_hb_scan_running) return;
+        m_hb_scan_done.store(false, std::memory_order_release);
+        m_hb_scan_result.clear();
+        if (R_SUCCEEDED(threadCreate(&m_hb_thread, &Menu::HbScanTrampoline, this,
+                                     nullptr, 0x20000, 0x3B, -2))) {
+            threadStart(&m_hb_thread);
+            m_hb_scan_running = true;
+        } else {
+            m_hb = hb::Scan();   // fallback: synchronous (may briefly stall)
+            m_hb_scanned = true;
+            RebuildItems();
+        }
+    }
+
+    void Menu::PollHbScan() {
+        if (!m_hb_scan_running || !m_hb_scan_done.load(std::memory_order_acquire)) return;
+        threadWaitForExit(&m_hb_thread);
+        threadClose(&m_hb_thread);
+        m_hb_scan_running = false;
+        m_hb = std::move(m_hb_scan_result);
+        m_hb_scanned = true;
+        if (m_hb_cursor >= (int)m_hb.size()) m_hb_cursor = m_hb.empty() ? 0 : (int)m_hb.size() - 1;
+        RebuildItems();
+    }
+
     void Menu::OpenHomebrewBrowser() {
-        if (!m_hb_scanned) { m_hb = hb::Scan(); m_hb_scanned = true; RebuildItems(); }
+        StartHbScan();   // background; browser shows "Scanning..." until it lands
         m_screen = Screen::Homebrew;
         m_hb_cursor = 0;
     }
@@ -2345,6 +2423,12 @@ namespace sl::menu::ui {
     void Menu::DrawHomebrew() {
         const Theme &t = m_theme.Current();
         DrawTopBar("Homebrew");
+        if (m_hb_scan_running) {
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 320, t.dim,
+                                T("Scanning homebrew..."));
+            DrawHint("B: Back");
+            return;
+        }
         if (m_hb.empty()) {
             m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 320, t.dim,
                                 T("No .nro found in sdmc:/switch"));
