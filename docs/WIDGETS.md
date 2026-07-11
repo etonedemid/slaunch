@@ -4,8 +4,6 @@ Widgets are small Lua scripts that draw on the home screen (weather, chat,
 clocks, whatever you want). Drop a `.lua` file in `sdmc:/slaunch/widgets/` and it
 loads on the next launch.
 
-Two ship by default: `weather.lua` and `auroracross.lua`.
-
 ## How it works
 
 - A background thread calls your `update()` a few times a second. This is where

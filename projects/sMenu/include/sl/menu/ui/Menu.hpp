@@ -95,6 +95,11 @@ namespace sl::menu::ui {
 
         void SetSuspendedApp(u64 app_id);
         void ClearSuspendedApp();
+
+        // The daemon signals this when the SD card is pulled out while powered on.
+        // The menu then shows a full-screen warning until the daemon reboots (all
+        // menu content is served from the SD card, so we must not keep running).
+        void ShowSdRemoved() { m_sd_removed = true; }
         // The host loads the app list on a worker thread; this shows a "Loading"
         // message on the home screen until it's ready.
         void SetLoading(bool v) { m_loading = v; }
@@ -134,6 +139,12 @@ namespace sl::menu::ui {
         void ResolvePins();               // parse each pinned .nro -> name + cached icon
         bool IsHbPinned(const std::string &path) const;
         void ToggleHbPin(const std::string &path);
+        // Homebrew favourites (by .nro path): a favourited pin joins the games'
+        // favourites group at the top of the menu, with the same leading star.
+        bool IsHbFavourite(const std::string &path) const;
+        void ToggleHbFavourite(const std::string &path);
+        void LoadHbFavourites();
+        void SaveHbFavourites();
         void LoadHbDonor();               // the game slot used to run homebrew as an app
         void SaveHbDonor();
         Action OnButtonKeyboard(Btn b);
@@ -210,6 +221,7 @@ namespace sl::menu::ui {
         void DrawEditor();
         void DrawColorPicker();
         void DrawFonts();
+        void DrawSdRemoved();       // full-screen "SD card removed" warning
         void DrawWidgets();         // list detected Lua widgets
         void DrawWidgetOptions();   // exposed options of the selected widget
         void DrawMusic();           // menu-music controls
@@ -256,6 +268,7 @@ namespace sl::menu::ui {
         gfx::IconCache m_hb_icons;            // homebrew .nro icon cache
         std::vector<hb::HbEntry> m_hb;        // scanned homebrew (browser)
         std::vector<hb::HbEntry> m_hb_pins;   // homebrew pinned to the main menu (resolved)
+        std::vector<std::string> m_hb_favs;   // pinned homebrew marked as favourites (paths)
         std::string    m_hb_launch_path;      // set on LaunchHomebrew[App]
         u64  m_hb_donor = 0;                  // donor game id for "run as app"
         int  m_hb_cursor = 0;
@@ -266,6 +279,7 @@ namespace sl::menu::ui {
         bool m_jumped_to_suspended = false;
         bool m_deferred_done = false; // InitDeferred (widgets) has run
         bool m_want_exit = false;   // asked the daemon to show the keyboard
+        bool m_sd_removed = false;  // SD pulled while on -> show warning, await reboot
 
         // Home screen widgets
         widgets::Widgets m_widgets;
