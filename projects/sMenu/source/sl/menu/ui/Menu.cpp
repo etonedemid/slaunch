@@ -87,7 +87,7 @@ namespace sl::menu::ui {
         if (m_deferred_done) return;
         m_deferred_done = true;
         m_widgets.Init();   // loads widget config, starts the network thread
-        const bool audio = m_music.Init();  // opens the mixer + resumes background music
+        const bool audio = m_music.Init();  // opens the mixer + resumes music (off-thread)
         m_sfx.Init(audio);                  // UI sounds share the mixer
         // Welcome chime only on a fresh open (no game suspended behind us), so it
         // isn't heard every single time you HOME out of a game.

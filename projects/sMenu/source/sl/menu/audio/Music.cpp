@@ -55,11 +55,37 @@ namespace sl::menu::audio {
 
         m_last_tick = armGetSystemTick();
         if (m_enabled && !m_tracks.empty())
-            PlayCurrent(m_pos);   // resume where the last session left off
+            StartResumeLoad(m_pos);   // resume where we left off, off the main thread
         return true;
     }
 
+    // Load + seek the current track on a worker so a ~2s MP3 seek never freezes the
+    // menu on start. The main thread leaves the mixer alone while m_loading is set.
+    void Music::ResumeTrampoline(void *self) {
+        Music *m = static_cast<Music *>(self);
+        m->PlayCurrent(m->m_load_pos);
+        m->m_loading.store(false, std::memory_order_release);
+    }
+
+    void Music::StartResumeLoad(double start_seconds) {
+        m_load_pos = start_seconds;
+        m_loading.store(true, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_load_thread, &Music::ResumeTrampoline, this,
+                                     nullptr, 0x20000, 0x3B, -2))) {
+            threadStart(&m_load_thread);
+            m_load_running = true;
+        } else {
+            PlayCurrent(start_seconds);   // fallback: synchronous
+            m_loading.store(false, std::memory_order_release);
+        }
+    }
+
     void Music::Exit() {
+        if (m_load_running) {   // let the resume worker finish before we free anything
+            threadWaitForExit(&m_load_thread);
+            threadClose(&m_load_thread);
+            m_load_running = false;
+        }
         SaveState();
         if (m_music) { Mix_FreeMusic((Mix_Music *)m_music); m_music = nullptr; }
         if (m_ok) {
@@ -106,6 +132,9 @@ namespace sl::menu::audio {
 
     void Music::Update() {
         const u64 now = armGetSystemTick();
+        // While the resume worker loads/seeks, don't touch the mixer and keep the
+        // clock fresh so m_pos doesn't jump by the whole load time afterwards.
+        if (m_loading.load(std::memory_order_acquire)) { m_last_tick = now; return; }
         const double dt = (double)(now - m_last_tick) / (double)armGetSystemTickFreq();
         m_last_tick = now;
 
@@ -119,6 +148,7 @@ namespace sl::menu::audio {
     }
 
     void Music::SetEnabled(bool on) {
+        if (m_loading.load(std::memory_order_acquire)) return;   // don't race the resume worker
         if (on == m_enabled) return;
         m_enabled = on;
         if (!m_ok) { SaveState(); return; }
@@ -144,6 +174,7 @@ namespace sl::menu::audio {
     void Music::ToggleShuffle() { m_shuffle = !m_shuffle; SaveState(); }
 
     void Music::Next() {
+        if (m_loading.load(std::memory_order_acquire)) return;
         if (m_tracks.empty()) return;
         if (m_shuffle && m_tracks.size() > 1) {
             int n = m_index;
@@ -157,6 +188,7 @@ namespace sl::menu::audio {
     }
 
     void Music::Prev() {
+        if (m_loading.load(std::memory_order_acquire)) return;
         if (m_tracks.empty()) return;
         m_index = (m_index + (int)m_tracks.size() - 1) % (int)m_tracks.size();
         if (m_enabled) PlayCurrent(0.0);
@@ -164,6 +196,7 @@ namespace sl::menu::audio {
     }
 
     void Music::SelectTrack(int i) {
+        if (m_loading.load(std::memory_order_acquire)) return;
         if (i < 0 || i >= (int)m_tracks.size()) return;
         m_index = i;
         if (m_enabled) PlayCurrent(0.0);
