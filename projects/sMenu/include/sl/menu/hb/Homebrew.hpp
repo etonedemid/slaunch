@@ -24,6 +24,11 @@ namespace sl::menu::hb {
     // Used to give pinned homebrew their name/icon without a full scan.
     HbEntry ReadOne(const std::string &path);
 
+    // Fill name + icon_key for a set of entries (with .path set) from the scan
+    // manifest, parsing/extracting only the ones that are new or changed. Cheap
+    // to call at every menu start - unchanged entries cost just a stat().
+    void Resolve(std::vector<HbEntry> &entries);
+
     // Cache dir for extracted homebrew icons (under sdmc:/slaunch).
     constexpr const char *IconDir = "cache/hbicons";
 

@@ -11,6 +11,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <atomic>
 
 // SDL2 menu for sLaunch.
 // Screen state machine: Oobe -> Main / Themes / ThemeEditor, with an optional
@@ -136,7 +137,7 @@ namespace sl::menu::ui {
         void OpenHomebrewBrowser();       // scan (lazily) + show the .nro list
         void LoadHbPins();                // pinned homebrew paths (main-menu entries)
         void SaveHbPins();
-        void ResolvePins();               // parse each pinned .nro -> name + cached icon
+        // Pinned .nro -> name + cached icon; resolved on a worker (StartResolvePins).
         bool IsHbPinned(const std::string &path) const;
         void ToggleHbPin(const std::string &path);
         // Homebrew favourites (by .nro path): a favourited pin joins the games'
@@ -273,6 +274,26 @@ namespace sl::menu::ui {
         u64  m_hb_donor = 0;                  // donor game id for "run as app"
         int  m_hb_cursor = 0;
         bool m_hb_scanned = false;
+        // The homebrew scan (parse NROs / extract icons) runs on a worker thread so
+        // opening the browser never hangs the UI. The thread fills m_hb_scan_result;
+        // the main thread swaps it into m_hb once m_hb_scan_done flips.
+        Thread m_hb_thread{};
+        std::vector<hb::HbEntry> m_hb_scan_result;
+        bool m_hb_scan_running = false;
+        std::atomic<bool> m_hb_scan_done{false};
+        static void HbScanTrampoline(void *self);
+        void StartHbScan();   // kick off the worker (no-op if already running/done)
+        void PollHbScan();    // main thread: swap results in when the worker finishes
+
+        // Pinned-homebrew resolve (name + icon) also runs on a worker so it never
+        // sits on the menu-start path; the main thread folds names/icons back in.
+        Thread m_pin_thread{};
+        std::vector<hb::HbEntry> m_pin_result;
+        bool m_pin_running = false;
+        std::atomic<bool> m_pin_done{false};
+        static void ResolvePinsTrampoline(void *self);
+        void StartResolvePins();   // background resolve of m_hb_pins (no-op if empty/running)
+        void PollResolvePins();    // main thread: fold resolved names/icons into m_hb_pins
         std::unordered_map<int, SDL_Texture*> m_sys_icons; // Icons
         std::vector<std::pair<u64, std::string>> m_names; // app_id -> custom name
         int  m_theming_cursor = 0;
