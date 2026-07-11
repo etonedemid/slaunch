@@ -299,7 +299,9 @@ static void LoadAppsTrampoline(void *) {
     g_LoadDone = true;
 }
 
-static void OnSdEjected()      { g_NeedAppReload = true; }
+// The daemon sends this when the SD card is physically pulled while powered on.
+// Show the full-screen warning; the daemon reboots the console shortly after.
+static void OnSdEjected()      { if (g_UI) g_UI->ShowSdRemoved(); }
 static void OnAppListChanged() { g_NeedAppReload = true; }
 
 // ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ namespace sl::menu::widgets {
         net::GlobalInit();
         LoadWidgets();          // constructs LuaWidgets (runs each script) on this thread
         LoadPositions();        // default layout, then any saved positions
-        LoadEnabled();          // menu-owned on/off state (default on)
+        LoadEnabled();          // menu-owned on/off state (default off)
         m_run = true;
         if (R_SUCCEEDED(threadCreate(&m_thread, &Widgets::ThreadTrampoline, this,
                                      nullptr, 0x8000, 0x3B, -2))) {
@@ -146,7 +146,10 @@ namespace sl::menu::widgets {
     }
 
     void Widgets::LoadEnabled() {
-        m_enabled.assign(m_widgets.size(), 1);   // default: on
+        // Default off: a fresh install (and any newly-added widget) starts
+        // disabled, so nothing shows on the home screen until the user turns it on
+        // in Theming > Widgets. Saved state in widget_enabled.txt overrides this.
+        m_enabled.assign(m_widgets.size(), 0);   // default: off
         FILE *fp = fopen(kEnPath, "r");
         if (!fp) return;
         char line[128];

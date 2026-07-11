@@ -72,6 +72,7 @@ namespace sl::menu::ui {
         LoadSort();
         LoadOrder();
         LoadHbPins();
+        LoadHbFavourites();
         LoadHbDonor();
         LoadSettings();
         LoadNames();
@@ -150,22 +151,28 @@ namespace sl::menu::ui {
                                   // move-order is applied to the whole list below)
             }
         };
-        sort_group(favs);
+        // Pinned homebrew (name + cached icon resolved by ResolvePins; fallback
+        // file-base name until then). Favourited pins join the favourites group so
+        // they sort to the very top with the games; the rest sit just below.
+        std::vector<MenuItem> hb_pinned;
+        for (auto &p : m_hb_pins) {
+            MenuItem it;
+            it.kind        = ItemKind::Homebrew;
+            it.hb_path     = p.path;
+            it.name        = p.name;
+            it.hb_icon     = p.icon_key;
+            it.is_favourite = IsHbFavourite(p.path);
+            (it.is_favourite ? favs : hb_pinned).push_back(std::move(it));
+        }
+
+        sort_group(favs);   // games + favourited homebrew, ordered by sort mode
         sort_group(rest);
 
         // Favourites pinned at the very top for quick access.
         for (auto &it : favs) m_items.push_back(std::move(it));
 
-        // Homebrew pinned to the main menu (name + cached icon resolved by
-        // ResolvePins; fallback file-base name until then).
-        for (auto &p : m_hb_pins) {
-            MenuItem it;
-            it.kind    = ItemKind::Homebrew;
-            it.hb_path = p.path;
-            it.name    = p.name;
-            it.hb_icon = p.icon_key;
-            m_items.push_back(std::move(it));
-        }
+        // Remaining (non-favourite) pinned homebrew, just under the favourites.
+        for (auto &it : hb_pinned) m_items.push_back(std::move(it));
 
         // System shortcuts.
         auto add = [&](ItemKind k, const char *name) {
@@ -234,6 +241,39 @@ namespace sl::menu::ui {
         FILE *fp = fopen("sdmc:/slaunch/config/favourites.txt", "w");
         if (!fp) return;
         for (u64 id : m_favourites) fprintf(fp, "%016llX\n", (unsigned long long)id);
+        fclose(fp);
+    }
+
+    // Homebrew favourites are kept as .nro paths, one per line.
+    bool Menu::IsHbFavourite(const std::string &path) const {
+        return std::find(m_hb_favs.begin(), m_hb_favs.end(), path) != m_hb_favs.end();
+    }
+
+    void Menu::ToggleHbFavourite(const std::string &path) {
+        auto it = std::find(m_hb_favs.begin(), m_hb_favs.end(), path);
+        if (it != m_hb_favs.end()) m_hb_favs.erase(it);
+        else                       m_hb_favs.push_back(path);
+        SaveHbFavourites();
+    }
+
+    void Menu::LoadHbFavourites() {
+        m_hb_favs.clear();
+        FILE *fp = fopen("sdmc:/slaunch/config/hb_favourites.txt", "r");
+        if (!fp) return;
+        char line[FS_MAX_PATH + 2];
+        while (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (line[0]) m_hb_favs.push_back(line);
+        }
+        fclose(fp);
+    }
+
+    void Menu::SaveHbFavourites() {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/config", 0777);
+        FILE *fp = fopen("sdmc:/slaunch/config/hb_favourites.txt", "w");
+        if (!fp) return;
+        for (auto &p : m_hb_favs) fprintf(fp, "%s\n", p.c_str());
         fclose(fp);
     }
 
@@ -558,6 +598,7 @@ namespace sl::menu::ui {
     // the item under the finger.
     Menu::Action Menu::OnTouch(int phase, int x, int y, u64 &out_app_id) {
         out_app_id = 0;
+        if (m_sd_removed) return Action::None;   // frozen: awaiting reboot
 
         // ---- on-screen keyboard: tap a key ----
         if (m_screen == Screen::Keyboard) {
@@ -649,6 +690,7 @@ namespace sl::menu::ui {
     // Input
     Menu::Action Menu::OnButton(Btn b, u64 &out_app_id) {
         out_app_id = 0;
+        if (m_sd_removed)            return Action::None;   // frozen: awaiting reboot
         if (m_options_open)          return OnButtonOptions(b, out_app_id);
         if (m_dialog != Dialog::None) return OnButtonDialog(b, out_app_id);
         switch (m_screen) {
@@ -812,8 +854,11 @@ namespace sl::menu::ui {
             m_options.push_back({ m_hb_donor == it.app_id ? T("Homebrew donor (set)")
                                                           : T("Use as homebrew donor"), OptSetDonor });
         }
-        if (it.kind == ItemKind::Homebrew)
+        if (it.kind == ItemKind::Homebrew) {
+            m_options.push_back({ IsHbFavourite(it.hb_path) ? T("Remove from Favourites")
+                                                            : T("Add to Favourites"), OptFav });
             m_options.push_back({ T("Remove from menu"), OptUnpinHb });
+        }
         // Any entry can be reordered.
         m_options.push_back({ T("Move"), OptMove });
         if (it.kind == ItemKind::Game && m_suspended != 0 && it.app_id == m_suspended)
@@ -849,10 +894,11 @@ namespace sl::menu::ui {
 
         switch (m_options[m_options_cursor].action) {
             case OptFav: {
-                bool now_fav = !IsFavourite(sel_id);
-                ToggleFavourite(sel_id);
+                bool now_fav;
+                if (sel_is_game) { now_fav = !IsFavourite(sel_id);   ToggleFavourite(sel_id); }
+                else             { now_fav = !IsHbFavourite(sel_hb); ToggleHbFavourite(sel_hb); }
                 RebuildItems();
-                SelectApp(sel_id);
+                SelectByKey(sel_key);   // generic: works for games and homebrew
                 SetStatus(now_fav ? "Added to Favourites" : "Removed from Favourites");
                 m_options_open = false;
                 return Action::None;
@@ -1399,6 +1445,15 @@ namespace sl::menu::ui {
     }
 
     void Menu::Render() {
+        // SD card pulled while powered on: nothing else matters, show the warning
+        // (in the always-loaded system font) until the daemon reboots the console.
+        if (m_sd_removed) {
+            m_gfx->UseDefaultFont(true);
+            DrawSdRemoved();
+            m_gfx->Present();
+            return;
+        }
+
         m_music.Update();   // advance playback position / roll to the next track
 
         // The Fonts and Color-picker screens always render their chrome in the
@@ -1424,6 +1479,25 @@ namespace sl::menu::ui {
         if (m_options_open) DrawOptions();
         if (m_dialog != Dialog::None) DrawDialog();
         m_gfx->Present();
+    }
+
+    void Menu::DrawSdRemoved() {
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+        const int cx = W / 2;
+
+        // Classic full-screen blue warning.
+        const SDL_Color blue  = {  15,  70, 180, 255 };
+        const SDL_Color white = { 255, 255, 255, 255 };
+        const SDL_Color soft  = { 205, 222, 255, 255 };
+        m_gfx->FillRect(0, 0, W, H, blue);
+
+        m_gfx->TextCentered(FontSize::Title,  cx, 210, white, "SD card removed");
+        m_gfx->FillRect(cx - 150, 292, 300, 3, white);
+        m_gfx->TextCentered(FontSize::Normal, cx, 336, white,
+                            "Please only remove the SD card while the console is off.");
+        m_gfx->TextCentered(FontSize::Small,  cx, 388, soft,
+                            "Taking it out while powered on can corrupt your data.");
+        m_gfx->TextCentered(FontSize::Normal, cx, 470, soft, "Restarting...");
     }
 
     void Menu::DrawOobe() {

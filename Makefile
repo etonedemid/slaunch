@@ -42,8 +42,12 @@ assets:
 	@cp -f assets/fonts/*.ttf SdOut/slaunch/fonts/ 2>/dev/null || true
 	@cp -f assets/fonts/*.otf SdOut/slaunch/fonts/ 2>/dev/null || true
 	@cp -f assets/fonts/LICENSE-OFL.txt assets/fonts/ATTRIBUTION.md SdOut/slaunch/fonts/ 2>/dev/null || true
-	@# Default Lua widgets (weather + AuroraChat). example.lua is reference-only.
-	@cp -f assets/widgets/weather.lua assets/widgets/auroracross.lua SdOut/slaunch/widgets/ 2>/dev/null || true
+	@# Default Lua widgets. example.lua is reference-only, so it is not shipped.
+	@# All ship disabled by default (Theming > Widgets turns them on).
+	@cp -f assets/widgets/weather.lua assets/widgets/auroracross.lua \
+	       assets/widgets/clock.lua assets/widgets/calendar.lua \
+	       assets/widgets/crypto.lua assets/widgets/countdown.lua \
+	       assets/widgets/quote.lua SdOut/slaunch/widgets/ 2>/dev/null || true
 	@# Locale template for translators (English is built in; no file = English).
 	@cp -f assets/lang/*.txt SdOut/slaunch/lang/ 2>/dev/null || true
 	@# Black/white icons for the system menu entries (List + Grid modes).

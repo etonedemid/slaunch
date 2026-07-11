@@ -213,7 +213,7 @@ static void RunPendingAction() {
         case Pending::OpenWebBrowser: {
             // Build a normal web-page config and start the web applet with it.
             WebCommonConfig cfg;
-            if (R_SUCCEEDED(webPageCreate(&cfg, "https://https://etonedemid.github.io/slaunch/"))) {
+            if (R_SUCCEEDED(webPageCreate(&cfg, "https://etonedemid.github.io/slaunch/"))) {
                 webConfigSetWhitelist(&cfg, "^http*");
                 la::OpenSystemApplet(AppletId_LibraryAppletWeb, cfg.version,
                                      &cfg.arg, sizeof(cfg.arg));
@@ -334,6 +334,27 @@ static void HandleSleep() {
     appletStartSleepSequence(true);
 }
 
+// Reboot the console. Best-effort: bpc is what the system uses to reset.
+static void RebootSystem() {
+    if (R_SUCCEEDED(bpcInitialize())) {
+        bpcRebootSystem();   // does not return on success
+        bpcExit();
+    }
+}
+
+// The SD card was physically removed while the console is on. Everything sMenu
+// and the daemon serve lives on that card (ECS overrides read straight from it),
+// so we must not keep running. Show the warning on the menu if it is up, then
+// reboot after ~3s. When a game is in the foreground the menu isn't resident and
+// can't be relaunched (its files are on the pulled card), so we can only reboot.
+static void HandleSdCardRemoved() {
+    DaemonLog("sd: card removed while on -> warn + reboot in 3s");
+    if (la::IsMenuAlive())
+        PushMenuEvent(MenuMessage::SdCardEjected);
+    svcSleepThread(3'000'000'000ULL);   // leave the warning up long enough to read
+    RebootSystem();
+}
+
 // HOME button toggles between a game and the menu, like the real HOME Menu:
 //  - in a game        -> suspend it (keep it running) and show the menu
 //  - in the menu with
@@ -374,6 +395,7 @@ static void PumpAppletMessages() {
             case Msg_DetectShortPressingHomeButton:  HandleHomeButton(); break;
             case Msg_DetectShortPressingPowerButton:
             case Msg_AutoPowerDown:                  HandleSleep();      break;
+            case Msg_SdCardRemoved:                  HandleSdCardRemoved(); break;
             default: break;
         }
     }
