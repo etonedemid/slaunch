@@ -1,5 +1,6 @@
 #include <sl/menu/ui/Menu.hpp>
 #include <sl/menu/ui/Locale.hpp>
+#include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
 #include <cstdio>
 #include <cstring>
@@ -95,6 +96,8 @@ namespace sl::menu::ui {
         // Resolve pinned homebrew names/icons on a worker thread (never blocks the
         // menu-start path); they show fallback names until it lands.
         StartResolvePins();
+        // Optional: check GitHub for a newer release (off the main thread).
+        StartUpdateCheck();
     }
 
     Menu::~Menu() {
@@ -109,6 +112,11 @@ namespace sl::menu::ui {
             threadWaitForExit(&m_pin_thread);
             threadClose(&m_pin_thread);
             m_pin_running = false;
+        }
+        if (m_upd_running) {
+            threadWaitForExit(&m_upd_thread);
+            threadClose(&m_upd_thread);
+            m_upd_running = false;
         }
         // Free SFX chunks before Music::Exit() closes the mixer, then stop the
         // network thread.
@@ -418,6 +426,8 @@ namespace sl::menu::ui {
                 m_ui_mode = (UiMode)v;
             else if (sscanf(line, "list_icons=%d", &v) == 1)
                 m_list_icons = (v != 0);
+            else if (sscanf(line, "check_updates=%d", &v) == 1)
+                m_check_updates = (v != 0);
         }
         fclose(fp);
     }
@@ -430,6 +440,7 @@ namespace sl::menu::ui {
         fprintf(fp, "align=%d\n", (int)m_align);
         fprintf(fp, "ui_mode=%d\n", (int)m_ui_mode);
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
+        fprintf(fp, "check_updates=%d\n", m_check_updates ? 1 : 0);
         fclose(fp);
     }
 
@@ -719,6 +730,7 @@ namespace sl::menu::ui {
             case Screen::Keyboard:    return OnButtonKeyboard(b);
             case Screen::Music:         return OnButtonMusic(b);
             case Screen::Homebrew:      return OnButtonHomebrew(b);
+            case Screen::About:         return OnButtonAbout(b);
         }
         return Action::None;
     }
@@ -734,6 +746,9 @@ namespace sl::menu::ui {
             const int n = (int)UiMode::Count;
             if (b == Btn::Right) m_ui_mode = (UiMode)(((int)m_ui_mode + 1) % n);
             if (b == Btn::Left)  m_ui_mode = (UiMode)(((int)m_ui_mode + n - 1) % n);
+        }
+        if (m_oobe_step == LastStep) {   // done - update-check opt-out
+            if (b == Btn::Left || b == Btn::Right) m_check_updates = !m_check_updates;
         }
         if (b == Btn::A) {
             if (m_oobe_step < LastStep) { m_oobe_step++; }
@@ -962,7 +977,142 @@ namespace sl::menu::ui {
 
     // ---- Theming submenu (appearance + widgets) ----------------------------
     namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_UiMode, TH_ListIcons,
-                       TH_Widgets, TH_Music, TH_Back, TH_Count }; }
+                       TH_Widgets, TH_Music, TH_Updates, TH_About, TH_Back, TH_Count }; }
+
+    // ---- online update check (opt-out) -------------------------------------
+    namespace {
+        // Pluck a "key":"value" string field out of the GitHub release JSON.
+        std::string JsonStr(const std::string &j, const char *key) {
+            std::string pat = std::string("\"") + key + "\"";
+            size_t p = j.find(pat); if (p == std::string::npos) return "";
+            p = j.find(':', p + pat.size()); if (p == std::string::npos) return "";
+            size_t s = j.find('"', p); if (s == std::string::npos) return "";
+            size_t e = j.find('"', s + 1); if (e == std::string::npos) return "";
+            return j.substr(s + 1, e - s - 1);
+        }
+        int CmpVer(const char *a, const char *b) {   // >0 if a newer than b; skips a 'v'
+            auto parse = [](const char *s, int v[3]) {
+                v[0] = v[1] = v[2] = 0;
+                if (s && (*s == 'v' || *s == 'V')) s++;
+                if (s) sscanf(s, "%d.%d.%d", &v[0], &v[1], &v[2]);
+            };
+            int va[3], vb[3]; parse(a, va); parse(b, vb);
+            for (int i = 0; i < 3; i++) if (va[i] != vb[i]) return va[i] - vb[i];
+            return 0;
+        }
+    }
+
+    void Menu::UpdateCheckTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        std::string body;
+        if (net::Get("https://api.github.com/repos/etonedemid/slaunch/releases/latest",
+                     body, 15)) {
+            std::string tag = JsonStr(body, "tag_name");
+            if (!tag.empty() && CmpVer(tag.c_str(), SL_VERSION) > 0) {
+                m->m_upd_latest    = tag;
+                m->m_upd_available = true;
+            }
+        }
+        m->m_upd_done.store(true, std::memory_order_release);
+    }
+
+    void Menu::StartUpdateCheck() {
+        if (!m_check_updates || m_upd_running || m_upd_available) return;
+        m_upd_done.store(false, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_upd_thread, &Menu::UpdateCheckTrampoline, this,
+                                     nullptr, 0x8000, 0x3B, -2))) {
+            threadStart(&m_upd_thread);
+            m_upd_running = true;
+        }
+    }
+
+    void Menu::PollUpdateCheck() {
+        if (!m_upd_running || !m_upd_done.load(std::memory_order_acquire)) return;
+        threadWaitForExit(&m_upd_thread);
+        threadClose(&m_upd_thread);
+        m_upd_running = false;
+    }
+
+    // ---- About + changelog -------------------------------------------------
+    namespace {
+        struct LogLine { bool head; const char *text; };
+        // Newest first. Headers are version tags; the rest are one-line summaries.
+        const LogLine kChangelog[] = {
+            { true,  "v0.6.0" },
+            { false, "About screen with this changelog" },
+            { false, "Optional update check on startup (opt-out in setup / Theming)" },
+            { false, "Installer: check + install updates online, reboot button" },
+            { false, "Installer: full uninstall, keeps your settings on reinstall" },
+            { true,  "v0.5.0" },
+            { false, "Homebrew runs as a full application via a donor game (crash fixed)" },
+            { false, "Favourite homebrew - it sits up top with your favourite games" },
+            { false, "Homebrew icons cached + loaded instantly, no more menu hang" },
+            { false, "Fixed the ~2s freeze on every menu appearance" },
+            { false, "Fixed widget flickering; Web Browser opens Google" },
+            { true,  "v0.4.0" },
+            { false, "Background music from the SD, resumes where it left off" },
+            { false, "UI sounds; homebrew browser (pin, launch as applet or app)" },
+            { false, "Reorder any entry, more sorting options, reworked setup" },
+            { true,  "v0.3.1" },
+            { false, "Localization, faster boot/suspend, Shelf UI mode" },
+            { true,  "v0.2.0" },
+            { false, "Lua widgets, app icons, extra UI modes" },
+        };
+        constexpr int kChangelogN = (int)(sizeof(kChangelog) / sizeof(kChangelog[0]));
+        constexpr int kAboutTop = 300, kAboutRowH = 34, kAboutVisible = 9;
+    }
+
+    Menu::Action Menu::OnButtonAbout(Btn b) {
+        const int maxScroll = std::max(0, kChangelogN - kAboutVisible);
+        if (b == Btn::Down) m_about_scroll = std::min(maxScroll, m_about_scroll + 1);
+        if (b == Btn::Up)   m_about_scroll = std::max(0, m_about_scroll - 1);
+        if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = TH_About; }
+        return Action::None;
+    }
+
+    void Menu::DrawAbout() {
+        const Theme &t = m_theme.Current();
+        DrawTopBar("About");
+        const int cx = gfx::Gfx::Width / 2;
+
+        m_gfx->TextCentered(FontSize::Large, cx, 92, t.title, "sLaunch");
+
+        char ver[80];
+        snprintf(ver, sizeof(ver), "%s v%s", T("Version"), SL_VERSION);
+        if (m_upd_available) {
+            char up[140];
+            snprintf(up, sizeof(up), "%s  -  %s %s", ver, T("update available:"), m_upd_latest.c_str());
+            m_gfx->TextCentered(FontSize::Small, cx, 158, t.accent, up);
+        } else {
+            char line[140];
+            snprintf(line, sizeof(line), "%s  -  %s", ver,
+                     m_check_updates ? T("up to date") : T("update check off"));
+            m_gfx->TextCentered(FontSize::Small, cx, 158, t.dim, line);
+        }
+        m_gfx->TextCentered(FontSize::Small, cx, 190, t.dim, "github.com/etonedemid/slaunch");
+
+        // "What's new" changelog (scrollable).
+        const int lx = cx - 360;
+        m_gfx->Text(FontSize::Normal, lx, 246, t.accent, T("What's new"));
+        m_gfx->FillRect(lx, 284, 720, 2, WithAlpha(t.dim, 90));
+
+        for (int i = 0; i < kAboutVisible; i++) {
+            const int idx = m_about_scroll + i;
+            if (idx >= kChangelogN) break;
+            const LogLine &l = kChangelog[idx];
+            const int y = kAboutTop + i * kAboutRowH;
+            if (l.head) m_gfx->Text(FontSize::Normal, lx, y, t.fg, l.text);
+            else        m_gfx->Text(FontSize::Small, lx + 24, y + 4, t.dim, l.text);
+        }
+
+        // Scroll affordances.
+        if (m_about_scroll > 0)
+            m_gfx->TextCentered(FontSize::Small, cx, kAboutTop - 26, t.dim, "^");
+        if (m_about_scroll + kAboutVisible < kChangelogN)
+            m_gfx->TextCentered(FontSize::Small, cx, kAboutTop + kAboutVisible * kAboutRowH, t.dim, "v");
+
+        DrawHint("Up/Down: Scroll   B: Back");
+    }
 
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto cycleAlign = [&](int dir) {
@@ -993,6 +1143,9 @@ namespace sl::menu::ui {
         auto toggleListIcons = [&]() { m_list_icons = !m_list_icons; SaveSettings(); };
         if (m_theming_cursor == TH_ListIcons && (b == Btn::Left || b == Btn::Right))
             toggleListIcons();
+        auto toggleUpdates = [&]() { m_check_updates = !m_check_updates; SaveSettings(); };
+        if (m_theming_cursor == TH_Updates && (b == Btn::Left || b == Btn::Right))
+            toggleUpdates();
         if (b == Btn::A) {
             switch (m_theming_cursor) {
                 case TH_Themes:  m_screen = Screen::Themes; m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
@@ -1002,6 +1155,8 @@ namespace sl::menu::ui {
                 case TH_ListIcons: toggleListIcons(); break;
                 case TH_Widgets: openWidgets(); break;
                 case TH_Music:   m_screen = Screen::Music; m_music_cursor = 0; m_sub_scroll = 0; break;
+                case TH_Updates: toggleUpdates(); break;
+                case TH_About:   m_screen = Screen::About; m_about_scroll = 0; break;
                 case TH_Back:    m_screen = Screen::Main; break;
             }
         }
@@ -1460,6 +1615,7 @@ namespace sl::menu::ui {
     void Menu::Render() {
         PollHbScan();       // swap in the homebrew browser list when its worker finishes
         PollResolvePins();  // fold in pinned-homebrew names/icons when its worker finishes
+        PollUpdateCheck();  // join the update-check worker when it finishes
 
         // SD card pulled while powered on: nothing else matters, show the warning
         // (in the always-loaded system font) until the daemon reboots the console.
@@ -1491,6 +1647,7 @@ namespace sl::menu::ui {
             case Screen::Keyboard:    DrawKeyboard(); break;
             case Screen::Music:       DrawMusic(); break;
             case Screen::Homebrew:    DrawHomebrew(); break;
+            case Screen::About:       DrawAbout(); break;
         }
         if (m_options_open) DrawOptions();
         if (m_dialog != Dialog::None) DrawDialog();
@@ -1589,12 +1746,21 @@ namespace sl::menu::ui {
                 break;
             }
 
-            default: // Done
-                m_gfx->TextCentered(FontSize::Title, cx, 240, t.title, T("You're all set"));
-                m_gfx->FillRect(cx - 100, 318, 200, 3, t.accent);
-                m_gfx->TextCentered(FontSize::Normal, cx, 366, t.fg, T("Enjoy sLaunch."));
-                DrawHint("A: Finish");
+            default: { // Done
+                m_gfx->TextCentered(FontSize::Title, cx, 210, t.title, T("You're all set"));
+                m_gfx->FillRect(cx - 100, 288, 200, 3, t.accent);
+                m_gfx->TextCentered(FontSize::Normal, cx, 336, t.fg, T("Enjoy sLaunch."));
+                // Update-check opt-out.
+                m_gfx->TextCentered(FontSize::Small, cx, 420, t.dim,
+                                    T("Check GitHub for updates on startup"));
+                m_gfx->Text(FontSize::Normal, cx - 250, 448, WithAlpha(t.dim, 150), "<");
+                const int rw = m_gfx->TextWidth(FontSize::Normal, ">");
+                m_gfx->Text(FontSize::Normal, cx + 250 - rw, 448, WithAlpha(t.dim, 150), ">");
+                m_gfx->TextCentered(FontSize::Normal, cx, 448, t.accent,
+                                    m_check_updates ? T("On") : T("Off"));
+                DrawHint("Left/Right: Change    A: Finish");
                 break;
+            }
         }
 
         // Progress dots.
@@ -2173,13 +2339,15 @@ namespace sl::menu::ui {
         const char *modes[5]  = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
         std::vector<std::string> labels = {
             T("Themes"), T("Fonts"), T("Text position"), T("UI mode"), T("List icons"),
-            T("Widgets"), T("Music"), T("Back")
+            T("Widgets"), T("Music"), T("Check for updates"), T("About"), T("Back")
         };
         std::vector<std::string> values(labels.size());
         values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_UiMode]      = modes[(int)m_ui_mode];
         values[TH_ListIcons]   = m_list_icons ? T("On") : T("Off");
         values[TH_Music]       = m_music.Enabled() ? T("On") : T("Off");
+        values[TH_Updates]     = m_check_updates ? T("On") : T("Off");
+        values[TH_About]       = m_upd_available ? T("Update available") : std::string("v") + SL_VERSION;
         {
             char c[32];
             snprintf(c, sizeof(c), "%d %s", m_widgets.Count(), T("found"));

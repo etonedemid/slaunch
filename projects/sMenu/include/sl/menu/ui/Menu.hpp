@@ -117,7 +117,7 @@ namespace sl::menu::ui {
 
     private:
         enum class Screen { Oobe, Main, Theming, Themes, ThemeEditor, ColorPicker,
-                            Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew };
+                            Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew, About };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame };
 
         void RebuildItems();
@@ -126,6 +126,22 @@ namespace sl::menu::ui {
         Action OnButtonMain(Btn b, u64 &out_app_id);
         Action OnButtonOptions(Btn b, u64 &out_app_id);
         Action OnButtonTheming(Btn b);
+        Action OnButtonAbout(Btn b);
+        void   DrawAbout();
+
+        // Optional online update check (opt-out in OOBE + Theming > About). Runs a
+        // worker on menu start when enabled; sets m_upd_available if GitHub's latest
+        // release is newer than this build. Never blocks the UI.
+        static void UpdateCheckTrampoline(void *self);
+        void StartUpdateCheck();
+        void PollUpdateCheck();
+        Thread m_upd_thread{};
+        bool   m_upd_running   = false;
+        std::atomic<bool> m_upd_done{false};
+        bool   m_check_updates = true;    // setting (persisted)
+        bool   m_upd_available = false;
+        std::string m_upd_latest;         // e.g. "v0.6.0" when an update is found
+        int    m_about_scroll  = 0;       // first visible changelog line in About
         Action OnButtonThemes(Btn b);
         Action OnButtonEditor(Btn b);
         Action OnButtonColorPicker(Btn b);

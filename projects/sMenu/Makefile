@@ -37,7 +37,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 0.5.0
+APP_VERSION := 0.6.0
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
@@ -65,7 +65,8 @@ SOL_FLAGS = -DSOL_ALL_SAFETIES_ON=0 -DSOL_EXCEPTIONS_SAFE_PROPAGATION=0 \
 COMPAT_FLAGS = -Dsol_lua_newstate_args=$(NEWSTATE_ARGS)
 
 CFLAGS    = -g -Wall -O2 -ffunction-sections -fvisibility=default $(ARCH) \
-            $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) $(LUA_DEFINES)
+            $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) $(LUA_DEFINES) \
+            -DSL_VERSION=\"$(APP_VERSION)\"
 
 CXXFLAGS = $(CFLAGS) -std=gnu++20 -fno-rtti -fno-exceptions \
            $(SOL_FLAGS) $(COMPAT_FLAGS)
