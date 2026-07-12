@@ -18,24 +18,29 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sLaunch Installer
 APP_AUTHOR  := sLaunch
-APP_VERSION := 0.5.0
+APP_VERSION := 0.6.0
 APP_ICON    := ../../assets/icon.jpg
 
 PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
 SDL_CFLAGS := $(shell $(PKGCONF) --cflags sdl2 SDL2_ttf SDL2_image)
 SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image)
+# libcurl (+ mbedtls/zlib) for the online update check/download.
+CURL_CFLAGS := $(shell $(PKGCONF) --cflags libcurl)
+CURL_LIBS   := $(shell $(PKGCONF) --libs libcurl)
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS    = -g -Wall -O2 -ffunction-sections $(ARCH) \
-            $(INCLUDE) $(SDL_CFLAGS) -D__SWITCH__ -DSL_VERSION=\"$(APP_VERSION)\"
+            $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) -D__SWITCH__ -DSL_VERSION=\"$(APP_VERSION)\"
 
 CXXFLAGS  = $(CFLAGS) -std=c++20 -fno-rtti -fno-exceptions
 
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
             -Wl,-Map,$(BUILD)/$(TARGET).map
 
-LIBS     := $(SDL_LIBS)
+# Network libs first (curl -> mbedtls -> z), minizip for extracting the update
+# zip (needs -lz after it), then SDL.
+LIBS     := $(CURL_LIBS) -lminizip $(SDL_LIBS) -lz
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX)
 

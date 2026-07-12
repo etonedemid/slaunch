@@ -2,6 +2,8 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
+#include <curl/curl.h>
+#include <minizip/unzip.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <cstdio>
@@ -69,6 +71,15 @@ static void Mkdirs(const std::string &path) {
     mkdir(path.c_str(), 0777);
 }
 
+// User data we don't want an install/update to clobber: settings, added
+// wallpapers, added music, and the (regenerable) icon cache.
+static bool IsUserData(const std::string &dst) {
+    static const char *dirs[] = { "/slaunch/config/", "/slaunch/themes/",
+                                  "/slaunch/music/",  "/slaunch/cache/" };
+    for (auto d : dirs) if (dst.find(d) != std::string::npos) return true;
+    return false;
+}
+
 static bool CopyFile(const std::string &src, const std::string &dst) {
     FILE *in = fopen(src.c_str(), "rb");
     if (!in) return false;
@@ -98,7 +109,11 @@ static bool CopyTree(const std::string &src, const std::string &dst,
         if (stat(s.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
             if (!CopyTree(s, t, tick)) ok = false;
         } else {
-            if (!CopyFile(s, t)) ok = false;
+            struct stat es;
+            // Preserve the user's existing settings/wallpapers/music on re-install.
+            if (!(IsUserData(t) && stat(t.c_str(), &es) == 0)) {
+                if (!CopyFile(s, t)) ok = false;
+            }
             g_done++;
             tick();
         }
@@ -139,6 +154,172 @@ static bool DeleteTree(const std::string &path) {
 static bool IsInstalled() {
     struct stat st;
     return stat("sdmc:/atmosphere/contents/0100000000001000", &st) == 0;
+}
+
+// ---- full uninstall --------------------------------------------------------
+// Remove EVERYTHING sLaunch put on the SD: the qlaunch override and the whole
+// slaunch/ tree (bin, fonts, music, sounds, themes, widgets, icons, lang,
+// config, cache). Leaves the installer NRO so the user can reinstall.
+static bool RemoveEverything() {
+    bool ok = true;
+    struct stat st;
+    if (stat("sdmc:/atmosphere/contents/0100000000001000", &st) == 0)
+        if (!DeleteTree("sdmc:/atmosphere/contents/0100000000001000")) ok = false;
+    if (stat("sdmc:/slaunch", &st) == 0)
+        if (!DeleteTree("sdmc:/slaunch")) ok = false;
+    return ok;
+}
+
+// ---- reboot ----------------------------------------------------------------
+static void RebootSystem() {
+    if (R_SUCCEEDED(bpcInitialize())) { bpcRebootSystem(); bpcExit(); }
+}
+
+// ---- version compare -------------------------------------------------------
+static void ParseVer(const char *s, int v[3]) {
+    v[0] = v[1] = v[2] = 0;
+    if (s && (*s == 'v' || *s == 'V')) s++;
+    if (s) sscanf(s, "%d.%d.%d", &v[0], &v[1], &v[2]);
+}
+static int CmpVer(const char *a, const char *b) {   // >0 if a is newer than b
+    int va[3], vb[3]; ParseVer(a, va); ParseVer(b, vb);
+    for (int i = 0; i < 3; i++) if (va[i] != vb[i]) return va[i] - vb[i];
+    return 0;
+}
+
+// ---- tiny JSON helpers (GitHub releases API) -------------------------------
+static std::string JsonStr(const std::string &j, const char *key) {
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = j.find(pat); if (p == std::string::npos) return "";
+    p = j.find(':', p + pat.size()); if (p == std::string::npos) return "";
+    size_t s = j.find('"', p); if (s == std::string::npos) return "";
+    size_t e = j.find('"', s + 1); if (e == std::string::npos) return "";
+    return j.substr(s + 1, e - s - 1);
+}
+// The first release asset download URL ending in "-sd.zip".
+static std::string FindZipUrl(const std::string &j) {
+    const char *key = "\"browser_download_url\"";
+    size_t p = 0;
+    while ((p = j.find(key, p)) != std::string::npos) {
+        size_t c = j.find(':', p);           if (c == std::string::npos) break;
+        size_t s = j.find('"', c);           if (s == std::string::npos) break;
+        size_t e = j.find('"', s + 1);       if (e == std::string::npos) break;
+        std::string url = j.substr(s + 1, e - s - 1);
+        if (url.size() >= 7 && url.compare(url.size() - 7, 7, "-sd.zip") == 0) return url;
+        p = e + 1;
+    }
+    return "";
+}
+
+// ---- shared progress screen ------------------------------------------------
+static void DrawProgress(const char *title, double frac, const char *sub) {
+    FillRect(0, 0, W, H, kBlack);
+    Text(g_fM, 120, H / 2 - 30, kFg, title);
+    int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
+    FillRect(bx, by, bw, bh, kBg2);
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    FillRect(bx, by, (int)(bw * frac), bh, kAccent);
+    if (sub && sub[0]) Text(g_fS, 120, H / 2 + 30, kDim, sub);
+    SDL_RenderPresent(g_ren);
+}
+
+// ---- HTTP (GitHub API + release download) ----------------------------------
+static size_t WrStr(char *p, size_t s, size_t n, void *u) {
+    ((std::string *)u)->append(p, s * n); return s * n;
+}
+static bool HttpGet(const char *url, std::string &out) {
+    out.clear();
+    CURL *c = curl_easy_init(); if (!c) return false;
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, WrStr);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "sLaunch-Installer");
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+    CURLcode rc = curl_easy_perform(c);
+    long http = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
+    curl_easy_cleanup(c);
+    return rc == CURLE_OK && http >= 200 && http < 300;
+}
+static size_t WrFile(char *p, size_t s, size_t n, void *u) {
+    return fwrite(p, s, n, (FILE *)u) * s;
+}
+static int DlProgressCb(void *, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_off_t) {
+    double frac = dltotal > 0 ? (double)dlnow / (double)dltotal : 0.0;
+    char sub[64];
+    snprintf(sub, sizeof(sub), "%.1f / %.1f MB", dlnow / 1048576.0, dltotal / 1048576.0);
+    DrawProgress("Downloading update...", frac, sub);
+    return 0;
+}
+static bool HttpDownload(const char *url, const char *path) {
+    FILE *fp = fopen(path, "wb"); if (!fp) return false;
+    CURL *c = curl_easy_init(); if (!c) { fclose(fp); remove(path); return false; }
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, WrFile);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "sLaunch-Installer");
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, DlProgressCb);
+    CURLcode rc = curl_easy_perform(c);
+    long http = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
+    curl_easy_cleanup(c); fclose(fp);
+    bool ok = rc == CURLE_OK && http >= 200 && http < 300;
+    if (!ok) remove(path);
+    return ok;
+}
+
+// ---- unzip the release payload onto the SD (preserving user data) -----------
+static bool ExtractZip(const char *zipPath) {
+    unzFile uf = unzOpen64(zipPath);
+    if (!uf) return false;
+    unz_global_info64 gi;
+    if (unzGetGlobalInfo64(uf, &gi) != UNZ_OK) { unzClose(uf); return false; }
+    const int total = (int)gi.number_entry;
+    int done = 0;
+    bool ok = (unzGoToFirstFile(uf) == UNZ_OK);
+    while (ok) {
+        char name[600]; unz_file_info64 fi;
+        if (unzGetCurrentFileInfo64(uf, &fi, name, sizeof(name), nullptr, 0, nullptr, 0) != UNZ_OK) {
+            ok = false; break;
+        }
+        std::string dst = std::string("sdmc:/") + name;
+        size_t len = strlen(name);
+        struct stat es;
+        if (len && (name[len - 1] == '/' || name[len - 1] == '\\')) {
+            Mkdirs(dst);                                   // directory entry
+        } else if (IsUserData(dst) && stat(dst.c_str(), &es) == 0) {
+            // keep the user's existing settings/wallpapers/music - skip
+        } else {
+            size_t slash = dst.find_last_of('/');
+            if (slash != std::string::npos) Mkdirs(dst.substr(0, slash));
+            if (unzOpenCurrentFile(uf) != UNZ_OK) { ok = false; break; }
+            FILE *out = fopen(dst.c_str(), "wb");
+            if (!out) { unzCloseCurrentFile(uf); ok = false; break; }
+            char buf[65536]; int n;
+            while ((n = unzReadCurrentFile(uf, buf, sizeof(buf))) > 0)
+                if (fwrite(buf, 1, n, out) != (size_t)n) { ok = false; break; }
+            fclose(out);
+            unzCloseCurrentFile(uf);
+            if (n < 0) ok = false;
+        }
+        done++;
+        DrawProgress("Installing update...", total > 0 ? (double)done / total : 0.0, nullptr);
+        if (!ok) break;
+        if (unzGoToNextFile(uf) != UNZ_OK) break;
+    }
+    unzClose(uf);
+    return ok;
 }
 
 // ---- carousel helpers ------------------------------------------------------
@@ -243,6 +424,8 @@ static void DrawConfirmDialog(const char *title, const char *subtitle,
 int main() {
     romfsInit();
     plInitialize(PlServiceType_User);
+    socketInitializeDefault();          // bsd sockets for the online update check
+    curl_global_init(CURL_GLOBAL_DEFAULT);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
@@ -265,20 +448,30 @@ int main() {
 
     // --- installer state ---
     enum class Screen { MainMenu, ConfirmInstall, ConfirmRemove,
-                        Installing, Removing, Done, Failed };
+                        Installing, Removing, Done, Failed,
+                        Checking, UpToDate, ConfirmUpdate, Downloading, Extracting };
     Screen screen = Screen::MainMenu;
 
     bool installed = IsInstalled();
+    bool rebootAfter = false;   // Done came from an install/update (offer reboot)
 
-    // Main installer menu
-    struct InstallerItem { const char *label; };
-    std::vector<InstallerItem> installerItems = {
-        {installed ? "Re-install sLaunch" : "Install sLaunch"},
-        {installed ? "Remove sLaunch" : " "},
-        {"Exit installer"},
+    // Online-update state.
+    enum class Act { Install, Update, Remove, Exit };
+    struct InstallerItem { std::string label; Act act; };
+    std::vector<InstallerItem> installerItems;
+    auto buildMenu = [&]() {
+        installerItems.clear();
+        installerItems.push_back({installed ? "Re-install sLaunch" : "Install sLaunch", Act::Install});
+        installerItems.push_back({"Check for updates", Act::Update});
+        if (installed) installerItems.push_back({"Remove sLaunch", Act::Remove});
+        installerItems.push_back({"Exit installer", Act::Exit});
     };
+    buildMenu();
     int instCursor = 0;
     float instScroll = 0.0f;
+
+    std::string latestTag, zipUrl;   // filled by the update check
+    const char *updErr = "";         // failure detail for the Failed screen
 
     // Dialog state
     int dialogCursor = 1; // 0 = Yes, 1 = No (default to No for safety)
@@ -334,19 +527,11 @@ int main() {
             if (move_down) instCursor = (instCursor + 1) % (int)installerItems.size();
 
             if (down & HidNpadButton_A) {
-                switch (instCursor) {
-                    case 0: // Install / Re-install
-                        dialogCursor = 1;
-                        screen = Screen::ConfirmInstall;
-                        break;
-                    case 1: // Remove (blank + ignored when not installed)
-                        if (installed) {
-                            dialogCursor = 1;
-                            screen = Screen::ConfirmRemove;
-                        }
-                        break;
-                    case 2: // Exit
-                        goto cleanup;
+                switch (installerItems[instCursor].act) {
+                    case Act::Install: dialogCursor = 1; screen = Screen::ConfirmInstall; break;
+                    case Act::Update:  screen = Screen::Checking; break;
+                    case Act::Remove:  dialogCursor = 1; screen = Screen::ConfirmRemove; break;
+                    case Act::Exit:    goto cleanup;
                 }
             }
             if (down & HidNpadButton_B) goto cleanup;
@@ -370,11 +555,26 @@ int main() {
                 }
             }
 
-        } else if (screen == Screen::Installing || screen == Screen::Removing) {
-            // no input during operation
+        } else if (screen == Screen::ConfirmUpdate) {
+            if (move_up || move_down) dialogCursor ^= 1;
+            if (down & HidNpadButton_B) screen = Screen::MainMenu;
+            if (down & HidNpadButton_A)
+                screen = (dialogCursor == 0) ? Screen::Downloading : Screen::MainMenu;
 
-        } else if (screen == Screen::Done || screen == Screen::Failed) {
-            if (down & (HidNpadButton_A | HidNpadButton_B)) goto cleanup;
+        } else if (screen == Screen::UpToDate) {
+            if (down & (HidNpadButton_A | HidNpadButton_B)) screen = Screen::MainMenu;
+
+        } else if (screen == Screen::Installing || screen == Screen::Removing ||
+                   screen == Screen::Checking   || screen == Screen::Downloading ||
+                   screen == Screen::Extracting) {
+            // no input during a running operation
+
+        } else if (screen == Screen::Done) {
+            if (rebootAfter && (down & HidNpadButton_A)) RebootSystem();   // reboot now
+            if (down & (HidNpadButton_A | HidNpadButton_B)) goto cleanup;  // else exit
+
+        } else if (screen == Screen::Failed) {
+            if (down & (HidNpadButton_A | HidNpadButton_B)) { buildMenu(); screen = Screen::MainMenu; }
         }
 
         // ---- draw ----
@@ -400,7 +600,7 @@ int main() {
             FillRect(W / 2 - 200, 190, 400, 1, kBg2);
 
             std::vector<MockItem> instMock;
-            for (auto &it : installerItems) instMock.push_back({it.label, false, false});
+            for (auto &it : installerItems) instMock.push_back({it.label.c_str(), false, false});
             DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
 
         } else if (screen == Screen::ConfirmInstall) {
@@ -420,7 +620,7 @@ int main() {
             Text(g_fS, W / 2, 160, kDim, "A clean HOME Menu replacement", true);
             FillRect(W / 2 - 200, 190, 400, 1, kBg2);
             std::vector<MockItem> instMock;
-            for (auto &it : installerItems) instMock.push_back({it.label, false, false});
+            for (auto &it : installerItems) instMock.push_back({it.label.c_str(), false, false});
             DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
 
             DrawConfirmDialog("Install sLaunch?",
@@ -443,7 +643,7 @@ int main() {
             Text(g_fS, W / 2, 160, kDim, "A clean HOME Menu replacement", true);
             FillRect(W / 2 - 200, 190, 400, 1, kBg2);
             std::vector<MockItem> instMock;
-            for (auto &it : installerItems) instMock.push_back({it.label, false, false});
+            for (auto &it : installerItems) instMock.push_back({it.label.c_str(), false, false});
             DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
 
             DrawConfirmDialog(installed ? "Remove sLaunch?" : "Do nothing?",
@@ -471,14 +671,40 @@ int main() {
             Text(g_fS, 120, H / 2 + 30, kDim, cnt);
 
         } else if (screen == Screen::Done) {
-            Text(g_fM, 120, H / 2 - 20, kAccent, "Done", true);
-            Text(g_fS, 120, H / 2 + 20, kDim, "Please reboot", true);
-            Text(g_fS, 120, H - 40, kDim, "Press A to exit");
+            Text(g_fM, W / 2, H / 2 - 20, kAccent, "Done", true);
+            if (rebootAfter) {
+                Text(g_fS, W / 2, H / 2 + 20, kDim, "A reboot is needed to apply the changes", true);
+                Text(g_fS, W / 2, H - 60, kAccent, "A: Reboot now", true);
+                Text(g_fS, W / 2, H - 34, kDim, "B: Exit (reboot later)", true);
+            } else {
+                Text(g_fS, W / 2, H - 40, kDim, "Press A to exit", true);
+            }
 
         } else if (screen == Screen::Failed) {
-            Text(g_fM, 120, H / 2 - 20, kRed, "Operation failed", true);
-            Text(g_fS, 120, H / 2 + 20, kDim, "Check your SD card and try again", true);
-            Text(g_fS, 120, H - 40, kDim, "Press A to exit");
+            Text(g_fM, W / 2, H / 2 - 20, kRed, "Operation failed", true);
+            Text(g_fS, W / 2, H / 2 + 20, kDim, updErr[0] ? updErr : "Check your SD card and try again", true);
+            Text(g_fS, W / 2, H - 40, kDim, "Press A to go back", true);
+
+        } else if (screen == Screen::Checking) {
+            Text(g_fM, W / 2, H / 2 - 15, kFg, "Checking for updates...", true);
+            Text(g_fS, W / 2, H / 2 + 30, kDim, "Current version " SL_VERSION, true);
+
+        } else if (screen == Screen::UpToDate) {
+            Text(g_fM, W / 2, H / 2 - 20, kGreen, "You're up to date", true);
+            Text(g_fS, W / 2, H / 2 + 25, kDim, "Installed: v" SL_VERSION, true);
+            Text(g_fS, W / 2, H - 40, kDim, "Press A to go back", true);
+
+        } else if (screen == Screen::ConfirmUpdate) {
+            char sub[96];
+            snprintf(sub, sizeof(sub), "You have v%s - download and install %s?",
+                     SL_VERSION, latestTag.c_str());
+            DrawConfirmDialog("Update available", sub, dialogCursor, false);
+
+        } else if (screen == Screen::Downloading) {
+            Text(g_fM, W / 2, H / 2 - 15, kFg, "Preparing download...", true);
+
+        } else if (screen == Screen::Extracting) {
+            Text(g_fM, W / 2, H / 2 - 15, kFg, "Installing update...", true);
         }
 
         SDL_RenderPresent(g_ren);
@@ -488,30 +714,58 @@ int main() {
             CountTree("romfs:/payload");
             if (g_total == 0) g_total = 1;
             ok = CopyTree("romfs:/payload", "sdmc:", [&]() {
-                FillRect(0, 0, W, H, kBlack);
-                Text(g_fM, 120, H / 2 - 30, kFg, "Installing sLaunch...");
-                int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
-                FillRect(bx, by, bw, bh, kBg2);
-                float p = (float)g_done / (float)g_total;
-                FillRect(bx, by, (int)(bw * p), bh, kAccent);
-                char cnt[64];
-                snprintf(cnt, sizeof(cnt), "%d / %d files", g_done, g_total);
-                Text(g_fS, 120, H / 2 + 30, kDim, cnt);
-                SDL_RenderPresent(g_ren);
+                DrawProgress("Installing sLaunch...",
+                             (double)g_done / (double)g_total, nullptr);
             });
             installed = ok;
+            rebootAfter = ok;
+            buildMenu();
             screen = ok ? Screen::Done : Screen::Failed;
         }
 
         if (screen == Screen::Removing && g_total == 0) {
-            if (installed) {
-                CountTree("sdmc:/atmosphere/contents/0100000000001000");
-                if (g_total == 0) g_total = 1;
-                ok = DeleteTree("sdmc:/atmosphere/contents/0100000000001000");
-                ok = DeleteTree("sdmc:/slaunch/bin");
-                installed = !ok; 
-                screen = ok ? Screen::Done : Screen::Failed;
+            ok = RemoveEverything();          // qlaunch override + the whole slaunch/ tree
+            installed = IsInstalled();
+            rebootAfter = ok;                 // reboot returns to the stock HOME menu
+            buildMenu();
+            screen = ok ? Screen::Done : Screen::Failed;
+        }
+
+        // ---- online update ----
+        if (screen == Screen::Checking) {
+            std::string body;
+            if (!HttpGet("https://api.github.com/repos/etonedemid/slaunch/releases/latest", body)) {
+                updErr = "Could not reach GitHub (no internet?)";
+                screen = Screen::Failed;
+            } else {
+                latestTag = JsonStr(body, "tag_name");   // e.g. "v0.6.0"
+                zipUrl    = FindZipUrl(body);
+                if (latestTag.empty()) {
+                    updErr = "Could not read the latest version";
+                    screen = Screen::Failed;
+                } else if (CmpVer(latestTag.c_str(), SL_VERSION) > 0 && !zipUrl.empty()) {
+                    dialogCursor = 1;
+                    screen = Screen::ConfirmUpdate;   // newer release available
+                } else {
+                    screen = Screen::UpToDate;
+                }
             }
+        }
+
+        if (screen == Screen::Downloading) {
+            ok = HttpDownload(zipUrl.c_str(), "sdmc:/slaunch_update.zip");
+            if (!ok) { updErr = "Download failed"; screen = Screen::Failed; }
+            else       screen = Screen::Extracting;
+        }
+
+        if (screen == Screen::Extracting) {
+            ok = ExtractZip("sdmc:/slaunch_update.zip");
+            remove("sdmc:/slaunch_update.zip");
+            installed = IsInstalled();
+            rebootAfter = ok;
+            buildMenu();
+            if (!ok) updErr = "Could not extract the update";
+            screen = ok ? Screen::Done : Screen::Failed;
         }
     }
 
