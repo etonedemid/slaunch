@@ -3,6 +3,8 @@
 A fast, clean, **SDL2-based HOME Menu replacement** for the Nintendo Switch
 (Atmosphère CFW). Themes with wallpapers, custom fonts, lua widgets and 3 UI modes.`
 
+[Discord](https://discord.gg/dv28MgtaNn)
+
 <img width="1280" height="720" alt="2026070921590300-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/9c3aa4d1-c9ff-41ca-945d-d5ce29a8a62e" />
 <img width="1280" height="720" alt="2026070921570800-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/26b3a5eb-b4ce-4b73-889d-3b2b4f53a4bf" />
 <img width="1280" height="720" alt="2026070918061000-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/62ee0f5f-bca9-490e-a31c-4c54e586b867" />
