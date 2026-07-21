@@ -54,7 +54,7 @@ assets:
 	@mkdir -p SdOut/slaunch/icons
 	@cp -f assets/theming.png assets/controllers.png assets/album.png assets/user.png \
 	       assets/browser.png assets/mii.png assets/settings.png assets/power.png \
-	       assets/homebrewmenu.png SdOut/slaunch/icons/ 2>/dev/null || true
+	       assets/homebrewmenu.png assets/random.png SdOut/slaunch/icons/ 2>/dev/null || true
 	@# nx-hbloader exefs served via ECS for the Homebrew menu (loads hbmenu.nro).
 	@# Applet variant (application_type=2) runs homebrew as a library applet.
 	@cp -f assets/hbloader/main assets/hbloader/main.npdm SdOut/slaunch/bin/hbloader/ 2>/dev/null || true

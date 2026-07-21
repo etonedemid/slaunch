@@ -10,7 +10,7 @@
 
 namespace sl::menu::audio {
 
-    enum class Sfx { Welcome, PageLeft, PageRight, Count };
+    enum class Sfx { Welcome, PageLeft, PageRight, Opening, Count };
 
     class Sound {
     public:
