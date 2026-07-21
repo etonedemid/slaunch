@@ -76,12 +76,54 @@ namespace sl::menu::ui {
         LoadHbFavourites();
         LoadHbDonor();
         LoadSettings();
+        LoadSysEntries();
         LoadNames();
         // Widget loading (Lua parse + curl init) is deferred to InitDeferred so it
         // doesn't sit on the suspend->first-frame critical path.
 
-        m_screen = start_oobe ? Screen::Oobe : Screen::Main;
+        // Welcome screen: after setup, and once per console boot. The menu applet
+        // restarts every time you come back from a game, so we tag the boot we
+        // greeted. armGetSystemTick() counts from power-on, so (wall clock -
+        // uptime) is a stable id within a boot and differs across boots.
+        if (start_oobe) {
+            m_screen = Screen::Oobe;
+        } else if (m_welcome_enabled && m_suspended == 0 && BootWelcomePending()) {
+            EnterWelcome();
+            MarkBootWelcomed();
+        } else {
+            m_screen = Screen::Main;
+        }
         RebuildItems();
+    }
+
+    // ---- once-per-boot welcome bookkeeping ---------------------------------
+    namespace {
+        constexpr const char *kWelcomedPath = "sdmc:/slaunch/cache/welcomed.txt";
+        long long BootId() {   // approximate console boot time, in epoch seconds
+            const u64 up = armGetSystemTick() / armGetSystemTickFreq();
+            return (long long)time(nullptr) - (long long)up;
+        }
+    }
+
+    bool Menu::BootWelcomePending() const {
+        FILE *fp = fopen(kWelcomedPath, "r");
+        if (!fp) return true;                 // never greeted -> this boot counts
+        long long stored = 0;
+        const bool got = (fscanf(fp, "%lld", &stored) == 1);
+        fclose(fp);
+        if (!got) return true;
+        // Same boot if the recorded boot id is within a few seconds of ours.
+        const long long d = BootId() - stored;
+        return (d > 5 || d < -5);
+    }
+
+    void Menu::MarkBootWelcomed() const {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/cache", 0777);
+        FILE *fp = fopen(kWelcomedPath, "w");
+        if (!fp) return;
+        fprintf(fp, "%lld\n", BootId());
+        fclose(fp);
     }
 
     void Menu::InitDeferred() {
@@ -91,8 +133,17 @@ namespace sl::menu::ui {
         const bool audio = m_music.Init();  // opens the mixer + resumes music (off-thread)
         m_sfx.Init(audio);                  // UI sounds share the mixer
         // Welcome chime only on a fresh open (no game suspended behind us), so it
-        // isn't heard every single time you HOME out of a game.
-        if (audio && m_suspended == 0) m_sfx.Play(audio::Sfx::Welcome);
+        // isn't heard every single time you HOME out of a game. On the boot
+        // welcome screen the opening jingle takes its place (audio only comes up
+        // here, after the first frame, so it can't be played from Init).
+        if (audio && m_suspended == 0) {
+            if (m_screen == Screen::Welcome) {
+                m_sfx.Play(audio::Sfx::Opening);
+                m_welcome_start = armGetSystemTick();   // hold the screen for the jingle
+            } else {
+                m_sfx.Play(audio::Sfx::Welcome);
+            }
+        }
         // Resolve pinned homebrew names/icons on a worker thread (never blocks the
         // menu-start path); they show fallback names until it lands.
         StartResolvePins();
@@ -195,11 +246,13 @@ namespace sl::menu::ui {
         // Remaining (non-favourite) pinned homebrew, just under the favourites.
         for (auto &it : hb_pinned) m_items.push_back(std::move(it));
 
-        // System shortcuts.
+        // System shortcuts (hidden ones are skipped; Theming is never hideable).
         auto add = [&](ItemKind k, const char *name) {
+            if (IsSysHidden(k)) return;
             MenuItem it; it.kind = k; it.name = name; m_items.push_back(std::move(it));
         };
-        add(ItemKind::Theming,      T("Theming"));
+        add(ItemKind::Theming,      T("Theming"));          // always shown
+        add(ItemKind::RandomGame,   T("Random game"));
         add(ItemKind::Controllers,  T("Controllers"));
         add(ItemKind::Album,        T("Album"));
         add(ItemKind::UserPage,     T("User Page"));
@@ -428,6 +481,8 @@ namespace sl::menu::ui {
                 m_list_icons = (v != 0);
             else if (sscanf(line, "check_updates=%d", &v) == 1)
                 m_check_updates = (v != 0);
+            else if (sscanf(line, "welcome=%d", &v) == 1)
+                m_welcome_enabled = (v != 0);
         }
         fclose(fp);
     }
@@ -441,6 +496,7 @@ namespace sl::menu::ui {
         fprintf(fp, "ui_mode=%d\n", (int)m_ui_mode);
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
         fprintf(fp, "check_updates=%d\n", m_check_updates ? 1 : 0);
+        fprintf(fp, "welcome=%d\n", m_welcome_enabled ? 1 : 0);
         fclose(fp);
     }
 
@@ -731,6 +787,8 @@ namespace sl::menu::ui {
             case Screen::Music:         return OnButtonMusic(b);
             case Screen::Homebrew:      return OnButtonHomebrew(b);
             case Screen::About:         return OnButtonAbout(b);
+            case Screen::Welcome:       return OnButtonWelcome(b);
+            case Screen::SysEntries:    return OnButtonSysEntries(b);
         }
         return Action::None;
     }
@@ -742,24 +800,35 @@ namespace sl::menu::ui {
             if (b == Btn::Down) { m_theme_cursor = (m_theme_cursor + 1) % n; m_theme.Select(m_theme_cursor); }
             if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + n - 1) % n; m_theme.Select(m_theme_cursor); }
         }
-        if (m_oobe_step == 2) {   // layout
+        if (m_oobe_step == 2) {   // layout (vertical list, like the rest of the menu)
             const int n = (int)UiMode::Count;
-            if (b == Btn::Right) m_ui_mode = (UiMode)(((int)m_ui_mode + 1) % n);
-            if (b == Btn::Left)  m_ui_mode = (UiMode)(((int)m_ui_mode + n - 1) % n);
+            if (b == Btn::Right || b == Btn::Down) m_ui_mode = (UiMode)(((int)m_ui_mode + 1) % n);
+            if (b == Btn::Left  || b == Btn::Up)   m_ui_mode = (UiMode)(((int)m_ui_mode + n - 1) % n);
         }
         if (m_oobe_step == LastStep) {   // done - update-check opt-out
             if (b == Btn::Left || b == Btn::Right) m_check_updates = !m_check_updates;
         }
         if (b == Btn::A) {
+            // Re-seed the shared list scroll so the next step's carousel doesn't
+            // slide in from the previous step's position.
+            if (m_oobe_step == 0) m_sub_scroll = (float)m_theme_cursor;
+            if (m_oobe_step == 1) m_sub_scroll = (float)(int)m_ui_mode;
             if (m_oobe_step < LastStep) { m_oobe_step++; }
             else {
                 m_theme.Save();
                 SaveSettings();   // persist the chosen layout (ui_mode)
-                m_screen = Screen::Main;
+                // Hand off to the welcome screen (opening jingle + the user's name)
+                // instead of dropping straight into the menu.
+                if (m_welcome_enabled) { EnterWelcome(); m_sfx.Play(audio::Sfx::Opening); }
+                else                     m_screen = Screen::Main;
                 return Action::FinishSetup;
             }
         }
-        if (b == Btn::B && m_oobe_step > 0) m_oobe_step--;
+        if (b == Btn::B && m_oobe_step > 0) {
+            m_oobe_step--;
+            if (m_oobe_step == 1) m_sub_scroll = (float)m_theme_cursor;
+            if (m_oobe_step == 2) m_sub_scroll = (float)(int)m_ui_mode;
+        }
         return Action::None;
     }
 
@@ -830,6 +899,19 @@ namespace sl::menu::ui {
                     }
                     out_app_id = it.app_id;
                     return Action::LaunchApp;
+                case ItemKind::RandomGame: {
+                    const u64 pick = RollRandomGame();   // animates, then lands
+                    if (pick == 0) { SetStatus("No games to pick from"); return Action::None; }
+                    if (m_suspended != 0 && pick == m_suspended) return Action::ResumeApp;
+                    if (m_suspended != 0) {
+                        m_pending_launch = pick;
+                        m_dialog_cursor  = 1;
+                        m_dialog = Dialog::ConfirmCloseForLaunch;
+                        return Action::None;
+                    }
+                    out_app_id = pick;
+                    return Action::LaunchApp;
+                }
                 case ItemKind::Theming:
                     m_screen = Screen::Theming;
                     m_theming_cursor = 0;
@@ -977,7 +1059,8 @@ namespace sl::menu::ui {
 
     // ---- Theming submenu (appearance + widgets) ----------------------------
     namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_UiMode, TH_ListIcons,
-                       TH_Widgets, TH_Music, TH_Updates, TH_About, TH_Back, TH_Count }; }
+                       TH_Entries, TH_Widgets, TH_Music, TH_Welcome, TH_Updates,
+                       TH_About, TH_Back, TH_Count }; }
 
     // ---- online update check (opt-out) -------------------------------------
     namespace {
@@ -1033,11 +1116,192 @@ namespace sl::menu::ui {
         m_upd_running = false;
     }
 
+    // ---- Welcome (after setup / once per boot) -----------------------------
+    namespace {
+        constexpr u64 kWelcomeMs = 4600;   // ~the opening jingle's length
+
+        const char *kWelcomeMsgs[] = {
+            "Remember to update your software",
+            "Your games are waiting",
+            "Thanks for using this",
+            "Have fun",
+        };
+        constexpr int kWelcomeMsgN = (int)(sizeof(kWelcomeMsgs) / sizeof(kWelcomeMsgs[0]));
+    }
+
+    void Menu::EnterWelcome() {
+        m_screen        = Screen::Welcome;
+        m_welcome_start = armGetSystemTick();
+        m_welcome_msg   = (int)(randomGet64() % kWelcomeMsgN);
+    }
+
+    // ---- system entry visibility -------------------------------------------
+    // The entries the user can hide. Theming is deliberately absent: it has to
+    // stay on the menu or these toggles become unreachable.
+    namespace {
+        struct SysEntry { ItemKind kind; const char *name; };
+        const SysEntry kSysEntries[] = {
+            { ItemKind::RandomGame,   "Random game"   },
+            { ItemKind::Controllers,  "Controllers"   },
+            { ItemKind::Album,        "Album"         },
+            { ItemKind::UserPage,     "User Page"     },
+            { ItemKind::WebBrowser,   "Web Browser"   },
+            { ItemKind::MiiEdit,      "Mii Edit"      },
+            { ItemKind::Settings,     "Settings"      },
+            { ItemKind::Power,        "Power"         },
+            { ItemKind::HomebrewMenu, "Homebrew menu" },
+        };
+        constexpr int kSysEntryN = (int)(sizeof(kSysEntries) / sizeof(kSysEntries[0]));
+    }
+
+    bool Menu::IsSysHidden(ItemKind k) const {
+        if (k == ItemKind::Theming) return false;      // never hideable
+        return (m_sys_hidden & (1u << (u32)k)) != 0;
+    }
+
+    void Menu::ToggleSysHidden(ItemKind k) {
+        if (k == ItemKind::Theming) return;
+        m_sys_hidden ^= (1u << (u32)k);
+        SaveSysEntries();
+        RebuildItems();
+    }
+
+    void Menu::LoadSysEntries() {
+        m_sys_hidden = 0;
+        FILE *fp = fopen("sdmc:/slaunch/config/sysentries.txt", "r");
+        if (!fp) return;
+        unsigned v = 0;
+        if (fscanf(fp, "%u", &v) == 1) m_sys_hidden = (u32)v;
+        fclose(fp);
+    }
+
+    void Menu::SaveSysEntries() {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/config", 0777);
+        FILE *fp = fopen("sdmc:/slaunch/config/sysentries.txt", "w");
+        if (!fp) return;
+        fprintf(fp, "%u\n", (unsigned)m_sys_hidden);
+        fclose(fp);
+    }
+
+    Menu::Action Menu::OnButtonSysEntries(Btn b) {
+        if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = 0; return Action::None; }
+        if (b == Btn::Down) m_sys_cursor = (m_sys_cursor + 1) % kSysEntryN;
+        if (b == Btn::Up)   m_sys_cursor = (m_sys_cursor + kSysEntryN - 1) % kSysEntryN;
+        if (b == Btn::A || b == Btn::Left || b == Btn::Right)
+            ToggleSysHidden(kSysEntries[m_sys_cursor].kind);
+        return Action::None;
+    }
+
+    void Menu::DrawSysEntries() {
+        DrawTopBar(T("Menu entries"));
+        std::vector<std::string> labels, values;
+        for (int i = 0; i < kSysEntryN; i++) {
+            labels.push_back(T(kSysEntries[i].name));
+            values.push_back(IsSysHidden(kSysEntries[i].kind) ? T("Hidden") : T("Shown"));
+        }
+        DrawCarousel(labels, values, m_sys_cursor, m_sub_scroll);
+        DrawHint("Up/Down: Select   B: Back");
+    }
+
+    // ---- Random game roll ---------------------------------------------------
+    void Menu::DrawRollFrame(const std::vector<const MenuItem *> &pool, int idx, bool settled) {
+        const Theme &t = m_theme.Current();
+        const int cx = gfx::Gfx::Width / 2;
+        DrawBackground();
+
+        m_gfx->TextCentered(FontSize::Small, cx, 120, t.dim,
+                            settled ? T("Let's play") : T("Picking something..."));
+
+        // Icon card.
+        const int size = 220, ix = cx - size / 2, iy = 190;
+        m_icons.SetScale(gfx::IconCache::GridScale);
+        SDL_Texture *tex = pool[idx]->app_id ? m_icons.Get(pool[idx]->app_id) : nullptr;
+        if (tex) m_gfx->DrawImage(tex, ix, iy, size, size, 255);
+        else     m_gfx->FillRect(ix, iy, size, size, WithAlpha(t.bg_top, 220));
+
+        const SDL_Color edge = settled ? t.accent : WithAlpha(t.accent, 130);
+        m_gfx->FillRect(ix - 4, iy - 4, size + 8, 4, edge);
+        m_gfx->FillRect(ix - 4, iy + size, size + 8, 4, edge);
+        m_gfx->FillRect(ix - 4, iy, 4, size, edge);
+        m_gfx->FillRect(ix + size, iy, 4, size, edge);
+
+        m_gfx->TextCentered(FontSize::Normal, cx, iy + size + 34,
+                            settled ? t.accent : t.fg, pool[idx]->name.c_str());
+        m_gfx->Present();
+    }
+
+    // Rolls through the library with a decelerating tick and returns whatever it
+    // lands on (the landing slot is what makes it random). 0 if there are no games.
+    u64 Menu::RollRandomGame() {
+        std::vector<const MenuItem *> pool;
+        for (const auto &i : m_items)
+            if (i.kind == ItemKind::Game) pool.push_back(&i);
+        if (pool.empty()) return 0;
+        const int n = (int)pool.size();
+
+        const u64 freq  = armGetSystemTickFreq();
+        const u64 t0    = armGetSystemTick();
+        constexpr u64 kRollMs = 2000;
+        int  idx      = (int)(randomGet64() % n);
+        u64  nextStep = 0;
+
+        for (;;) {
+            const u64 ms = (armGetSystemTick() - t0) * 1000 / freq;
+            if (ms >= kRollMs) break;
+            if (ms >= nextStep) {
+                idx = (idx + 1) % n;
+                const float p = (float)ms / (float)kRollMs;      // 0..1
+                nextStep = ms + (u64)(40.0f + p * p * 300.0f);   // ease out
+            }
+            DrawRollFrame(pool, idx, false);
+        }
+
+        // Hold on the result so it reads before the game launches.
+        const u64 t1 = armGetSystemTick();
+        while ((armGetSystemTick() - t1) * 1000 / freq < 800)
+            DrawRollFrame(pool, idx, true);
+
+        return pool[idx]->app_id;
+    }
+
+    Menu::Action Menu::OnButtonWelcome(Btn b) {
+        if (b == Btn::A || b == Btn::B || b == Btn::Plus) m_screen = Screen::Main;   // skip
+        return Action::None;
+    }
+
+    void Menu::DrawWelcome() {
+        const Theme &t = m_theme.Current();
+        const int cx = gfx::Gfx::Width / 2;
+
+        // Ease in over the first ~600ms so it doesn't pop.
+        const u64 freq = armGetSystemTickFreq();
+        const u64 ms   = (armGetSystemTick() - m_welcome_start) * 1000 / freq;
+        float in = ms < 600 ? (float)ms / 600.0f : 1.0f;
+        if (in < 0.0f) in = 0.0f;
+        const Uint8 a = (Uint8)(in * 255.0f);
+
+        m_gfx->TextCentered(FontSize::Normal, cx, 250, WithAlpha(t.dim, a), T("Welcome home "));
+
+        if (m_nickname[0])
+            m_gfx->TextCentered(FontSize::Title, cx, 300, WithAlpha(t.title, a), m_nickname);
+
+        const int lw = (int)(240 * in);
+        m_gfx->FillRect(cx - lw / 2, 400, lw, 3, WithAlpha(t.accent, a));
+        m_gfx->TextCentered(FontSize::Small, cx, 436, WithAlpha(t.dim, a),
+                            T(kWelcomeMsgs[m_welcome_msg % kWelcomeMsgN]));
+    }
+
     // ---- About + changelog -------------------------------------------------
     namespace {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         const LogLine kChangelog[] = {
+            { true,  "v0.7.0" },
+            { false, "Welcome screen that greets you by name on boot and after setup" },
+            { false, "Show or hide any system entry (Theming > Menu entries)" },
+            { false, "Random game entry - rolls through your library and picks one" },
+            { false, "Setup restyled to match the rest of the menu" },
             { true,  "v0.6.0" },
             { false, "About screen with this changelog" },
             { false, "Optional update check on startup (opt-out in setup / Theming)" },
@@ -1146,6 +1410,9 @@ namespace sl::menu::ui {
         auto toggleUpdates = [&]() { m_check_updates = !m_check_updates; SaveSettings(); };
         if (m_theming_cursor == TH_Updates && (b == Btn::Left || b == Btn::Right))
             toggleUpdates();
+        auto toggleWelcome = [&]() { m_welcome_enabled = !m_welcome_enabled; SaveSettings(); };
+        if (m_theming_cursor == TH_Welcome && (b == Btn::Left || b == Btn::Right))
+            toggleWelcome();
         if (b == Btn::A) {
             switch (m_theming_cursor) {
                 case TH_Themes:  m_screen = Screen::Themes; m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
@@ -1153,8 +1420,10 @@ namespace sl::menu::ui {
                 case TH_TextPos: cycleAlign(+1); break;
                 case TH_UiMode:  cycleUiMode(+1); break;
                 case TH_ListIcons: toggleListIcons(); break;
+                case TH_Entries: m_screen = Screen::SysEntries; m_sys_cursor = 0; m_sub_scroll = 0; break;
                 case TH_Widgets: openWidgets(); break;
                 case TH_Music:   m_screen = Screen::Music; m_music_cursor = 0; m_sub_scroll = 0; break;
+                case TH_Welcome: toggleWelcome(); break;
                 case TH_Updates: toggleUpdates(); break;
                 case TH_About:   m_screen = Screen::About; m_about_scroll = 0; break;
                 case TH_Back:    m_screen = Screen::Main; break;
@@ -1628,6 +1897,12 @@ namespace sl::menu::ui {
 
         m_music.Update();   // advance playback position / roll to the next track
 
+        // Welcome screen bows out on its own once the jingle has played.
+        if (m_screen == Screen::Welcome) {
+            const u64 ms = (armGetSystemTick() - m_welcome_start) * 1000 / armGetSystemTickFreq();
+            if (ms >= kWelcomeMs) m_screen = Screen::Main;
+        }
+
         // The Fonts and Color-picker screens always render their chrome in the
         // default system font so they can never make themselves unreadable.
         m_gfx->UseDefaultFont(m_screen == Screen::Fonts || m_screen == Screen::ColorPicker ||
@@ -1648,6 +1923,8 @@ namespace sl::menu::ui {
             case Screen::Music:       DrawMusic(); break;
             case Screen::Homebrew:    DrawHomebrew(); break;
             case Screen::About:       DrawAbout(); break;
+            case Screen::Welcome:     DrawWelcome(); break;
+            case Screen::SysEntries:  DrawSysEntries(); break;
         }
         if (m_options_open) DrawOptions();
         if (m_dialog != Dialog::None) DrawDialog();
@@ -1687,46 +1964,40 @@ namespace sl::menu::ui {
                 DrawHint("A: Get started");
                 break;
 
-            case 1: { // Theme
-                m_gfx->TextCentered(FontSize::Large, cx, 108, t.title, T("Pick a theme"));
-                m_gfx->TextCentered(FontSize::Small, cx, 158, t.dim,
-                                    T("The whole menu updates as you choose."));
-                const int n = m_theme.Count();
-                const int top = 250;
-                for (int i = 0; i < n; i++) {
-                    const bool sel = (i == m_theme_cursor);
-                    const int y = top + i * 52;
-                    if (y > 560) break;
-                    if (sel) m_gfx->FillRect(cx - 220, y - 6, 440, 46, WithAlpha(t.accent, 45));
-                    m_gfx->TextCentered(FontSize::Normal, cx, y, sel ? t.accent : t.fg,
-                                        m_theme.At(i).name);
+            case 1: { // Theme - the menu's own list, applied live
+                DrawTopBar(T("Setup"));
+                m_gfx->TextCentered(FontSize::Small, cx, 96, t.dim, T("Pick a theme"));
+                std::vector<std::string> labels, values;
+                for (int i = 0; i < m_theme.Count(); i++) {
+                    labels.push_back(m_theme.At(i).name);
+                    values.push_back(i == m_theme_cursor ? T("Applied") : std::string());
                 }
+                DrawCarousel(labels, values, m_theme_cursor, m_sub_scroll);
                 DrawHint("Up/Down: Choose    A: Next    B: Back");
                 break;
             }
 
-            case 2: { // Layout
-                m_gfx->TextCentered(FontSize::Large, cx, 108, t.title, T("Choose a layout"));
-                m_gfx->TextCentered(FontSize::Small, cx, 158, t.dim,
-                                    T("You can change this later in Theming."));
+            case 2: { // Layout - same list, description under it
+                DrawTopBar(T("Setup"));
+                m_gfx->TextCentered(FontSize::Small, cx, 96, t.dim, T("Choose a layout"));
                 const char *names[5] = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
                 const char *desc[5]  = { T("A simple scrolling text list"),
                                          T("A cover carousel (EmulationStation)"),
                                          T("A grid of app icons"),
                                          T("One fullscreen cover at a time"),
                                          T("An Xbox-360-style cover shelf") };
-                const int m = (int)m_ui_mode;
-                m_gfx->Text(FontSize::Title, cx - 250, 300, WithAlpha(t.dim, 150), "<");
-                const int rw = m_gfx->TextWidth(FontSize::Title, ">");
-                m_gfx->Text(FontSize::Title, cx + 250 - rw, 300, WithAlpha(t.dim, 150), ">");
-                m_gfx->TextCentered(FontSize::Title, cx, 300, t.accent, names[m]);
-                m_gfx->TextCentered(FontSize::Normal, cx, 388, t.fg, desc[m]);
-                DrawHint("Left/Right: Choose    A: Next    B: Back");
+                std::vector<std::string> labels, values;
+                for (int i = 0; i < 5; i++) { labels.push_back(names[i]); values.emplace_back(); }
+                int cur = (int)m_ui_mode;
+                DrawCarousel(labels, values, cur, m_sub_scroll);
+                m_gfx->TextCentered(FontSize::Small, cx, 556, t.dim, desc[cur]);
+                DrawHint("Up/Down: Choose    A: Next    B: Back");
                 break;
             }
 
             case 3: { // Good to know
-                m_gfx->TextCentered(FontSize::Large, cx, 100, t.title, T("Good to know"));
+                DrawTopBar(T("Setup"));
+                m_gfx->TextCentered(FontSize::Small, cx, 96, t.dim, T("Good to know"));
                 struct Tip { const char *key; const char *val; };
                 const Tip tips[] = {
                     { "X",        T("Options on any entry: favourite, rename, move") },
@@ -1734,31 +2005,33 @@ namespace sl::menu::ui {
                     { "Homebrew", T("Browse .nro files and pin them to this menu") },
                     { "HOME",     T("Suspends your game and brings this back") },
                 };
-                const int lx = cx - 340, top = 190;
+                const int lx = cx - 330, top = 200;
                 for (int i = 0; i < 4; i++) {
                     const int y = top + i * 74;
-                    const int kw = m_gfx->TextWidth(FontSize::Small, tips[i].key) + 24;
-                    m_gfx->FillRect(lx, y - 4, kw, 40, WithAlpha(t.accent, 40));
-                    m_gfx->Text(FontSize::Small, lx + 12, y + 4, t.accent, tips[i].key);
-                    m_gfx->Text(FontSize::Normal, lx + 130, y, t.fg, tips[i].val);
+                    const int kw = m_gfx->TextWidth(FontSize::Small, tips[i].key) + 26;
+                    m_gfx->FillRect(lx, y - 4, 4, 40, t.accent);            // accent rule
+                    m_gfx->FillRect(lx + 12, y - 4, kw, 40, WithAlpha(t.accent, 38));
+                    m_gfx->Text(FontSize::Small, lx + 25, y + 4, t.accent, tips[i].key);
+                    m_gfx->Text(FontSize::Normal, lx + 150, y, t.fg, tips[i].val);
                 }
                 DrawHint("A: Next    B: Back");
                 break;
             }
 
             default: { // Done
-                m_gfx->TextCentered(FontSize::Title, cx, 210, t.title, T("You're all set"));
-                m_gfx->FillRect(cx - 100, 288, 200, 3, t.accent);
-                m_gfx->TextCentered(FontSize::Normal, cx, 336, t.fg, T("Enjoy sLaunch."));
-                // Update-check opt-out.
-                m_gfx->TextCentered(FontSize::Small, cx, 420, t.dim,
-                                    T("Check GitHub for updates on startup"));
-                m_gfx->Text(FontSize::Normal, cx - 250, 448, WithAlpha(t.dim, 150), "<");
-                const int rw = m_gfx->TextWidth(FontSize::Normal, ">");
-                m_gfx->Text(FontSize::Normal, cx + 250 - rw, 448, WithAlpha(t.dim, 150), ">");
-                m_gfx->TextCentered(FontSize::Normal, cx, 448, t.accent,
-                                    m_check_updates ? T("On") : T("Off"));
-                DrawHint("Left/Right: Change    A: Finish");
+                DrawTopBar(T("Setup"));
+                m_gfx->TextCentered(FontSize::Large, cx, 190, t.title, T("You're all set"));
+                m_gfx->FillRect(cx - 100, 250, 200, 3, t.accent);
+                m_gfx->TextCentered(FontSize::Normal, cx, 292, t.fg, T("Enjoy sLaunch."));
+                // Update-check opt-out, styled like a menu row.
+                const int rx = cx - 300, ry = 400;
+                m_gfx->FillRect(rx, ry - 10, 600, 56, WithAlpha(t.accent, 34));
+                m_gfx->Text(FontSize::Normal, rx + 24, ry, t.fg,
+                            T("Check for updates on startup"));
+                const char *val = m_check_updates ? T("On") : T("Off");
+                const int vw = m_gfx->TextWidth(FontSize::Normal, val);
+                m_gfx->Text(FontSize::Normal, rx + 600 - 24 - vw, ry, t.accent, val);
+                DrawHint("Left/Right: Change    A: Finish    B: Back");
                 break;
             }
         }
@@ -1930,6 +2203,7 @@ namespace sl::menu::ui {
         const char *file = nullptr;
         switch (kind) {
             case ItemKind::Theming:      file = "theming";      break;
+            case ItemKind::RandomGame:   file = "random";       break;
             case ItemKind::Controllers:  file = "controllers";  break;
             case ItemKind::Album:        file = "album";        break;
             case ItemKind::UserPage:     file = "user";         break;
@@ -2339,13 +2613,15 @@ namespace sl::menu::ui {
         const char *modes[5]  = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
         std::vector<std::string> labels = {
             T("Themes"), T("Fonts"), T("Text position"), T("UI mode"), T("List icons"),
-            T("Widgets"), T("Music"), T("Check for updates"), T("About"), T("Back")
+            T("Menu entries"), T("Widgets"), T("Music"), T("Welcome screen"),
+            T("Check for updates"), T("About"), T("Back")
         };
         std::vector<std::string> values(labels.size());
         values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_UiMode]      = modes[(int)m_ui_mode];
         values[TH_ListIcons]   = m_list_icons ? T("On") : T("Off");
         values[TH_Music]       = m_music.Enabled() ? T("On") : T("Off");
+        values[TH_Welcome]     = m_welcome_enabled ? T("On") : T("Off");
         values[TH_Updates]     = m_check_updates ? T("On") : T("Off");
         values[TH_About]       = m_upd_available ? T("Update available") : std::string("v") + SL_VERSION;
         {

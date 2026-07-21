@@ -25,6 +25,7 @@ namespace sl::menu::ui {
     enum class ItemKind {
         Game, Theming, Themes, Fonts, Controllers, Album, UserPage,
         WebBrowser, MiiEdit, HomebrewMenu, Homebrew, Settings, Power,
+        RandomGame,
     };
 
     // Horizontal alignment of the main list text.
@@ -116,8 +117,9 @@ namespace sl::menu::ui {
         bool WantsExit() const { return m_want_exit; }
 
     private:
-        enum class Screen { Oobe, Main, Theming, Themes, ThemeEditor, ColorPicker,
-                            Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew, About };
+        enum class Screen { Oobe, Welcome, Main, Theming, Themes, ThemeEditor, ColorPicker,
+                            Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew, About,
+                            SysEntries };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame };
 
         void RebuildItems();
@@ -128,6 +130,35 @@ namespace sl::menu::ui {
         Action OnButtonTheming(Btn b);
         Action OnButtonAbout(Btn b);
         void   DrawAbout();
+
+        // Post-setup welcome screen: greets the user by name over the opening
+        // jingle, then hands off to the main menu (A skips).
+        Action OnButtonWelcome(Btn b);
+        void   DrawWelcome();
+        void   EnterWelcome();        // pick a greeting, start the timer
+        u64    m_welcome_start = 0;   // tick the welcome screen was entered
+        int    m_welcome_msg   = 0;   // index into the greeting pool (picked on entry)
+        bool   m_welcome_enabled = true;   // setting (persisted)
+
+        // Which system entries are hidden from the main menu (bit per ItemKind).
+        // Theming is never hideable, so the toggles stay reachable.
+        u32  m_sys_hidden = 0;
+        bool IsSysHidden(ItemKind k) const;
+        void ToggleSysHidden(ItemKind k);
+        void LoadSysEntries();
+        void SaveSysEntries();
+        Action OnButtonSysEntries(Btn b);
+        void   DrawSysEntries();
+        int  m_sys_cursor = 0;
+
+        // "Random game": rolls through the library, lands on one, launches it.
+        // Blocking (a few seconds) so it can return the launch action directly.
+        u64  RollRandomGame();
+        void DrawRollFrame(const std::vector<const MenuItem *> &pool, int idx, bool settled);
+        // Shown once per console boot: these tag which boot we already greeted,
+        // so returning from a game doesn't replay it.
+        bool   BootWelcomePending() const;
+        void   MarkBootWelcomed() const;
 
         // Optional online update check (opt-out in OOBE + Theming > About). Runs a
         // worker on menu start when enabled; sets m_upd_available if GitHub's latest

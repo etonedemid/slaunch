@@ -8,6 +8,7 @@ namespace sl::menu::audio {
             "sdmc:/slaunch/sounds/welcome.wav",
             "sdmc:/slaunch/sounds/page_left.wav",
             "sdmc:/slaunch/sounds/page_right.wav",
+            "sdmc:/slaunch/sounds/opening.wav",   // post-setup welcome screen
         };
     }
 
