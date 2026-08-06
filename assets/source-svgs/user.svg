@@ -7,7 +7,7 @@
    viewBox="0 0 67.733334 67.733334"
    version="1.1"
    id="svg1"
-   sodipodi:docname="user-src.svg"
+   sodipodi:docname="user.svg"
    xml:space="preserve"
    inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
@@ -24,8 +24,8 @@
      inkscape:deskcolor="#d1d1d1"
      inkscape:document-units="mm"
      inkscape:zoom="1.0307169"
-     inkscape:cx="14.067879"
-     inkscape:cy="110.11753"
+     inkscape:cx="14.067878"
+     inkscape:cy="109.14733"
      inkscape:window-width="2560"
      inkscape:window-height="1366"
      inkscape:window-x="0"
@@ -47,11 +47,5 @@
        id="g934"
        style="display:inline;fill:#ffffff"
        transform="matrix(0.26458333,0,0,0.26458333,-2.4138825,-3.6222436)"><path
-         id="path933"
-         style="fill:#ffffff"
-         d="m 137.25,155.625 a 73.625,73.625 0 0 0 -64.570311,38.25 H 201.82031 A 73.625,73.625 0 0 0 137.25,155.625 Z" /><circle
-         style="fill:#ffffff"
          id="path934"
-         cx="137.25"
-         cy="116.75"
-         r="26.75" /></g></g></svg>
+         d="M 164,116.75 A 26.75,26.75 0 0 1 137.25,143.5 26.75,26.75 0 0 1 110.5,116.75 26.75,26.75 0 0 1 137.25,90 26.75,26.75 0 0 1 164,116.75 Z m -26.75,38.875 a 73.625,73.625 0 0 0 -64.570311,38.25 H 201.82031 A 73.625,73.625 0 0 0 137.25,155.625 Z" /></g></g></svg>
