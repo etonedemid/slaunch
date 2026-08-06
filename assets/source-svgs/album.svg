@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="256"
+   height="256"
+   viewBox="0 0 67.733334 67.733334"
+   version="1.1"
+   id="svg1"
+   sodipodi:docname="album-src.svg"
+   xml:space="preserve"
+   inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     inkscape:zoom="2.9153076"
+     inkscape:cx="77.693345"
+     inkscape:cy="144.58166"
+     inkscape:window-width="2560"
+     inkscape:window-height="1366"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" /><defs
+     id="defs1" /><rect
+     style="fill:#000000;stroke-width:0.264583"
+     id="rect1"
+     width="131.94295"
+     height="131.94295"
+     x="170.44771"
+     y="-56.730331"
+     transform="matrix(0.39477217,0,0,0.39477217,-59.431534,30.283907)"
+     ry="24.598881" /><path
+     d="M 495.1,38.4 H 85.5 C 76.1,38.4 68.4,46 68.4,55.5 V 72.6 H 51.3 c -9.4,0 -17.1,7.6 -17.1,17.1 v 17.1 H 17.1 C 7.7,106.8 0,114.4 0,123.9 v 332.8 c 0,9.4 7.6,17.1 17.1,17.1 h 409.6 c 9.4,0 17.1,-7.6 17.1,-17.1 v -17.1 h 17.1 c 9.4,0 17.1,-7.6 17.1,-17.1 v -17.1 h 17.1 c 9.4,0 17.1,-7.6 17.1,-17.1 V 55.5 c 0,-9.5 -7.6,-17.1 -17.1,-17.1 z m -68.3,276 -44.7,-51.2 c -3.4,-3.9 -9.4,-3.9 -12.9,0 L 315.2,325 168,194.2 c -3.2,-2.9 -8.1,-2.9 -11.3,0 L 17.3,318.1 V 132.3 c 0,-4.7 3.8,-8.5 8.5,-8.5 h 392.5 c 4.7,0 8.5,3.8 8.5,8.5 z m 25.7,108 H 444 V 123.7 c 0,-9.4 -7.6,-17.1 -17.1,-17.1 H 51.4 v -8.5 c 0,-4.7 3.8,-8.5 8.5,-8.5 h 392.5 c 4.7,0 8.5,3.8 8.5,8.5 l 0.1,315.8 c 0,4.7 -3.8,8.5 -8.5,8.5 z m 34.1,-34.2 h -8.5 V 89.6 c 0,-9.4 -7.6,-17.1 -17.1,-17.1 H 85.5 V 64 c 0,-4.7 3.8,-8.5 8.5,-8.5 h 392.5 c 4.7,0 8.5,3.8 8.5,8.5 v 315.7 h 0.1 c 0,4.7 -3.8,8.5 -8.5,8.5 z"
+     id="path1"
+     style="fill:#ffffff"
+     transform="matrix(0.08158423,0,0,0.08158423,13.006458,13.038331)" /><path
+     d="m 307.4,174.9 c -18.8,0 -34.1,15.3 -34.1,34.1 0,18.8 15.3,34.1 34.1,34.1 18.8,0 34.1,-15.3 34.1,-34.1 0,-18.8 -15.3,-34.1 -34.1,-34.1 z"
+     id="path2"
+     style="fill:#ffffff"
+     transform="matrix(0.08158423,0,0,0.08158423,13.006458,13.038331)" /><g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1" /></svg>

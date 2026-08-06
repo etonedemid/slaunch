@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="256"
+   height="256"
+   viewBox="0 0 67.733334 67.733334"
+   version="1.1"
+   id="svg1"
+   sodipodi:docname="power.svg"
+   xml:space="preserve"
+   inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     inkscape:zoom="4.1228676"
+     inkscape:cx="103.93252"
+     inkscape:cy="118.00039"
+     inkscape:window-width="2560"
+     inkscape:window-height="1366"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg1" /><defs
+     id="defs1" /><rect
+     style="fill:#000000;stroke-width:0.264583"
+     id="rect1"
+     width="131.94295"
+     height="131.94295"
+     x="170.44771"
+     y="-56.730331"
+     transform="matrix(0.39477217,0,0,0.39477217,-59.431534,30.283907)"
+     ry="24.598881" /><g
+     style="fill:#ffffff"
+     id="g18"
+     transform="matrix(1.7807678,0,0,1.7807678,12.530966,13.453223)"><path
+       fill-rule="evenodd"
+       clip-rule="evenodd"
+       d="M 13,3 C 13,2.44772 12.5523,2 12,2 11.4477,2 11,2.44772 11,3 v 9 c 0,0.5523 0.4477,1 1,1 0.5523,0 1,-0.4477 1,-1 z M 8.6092,5.8744 C 9.09211,5.60643 9.26636,4.99771 8.99839,4.5148 8.73042,4.03188 8.12171,3.85763 7.63879,4.1256 4.87453,5.65948 3,8.61014 3,12 c 0,4.9706 4.02944,9 9,9 4.9706,0 9,-4.0294 9,-9 C 21,8.66747 19.1882,5.75928 16.5007,4.20465 16.0227,3.92811 15.4109,4.09147 15.1344,4.56953 14.8579,5.04759 15.0212,5.65932 15.4993,5.93586 17.5942,7.14771 19,9.41027 19,12 19,15.866 15.866,19 12,19 8.13401,19 5,15.866 5,12 5,9.3658 6.45462,7.06997 8.6092,5.8744 Z"
+       fill="#000000"
+       id="path1"
+       style="fill:#ffffff" /></g></svg>
