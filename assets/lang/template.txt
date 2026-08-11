@@ -10,9 +10,20 @@
 #      LEFT side (the English key) exactly as it is.
 # Lines starting with '#' and blank lines are ignored. The console's system
 # language selects which file is loaded.
+#
+# This file is generated from the menu sources; every string the menu can show
+# is listed. Keep the spacing inside button hints ("A: Select    X: Options"),
+# it is what lines them up on screen.
+#
+# Non-Latin scripts need a font that has those glyphs. The console's own font
+# covers Japanese, Chinese and Korean and the menu picks it up automatically
+# from the system language; for anything else, drop a TTF/OTF in
+# sdmc:/slaunch/fonts and choose it under Theming > Fonts.
+
 
 # --- main menu shortcuts ---
 Theming=Theming
+Random game=Random game
 Controllers=Controllers
 Album=Album
 User Page=User Page
@@ -21,109 +32,217 @@ Mii Edit=Mii Edit
 Settings=Settings
 Power=Power
 Homebrew menu=Homebrew menu
-No apps found=No apps found
+User=User
+Network=Network
+Games=Games
+Homebrew=Homebrew
 
-# --- theming submenu ---
-Themes=Themes
-Fonts=Fonts
-Text position=Text position
-UI mode=UI mode
-Widgets=Widgets
+# --- entry options (X) ---
+Renamed=Renamed
+Remove from Favourites=Remove from Favourites
+Add to Favourites=Add to Favourites
+Rename=Rename
+Homebrew donor (set)=Homebrew donor (set)
+Use as homebrew donor=Use as homebrew donor
+Remove from menu=Remove from menu
+Move=Move
+Close game=Close game
+Sort: =Sort: 
+Cancel=Cancel
+Move: D-pad to reorder, A to place=Move: D-pad to reorder, A to place
+Rename theme=Rename theme
+
+# --- sort modes ---
+Title A - Z=Title A - Z
+Title Z - A=Title Z - A
+Game card first=Game card first
+Recently played=Recently played
+Most played=Most played
+Default=Default
+Default payload=Default payload
+
+# --- play time ---
+Today=Today
+Yesterday=Yesterday
+days ago=days ago
+months ago=months ago
+years ago=years ago
+
+# --- entry state ---
+Loading games...=Loading games...
+No apps found=No apps found
+Game card=Game card
+Nintendo Switch=Nintendo Switch
+Running=Running
+Update available=Update available
+
+# --- theming + appearance ---
+Menu entries=Menu entries
+found=found
 Back=Back
-Left=Left
-Center=Center
-Right=Right
+About=About
+Applied=Applied
 List=List
 Line=Line
 Grid=Grid
 Cover=Cover
-found=found
-
-# --- widgets submenu ---
-No widgets found=No widgets found
-Drop .lua widgets in sdmc:/slaunch/widgets/=Drop .lua widgets in sdmc:/slaunch/widgets/
-options=options
-no options=no options
-This widget has no options=This widget has no options
+Shelf=Shelf
+XMB=XMB
 On=On
 Off=Off
-(not set)=(not set)
-
-# --- themes + editor ---
+Left=Left
+Center=Center
+Right=Right
+Themes=Themes
+UI mode=UI mode
+Text position=Text position
+List icons=List icons
+Icon pack=Icon pack
+Fonts=Fonts
+Music=Music
+Widgets=Widgets
+Welcome screen=Welcome screen
+Check for updates=Check for updates
+Built-in=Built-in
 current=current
+
+# --- power menu ---
+Restart the console?=Restart the console?
+Sleep=Sleep
+Restart=Restart
+Power off=Power off
+Reboot to payload=Reboot to payload
+
+# --- setup ---
+Welcome home=Welcome home
+Good to see you=Good to see you
+Ready when you are=Ready when you are
+Setup complete. Welcome!=Setup complete. Welcome!
+A clean HOME Menu replacement=A clean HOME Menu replacement
+Let's set it up - just a few seconds.=Let's set it up - just a few seconds.
+Setup=Setup
+Pick a theme=Pick a theme
+
+# --- dialogs ---
+SD card removed=SD card removed
+Please only remove the SD card while the console is off.=Please only remove the SD card while the console is off.
+Taking it out while powered on can corrupt your data.=Taking it out while powered on can corrupt your data.
+Restarting...=Restarting...
+No games to pick from=No games to pick from
+No payloads found in sdmc:/payloads=No payloads found in sdmc:/payloads
+No music found=No music found
+No .nro found in sdmc:/switch=No .nro found in sdmc:/switch
+No widgets found=No widgets found
+Close running application?=Close running application?
+Yes=Yes
+No=No
+
+# --- button hints and everything else ---
+Saved=Saved
+Theme renamed=Theme renamed
+Order saved=Order saved
+Removed from menu=Removed from menu
+Hidden=Hidden
+Shown=Shown
+Up/Down: Select   B: Back=Up/Down: Select   B: Back
+The suspended game will be closed.=The suspended game will be closed.
+Turn the console off?=Turn the console off?
+Up/Down: Select   A: Confirm   B: Back=Up/Down: Select   A: Confirm   B: Back
+Reboot to=Reboot to
+B: Back=B: Back
+Up/Down: Select   A: Reboot into it   B: Back=Up/Down: Select   A: Reboot into it   B: Back
+Let's play=Let's play
+Picking something...=Picking something...
+Version=Version
+update available:=update available:
+up to date=up to date
+update check off=update check off
+What's new=What's new
+Up/Down: Scroll   B: Back=Up/Down: Scroll   B: Back
+Theme applied=Theme applied
+Theme saved=Theme saved
+Theme deleted=Theme deleted
+Font applied=Font applied
+A: Get started=A: Get started
+Up/Down: Choose    A: Next    B: Back=Up/Down: Choose    A: Next    B: Back
+Choose a layout=Choose a layout
+A simple scrolling text list=A simple scrolling text list
+A cover carousel (EmulationStation)=A cover carousel (EmulationStation)
+A grid of app icons=A grid of app icons
+One fullscreen cover at a time=One fullscreen cover at a time
+An Xbox-360-style cover shelf=An Xbox-360-style cover shelf
+PSP/PS3 cross-media bar=PSP/PS3 cross-media bar
+Good to know=Good to know
+Options on any entry: favourite, rename, move=Options on any entry: favourite, rename, move
+Fonts, colours, background music, widgets=Fonts, colours, background music, widgets
+Browse .nro files and pin them to this menu=Browse .nro files and pin them to this menu
+Suspends your game and brings this back=Suspends your game and brings this back
+A: Next    B: Back=A: Next    B: Back
+You're all set=You're all set
+Enjoy sLaunch.=Enjoy sLaunch.
+Check for updates on startup=Check for updates on startup
+Left/Right: Change    A: Finish    B: Back=Left/Right: Change    A: Finish    B: Back
++: Power=+: Power
+A: Select    X: Options=A: Select    X: Options
+A: Launch    X: Options    Left/Right: Browse=A: Launch    X: Options    Left/Right: Browse
+sort=sort
+A: Launch    X: Options=A: Launch    X: Options
+A: Select    X: Options    L/R: Jump    +: Power=A: Select    X: Options    L/R: Jump    +: Power
+Up/Down: Select   A: Open   Left/Right: Change   B: Back=Up/Down: Select   A: Open   Left/Right: Change   B: Back
+Enabled=Enabled
+Track=Track
+Volume=Volume
+Shuffle=Shuffle
+Put mp3/ogg files in sdmc:/slaunch/music=Put mp3/ogg files in sdmc:/slaunch/music
+Up/Down: Select   A/Left/Right: Change   B: Back=Up/Down: Select   A/Left/Right: Change   B: Back
+Scanning homebrew...=Scanning homebrew...
+pinned=pinned
+Drop .lua widgets in sdmc:/slaunch/widgets/=Drop .lua widgets in sdmc:/slaunch/widgets/
+Left/Right: On/Off   A: Configure   B: Back=Left/Right: On/Off   A: Configure   B: Back
+This widget has no options=This widget has no options
+(not set)=(not set)
+A: Edit/Toggle   Left/Right: Toggle   B: Back=A: Edit/Toggle   Left/Right: Toggle   B: Back
 + New custom theme=+ New custom theme
+A: Create new theme    B: Back=A: Create new theme    B: Back
+A: Apply    Y: Edit    B: Back=A: Apply    Y: Edit    B: Back
+A: Apply    B: Back=A: Apply    B: Back
 Background=Background
+Photo=Photo
+Dim=Dim
+Blur=Blur
+Blur radius=Blur radius
+Snow=Snow
+Video fps=Video fps
 Gradient top=Gradient top
 Gradient bottom=Gradient bottom
 Text=Text
 Accent=Accent
 Secondary=Secondary
 Title=Title
-Rename theme=Rename theme
+Icon background=Icon background
+Wave lines=Wave lines
+Wave thickness=Wave thickness
+Wave amplitude=Wave amplitude
+Ribbon seed=Ribbon seed
+Ribbon layers=Ribbon layers
+Ribbon Y=Ribbon Y
 Save & Apply=Save & Apply
 Delete theme=Delete theme
+Ribbon=Ribbon
 Gradient=Gradient
-Color=Color
-applied=applied
-
-# --- first-run (OOBE) ---
-Welcome to sLaunch=Welcome to sLaunch
-Let's get you set up.=Let's get you set up.
-Choose a Theme=Choose a Theme
-All set!=All set!
-You're ready to go.=You're ready to go.
-
-# --- dialog + options overlay ---
-Close running application?=Close running application?
-Yes=Yes
-No=No
-Remove from Favourites=Remove from Favourites
-Add to Favourites=Add to Favourites
-Rename=Rename
-Close game=Close game
-Sort: A - Z=Sort: A - Z
-Sort: Default=Sort: Default
-Cancel=Cancel
-
-# --- on-screen keyboard ---
-(empty)=(empty)
-Shift=Shift
-Space=Space
-Done=Done
-
-# --- status messages ---
-Saved=Saved
-Theme renamed=Theme renamed
-Renamed=Renamed
-Dragging widget - double-tap to place=Dragging widget - double-tap to place
-Widget placed=Widget placed
-Added to Favourites=Added to Favourites
-Removed from Favourites=Removed from Favourites
-Theme applied=Theme applied
-Theme saved=Theme saved
-Theme deleted=Theme deleted
-Font applied=Font applied
-
-# --- control hints ---
-A: Continue=A: Continue
-A: Continue    B: Back=A: Continue    B: Back
-A: Finish=A: Finish
-+: Power=+: Power
-A: Select    X: Options=A: Select    X: Options
-A: Select    X: Options    D-Pad: Move=A: Select    X: Options    D-Pad: Move
-A: Select    X: Options    Left/Right: Browse=A: Select    X: Options    Left/Right: Browse
-Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back=Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back
-B: Back=B: Back
-Up/Down: Select   A: Configure   B: Back=Up/Down: Select   A: Configure   B: Back
-A: Edit/Toggle   Left/Right: Toggle   B: Back=A: Edit/Toggle   Left/Right: Toggle   B: Back
-A: Create new theme    B: Back=A: Create new theme    B: Back
-A: Apply    Y: Edit    B: Back=A: Apply    Y: Edit    B: Back
-A: Apply    B: Back=A: Apply    B: Back
-Up/Down: Row    Left/Right: Change background    B: Back=Up/Down: Row    Left/Right: Change background    B: Back
+(none)=(none)
+Up/Down: Row    Left/Right: Change background type    B: Back=Up/Down: Row    Left/Right: Change background type    B: Back
+Up/Down: Row    Left/Right: Choose photo overlay    B: Back=Up/Down: Row    Left/Right: Choose photo overlay    B: Back
+Up/Down: Row    Left/Right/A: Toggle effect    Left/Right: Adjust value    B: Back=Up/Down: Row    Left/Right/A: Toggle effect    Left/Right: Adjust value    B: Back
+Up/Down: Row    Left/Right: Adjust video fps    B: Back=Up/Down: Row    Left/Right: Adjust video fps    B: Back
+Up/Down: Row    Left/Right: Adjust value    B: Back=Up/Down: Row    Left/Right: Adjust value    B: Back
 Up/Down: Row    A: Save & apply    B: Back=Up/Down: Row    A: Save & apply    B: Back
 Up/Down: Row    A: Rename    B: Back=Up/Down: Row    A: Rename    B: Back
 Up/Down: Row    A: Delete this theme    B: Back=Up/Down: Row    A: Delete this theme    B: Back
 Up/Down: Row    A: Edit color    B: Back=Up/Down: Row    A: Edit color    B: Back
+Color=Color
+applied=applied
 Up/Down: Preview    A: Apply    B: Back=Up/Down: Preview    A: Apply    B: Back
-D-Pad: Move   A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel=D-Pad: Move   A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel
+(empty)=(empty)
+A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel=A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel
 Up/Down: Choose    A: Confirm    B: Cancel=Up/Down: Choose    A: Confirm    B: Cancel

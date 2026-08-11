@@ -49,7 +49,7 @@ widget = {
 - Optional hook: `on_config(id)` is called right after the user changes an
   option, so you can react (re-login, refetch, ...).
 
-Enable/disable is **not** a widget option — the home menu owns it.
+Enable/disable is **not** a widget option -- the home menu owns it.
 
 ## Engine API
 

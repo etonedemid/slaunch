@@ -1,0 +1,229 @@
+# sLaunch Japanese locale. Generated from template.txt.
+# Japanese renders with the console's own shared font, which sLaunch selects
+# automatically when the system language is Japanese.
+
+# --- main menu shortcuts ---
+Theming=テーマ設定
+Random game=ランダム起動
+Controllers=コントローラー
+Album=アルバム
+User Page=ユーザーページ
+Web Browser=ブラウザー
+Mii Edit=Mii作成
+Settings=設定
+Power=電源
+Homebrew menu=自作ソフトメニュー
+User=ユーザー
+Network=ネットワーク
+Games=ゲーム
+Homebrew=自作ソフト
+
+# --- entry options (X) ---
+Renamed=名前を変更しました
+Remove from Favourites=お気に入りから削除
+Add to Favourites=お気に入りに追加
+Rename=名前を変更
+Homebrew donor (set)=自作ソフト用の枠 (設定済み)
+Use as homebrew donor=自作ソフト用の枠にする
+Remove from menu=メニューから削除
+Move=並べ替え
+Close game=ゲームを終了
+Sort: =並び順:
+Cancel=キャンセル
+Move: D-pad to reorder, A to place=十字ボタンで移動、Aボタンで決定
+Rename theme=テーマ名を変更
+
+# --- sort modes ---
+Title A - Z=名前順 (A-Z)
+Title Z - A=名前順 (Z-A)
+Game card first=カードを先頭に
+Recently played=最近遊んだ順
+Most played=プレイ時間順
+Default=標準
+Default payload=標準のペイロード
+
+# --- play time ---
+Today=今日
+Yesterday=昨日
+days ago=日前
+months ago=か月前
+years ago=年前
+
+# --- entry state ---
+Loading games...=ゲームを読み込み中...
+No apps found=ソフトが見つかりません
+Game card=ゲームカード
+Nintendo Switch=Nintendo Switch
+Running=起動中
+Update available=更新があります
+
+# --- theming + appearance ---
+Menu entries=メニュー項目
+found=件
+Back=戻る
+About=このソフトについて
+Applied=適用中
+List=リスト
+Line=ライン
+Grid=グリッド
+Cover=カバー
+Shelf=シェルフ
+XMB=XMB
+On=オン
+Off=オフ
+Left=左
+Center=中央
+Right=右
+Themes=テーマ
+UI mode=表示スタイル
+Text position=文字の位置
+List icons=リストのアイコン
+Icon pack=アイコンパック
+Fonts=フォント
+Music=音楽
+Widgets=ウィジェット
+Welcome screen=ようこそ画面
+Check for updates=更新を確認
+Built-in=標準
+current=使用中
+
+# --- power menu ---
+Restart the console?=本体を再起動しますか?
+Sleep=スリープ
+Restart=再起動
+Power off=電源を切る
+Reboot to payload=ペイロードで再起動
+
+# --- setup ---
+Setup complete. Welcome!=設定が完了しました。ようこそ!
+A clean HOME Menu replacement=すっきりしたHOMEメニュー
+Let's set it up - just a few seconds.=すぐに設定できます。
+Setup=初期設定
+Pick a theme=テーマを選んでください
+
+# --- dialogs ---
+No games to pick from=選べるゲームがありません
+No payloads found in sdmc:/payloads=sdmc:/payloads にペイロードがありません
+No music found=音楽が見つかりません
+No .nro found in sdmc:/switch=sdmc:/switch に .nro がありません
+No widgets found=ウィジェットが見つかりません
+Close running application?=起動中のソフトを終了しますか?
+Yes=はい
+No=いいえ
+
+# --- button hints and everything else ---
+Saved=保存しました
+Theme renamed=テーマ名を変更しました
+Order saved=並び順を保存しました
+Removed from menu=メニューから削除しました
+Hidden=非表示
+Shown=表示
+Up/Down: Select   B: Back=上下: 選択   B: 戻る
+The suspended game will be closed.=中断中のゲームは終了します。
+Turn the console off?=本体の電源を切りますか?
+Up/Down: Select   A: Confirm   B: Back=上下: 選択   A: 決定   B: 戻る
+Reboot to=次で再起動
+B: Back=B: 戻る
+Up/Down: Select   A: Reboot into it   B: Back=上下: 選択   A: 再起動   B: 戻る
+Let's play=遊びましょう
+Picking something...=選んでいます...
+Version=バージョン
+update available:=更新があります:
+up to date=最新です
+update check off=更新確認はオフ
+What's new=更新内容
+Up/Down: Scroll   B: Back=上下: スクロール   B: 戻る
+Theme applied=テーマを適用しました
+Theme saved=テーマを保存しました
+Theme deleted=テーマを削除しました
+Font applied=フォントを適用しました
+A: Get started=A: はじめる
+Up/Down: Choose    A: Next    B: Back=上下: 選択    A: 次へ    B: 戻る
+Choose a layout=表示スタイルを選択
+A simple scrolling text list=シンプルな文字リスト
+A cover carousel (EmulationStation)=カバーが流れる表示
+A grid of app icons=アイコンを並べた表示
+One fullscreen cover at a time=カバーを全画面で1つずつ
+An Xbox-360-style cover shelf=Xbox 360風のカバー棚
+PSP/PS3 cross-media bar=PSP/PS3のクロスメディアバー
+Good to know=知っておくと便利
+Options on any entry: favourite, rename, move=どの項目でも: お気に入り、名前変更、移動
+Fonts, colours, background music, widgets=フォント、色、音楽、ウィジェット
+Browse .nro files and pin them to this menu=.nro を探してメニューに追加できます
+Suspends your game and brings this back=ゲームを中断してここに戻ります
+A: Next    B: Back=A: 次へ    B: 戻る
+You're all set=準備完了
+Enjoy sLaunch.=sLaunch をお楽しみください。
+Check for updates on startup=起動時に更新を確認
+Left/Right: Change    A: Finish    B: Back=左右: 変更    A: 完了    B: 戻る
++: Power=+: 電源
+A: Select    X: Options=A: 決定    X: メニュー
+A: Launch    X: Options    Left/Right: Browse=A: 起動    X: メニュー    左右: 移動
+sort=並び順
+A: Launch    X: Options=A: 起動    X: メニュー
+A: Select    X: Options    L/R: Jump    +: Power=A: 決定    X: メニュー    L/R: 移動    +: 電源
+Up/Down: Select   A: Open   Left/Right: Change   B: Back=上下: 選択   A: 開く   左右: 変更   B: 戻る
+Enabled=有効
+Track=曲
+Volume=音量
+Shuffle=シャッフル
+Put mp3/ogg files in sdmc:/slaunch/music=mp3/ogg を sdmc:/slaunch/music に入れてください
+Up/Down: Select   A/Left/Right: Change   B: Back=上下: 選択   A/左右: 変更   B: 戻る
+Scanning homebrew...=自作ソフトを検索中...
+pinned=追加済み
+Drop .lua widgets in sdmc:/slaunch/widgets/=.lua を sdmc:/slaunch/widgets/ に入れてください
+Left/Right: On/Off   A: Configure   B: Back=左右: オン/オフ   A: 設定   B: 戻る
+This widget has no options=このウィジェットに設定はありません
+(not set)=(未設定)
+A: Edit/Toggle   Left/Right: Toggle   B: Back=A: 編集/切替   左右: 切替   B: 戻る
++ New custom theme=+ 新しいテーマ
+A: Create new theme    B: Back=A: テーマを作成    B: 戻る
+A: Apply    Y: Edit    B: Back=A: 適用    Y: 編集    B: 戻る
+A: Apply    B: Back=A: 適用    B: 戻る
+Background=背景
+Photo=写真
+Dim=暗さ
+Blur=ぼかし
+Blur radius=ぼかしの強さ
+Snow=雪
+Video fps=動画のfps
+Gradient top=グラデーション上
+Gradient bottom=グラデーション下
+Text=文字
+Accent=アクセント
+Secondary=補助色
+Title=タイトル
+Icon background=アイコンの背景
+Wave lines=波の本数
+Wave thickness=波の太さ
+Wave amplitude=波の高さ
+Ribbon seed=リボンのシード
+Ribbon layers=リボンの層
+Ribbon Y=リボンの位置
+Save & Apply=保存して適用
+Delete theme=テーマを削除
+Ribbon=リボン
+Gradient=グラデーション
+(none)=(なし)
+Up/Down: Row    Left/Right: Change background type    B: Back=上下: 項目    左右: 背景の種類    B: 戻る
+Up/Down: Row    Left/Right: Choose photo overlay    B: Back=上下: 項目    左右: 写真を選択    B: 戻る
+Up/Down: Row    Left/Right/A: Toggle effect    Left/Right: Adjust value    B: Back=上下: 項目    左右/A: 効果切替    左右: 調整    B: 戻る
+Up/Down: Row    Left/Right: Adjust video fps    B: Back=上下: 項目    左右: fpsを調整    B: 戻る
+Up/Down: Row    Left/Right: Adjust value    B: Back=上下: 項目    左右: 調整    B: 戻る
+Up/Down: Row    A: Save & apply    B: Back=上下: 項目    A: 保存して適用    B: 戻る
+Up/Down: Row    A: Rename    B: Back=上下: 項目    A: 名前を変更    B: 戻る
+Up/Down: Row    A: Delete this theme    B: Back=上下: 項目    A: このテーマを削除    B: 戻る
+Up/Down: Row    A: Edit color    B: Back=上下: 項目    A: 色を編集    B: 戻る
+Color=色
+applied=適用中
+Up/Down: Preview    A: Apply    B: Back=上下: プレビュー    A: 適用    B: 戻る
+(empty)=(空)
+A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel=A: 入力   X: シフト   Y: 削除   +: 完了   B: キャンセル
+Up/Down: Choose    A: Confirm    B: Cancel=上下: 選択    A: 決定    B: キャンセル
+Welcome home=おかえりなさい
+Good to see you=ようこそ
+Ready when you are=準備できました
+SD card removed=SDカードが抜かれました
+Please only remove the SD card while the console is off.=SDカードは本体の電源を切ってから抜いてください。
+Taking it out while powered on can corrupt your data.=電源が入ったまま抜くとデータが壊れることがあります。
+Restarting...=再起動しています...

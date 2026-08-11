@@ -1,0 +1,236 @@
+# sLaunch Chinese locale (Simplified). Generated from template.txt.
+#
+# Filed as zh.txt rather than zh-Hans.txt on purpose: the loader tries the full
+# system code first and then the two-letter one, so this single file is picked
+# up by every Chinese console (zh-Hans, zh-CN, zh-Hant, zh-TW). Traditional
+# users get Simplified until a zh-Hant.txt exists; drop one in the same folder
+# and it wins automatically.
+#
+# The menu selects the console's own Chinese shared font from the system
+# language, so these glyphs render without installing anything.
+
+# --- main menu shortcuts ---
+Theming=外观设置
+Random game=随机游戏
+Controllers=手柄
+Album=相册
+User Page=用户页面
+Web Browser=浏览器
+Mii Edit=Mii 编辑器
+Settings=设置
+Power=电源
+Homebrew menu=自制软件菜单
+User=用户
+Network=网络
+Games=游戏
+Homebrew=自制软件
+
+# --- entry options (X) ---
+Renamed=已重命名
+Remove from Favourites=从收藏中移除
+Add to Favourites=添加到收藏
+Rename=重命名
+Homebrew donor (set)=自制软件占位游戏(已设置)
+Use as homebrew donor=用作自制软件占位游戏
+Remove from menu=从菜单中移除
+Move=移动
+Close game=关闭游戏
+Sort: =排序:
+Cancel=取消
+Move: D-pad to reorder, A to place=方向键移动,A 键放置
+Rename theme=重命名主题
+
+# --- sort modes ---
+Title A - Z=名称 A - Z
+Title Z - A=名称 Z - A
+Game card first=卡带优先
+Recently played=最近游玩
+Most played=游玩时长
+Default=默认
+Default payload=默认 payload
+
+# --- play time ---
+Today=今天
+Yesterday=昨天
+days ago=天前
+months ago=个月前
+years ago=年前
+
+# --- entry state ---
+Loading games...=正在加载游戏...
+No apps found=未找到应用
+Game card=卡带
+Nintendo Switch=Nintendo Switch
+Running=运行中
+Update available=有可用更新
+
+# --- theming + appearance ---
+Menu entries=菜单项目
+found=个
+Back=返回
+About=关于
+Applied=已应用
+List=列表
+Line=横排
+Grid=网格
+Cover=封面
+Shelf=书架
+XMB=XMB
+On=开
+Off=关
+Left=左
+Center=居中
+Right=右
+Themes=主题
+UI mode=界面样式
+Text position=文字位置
+List icons=列表图标
+Icon pack=图标包
+Fonts=字体
+Music=音乐
+Widgets=小组件
+Welcome screen=欢迎界面
+Check for updates=检查更新
+Built-in=内置
+current=当前
+
+# --- power menu ---
+Restart the console?=要重启主机吗?
+Sleep=睡眠
+Restart=重启
+Power off=关机
+Reboot to payload=重启到 payload
+
+# --- setup ---
+Setup complete. Welcome!=设置完成,欢迎!
+A clean HOME Menu replacement=简洁的 HOME 菜单替代
+Let's set it up - just a few seconds.=马上设置,只需几秒。
+Setup=初始设置
+Pick a theme=选择一个主题
+
+# --- dialogs ---
+No games to pick from=没有可选的游戏
+No payloads found in sdmc:/payloads=sdmc:/payloads 中没有 payload
+No music found=未找到音乐
+No .nro found in sdmc:/switch=sdmc:/switch 中没有 .nro 文件
+No widgets found=未找到小组件
+Close running application?=要关闭正在运行的应用吗?
+Yes=是
+No=否
+
+# --- button hints and everything else ---
+Saved=已保存
+Theme renamed=主题已重命名
+Order saved=顺序已保存
+Removed from menu=已从菜单移除
+Hidden=已隐藏
+Shown=已显示
+Up/Down: Select   B: Back=上下: 选择   B: 返回
+The suspended game will be closed.=暂停中的游戏将被关闭。
+Turn the console off?=要关闭主机吗?
+Up/Down: Select   A: Confirm   B: Back=上下: 选择   A: 确认   B: 返回
+Reboot to=重启到
+B: Back=B: 返回
+Up/Down: Select   A: Reboot into it   B: Back=上下: 选择   A: 重启进入   B: 返回
+Let's play=开始游戏
+Picking something...=正在挑选...
+Version=版本
+update available:=有可用更新:
+up to date=已是最新
+update check off=更新检查已关闭
+What's new=更新内容
+Up/Down: Scroll   B: Back=上下: 滚动   B: 返回
+Theme applied=主题已应用
+Theme saved=主题已保存
+Theme deleted=主题已删除
+Font applied=字体已应用
+A: Get started=A: 开始
+Up/Down: Choose    A: Next    B: Back=上下: 选择    A: 下一步    B: 返回
+Choose a layout=选择界面样式
+A simple scrolling text list=简单的滚动文字列表
+A cover carousel (EmulationStation)=封面轮播(EmulationStation)
+A grid of app icons=应用图标网格
+One fullscreen cover at a time=每次一张全屏封面
+An Xbox-360-style cover shelf=Xbox 360 风格的封面书架
+PSP/PS3 cross-media bar=PSP/PS3 的交叉媒体栏
+Good to know=小提示
+Options on any entry: favourite, rename, move=任意项目均可: 收藏、重命名、移动
+Fonts, colours, background music, widgets=字体、颜色、背景音乐、小组件
+Browse .nro files and pin them to this menu=浏览 .nro 文件并固定到此菜单
+Suspends your game and brings this back=暂停游戏并回到此处
+A: Next    B: Back=A: 下一步    B: 返回
+You're all set=一切就绪
+Enjoy sLaunch.=祝你使用愉快。
+Check for updates on startup=启动时检查更新
+Left/Right: Change    A: Finish    B: Back=左右: 更改    A: 完成    B: 返回
++: Power=+: 电源
+A: Select    X: Options=A: 选择    X: 选项
+A: Launch    X: Options    Left/Right: Browse=A: 启动    X: 选项    左右: 浏览
+sort=排序
+A: Launch    X: Options=A: 启动    X: 选项
+A: Select    X: Options    L/R: Jump    +: Power=A: 选择    X: 选项    L/R: 跳转    +: 电源
+Up/Down: Select   A: Open   Left/Right: Change   B: Back=上下: 选择   A: 打开   左右: 更改   B: 返回
+Enabled=已启用
+Track=曲目
+Volume=音量
+Shuffle=随机播放
+Put mp3/ogg files in sdmc:/slaunch/music=把 mp3/ogg 放进 sdmc:/slaunch/music
+Up/Down: Select   A/Left/Right: Change   B: Back=上下: 选择   A/左右: 更改   B: 返回
+Scanning homebrew...=正在扫描自制软件...
+pinned=已固定
+Drop .lua widgets in sdmc:/slaunch/widgets/=把 .lua 放进 sdmc:/slaunch/widgets/
+Left/Right: On/Off   A: Configure   B: Back=左右: 开关   A: 配置   B: 返回
+This widget has no options=该小组件没有选项
+(not set)=(未设置)
+A: Edit/Toggle   Left/Right: Toggle   B: Back=A: 编辑/切换   左右: 切换   B: 返回
++ New custom theme=+ 新建自定义主题
+A: Create new theme    B: Back=A: 新建主题    B: 返回
+A: Apply    Y: Edit    B: Back=A: 应用    Y: 编辑    B: 返回
+A: Apply    B: Back=A: 应用    B: 返回
+Background=背景
+Photo=照片
+Dim=变暗
+Blur=模糊
+Blur radius=模糊半径
+Snow=雪花
+Video fps=视频帧率
+Gradient top=渐变上色
+Gradient bottom=渐变下色
+Text=文字
+Accent=强调色
+Secondary=次要色
+Title=标题
+Icon background=图标背景
+Wave lines=波纹数量
+Wave thickness=波纹粗细
+Wave amplitude=波纹高度
+Ribbon seed=彩带种子
+Ribbon layers=彩带层数
+Ribbon Y=彩带高度
+Save & Apply=保存并应用
+Delete theme=删除主题
+Ribbon=彩带
+Gradient=渐变
+(none)=(无)
+Up/Down: Row    Left/Right: Change background type    B: Back=上下: 行    左右: 背景类型    B: 返回
+Up/Down: Row    Left/Right: Choose photo overlay    B: Back=上下: 行    左右: 选择照片    B: 返回
+Up/Down: Row    Left/Right/A: Toggle effect    Left/Right: Adjust value    B: Back=上下: 行    左右/A: 切换效果    左右: 调整数值    B: 返回
+Up/Down: Row    Left/Right: Adjust video fps    B: Back=上下: 行    左右: 调整帧率    B: 返回
+Up/Down: Row    Left/Right: Adjust value    B: Back=上下: 行    左右: 调整数值    B: 返回
+Up/Down: Row    A: Save & apply    B: Back=上下: 行    A: 保存并应用    B: 返回
+Up/Down: Row    A: Rename    B: Back=上下: 行    A: 重命名    B: 返回
+Up/Down: Row    A: Delete this theme    B: Back=上下: 行    A: 删除此主题    B: 返回
+Up/Down: Row    A: Edit color    B: Back=上下: 行    A: 编辑颜色    B: 返回
+Color=颜色
+applied=已应用
+Up/Down: Preview    A: Apply    B: Back=上下: 预览    A: 应用    B: 返回
+(empty)=(空)
+A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel=A: 输入   X: 大小写   Y: 退格   +: 完成   B: 取消
+Up/Down: Choose    A: Confirm    B: Cancel=上下: 选择    A: 确认    B: 取消
+Welcome home=欢迎回来
+Good to see you=很高兴见到你
+Ready when you are=随时可以开始
+SD card removed=SD 卡已被拔出
+Please only remove the SD card while the console is off.=请在主机关机后再拔出 SD 卡。
+Taking it out while powered on can corrupt your data.=开机时拔出可能会损坏你的数据。
+Restarting...=正在重启...

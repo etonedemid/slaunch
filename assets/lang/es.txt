@@ -1,0 +1,229 @@
+# sLaunch Spanish locale. Generated from template.txt.
+# Covers es and es-419: a console reporting es-419 looks for es-419.txt first
+# and falls back to this file.
+
+# --- main menu shortcuts ---
+Theming=Personalización
+Random game=Juego al azar
+Controllers=Mandos
+Album=Álbum
+User Page=Perfil
+Web Browser=Navegador
+Mii Edit=Editor de Mii
+Settings=Configuración
+Power=Encendido
+Homebrew menu=Menú homebrew
+User=Usuario
+Network=Red
+Games=Juegos
+Homebrew=Homebrew
+
+# --- entry options (X) ---
+Renamed=Renombrado
+Remove from Favourites=Quitar de favoritos
+Add to Favourites=Añadir a favoritos
+Rename=Renombrar
+Homebrew donor (set)=Ranura para homebrew (elegida)
+Use as homebrew donor=Usar como ranura para homebrew
+Remove from menu=Quitar del menú
+Move=Mover
+Close game=Cerrar el juego
+Sort: =Orden:
+Cancel=Cancelar
+Move: D-pad to reorder, A to place=Cruceta para mover, A para colocar
+Rename theme=Renombrar tema
+
+# --- sort modes ---
+Title A - Z=Título A - Z
+Title Z - A=Título Z - A
+Game card first=Cartuchos primero
+Recently played=Jugados hace poco
+Most played=Más jugados
+Default=Predeterminado
+Default payload=Payload predeterminado
+
+# --- play time ---
+Today=Hoy
+Yesterday=Ayer
+days ago=días
+months ago=meses
+years ago=años
+
+# --- entry state ---
+Loading games...=Cargando juegos...
+No apps found=No hay aplicaciones
+Game card=Cartucho
+Nintendo Switch=Nintendo Switch
+Running=En ejecución
+Update available=Actualización disponible
+
+# --- theming + appearance ---
+Menu entries=Entradas del menú
+found=encontrados
+Back=Atrás
+About=Acerca de
+Applied=Aplicado
+List=Lista
+Line=Línea
+Grid=Cuadrícula
+Cover=Portada
+Shelf=Estante
+XMB=XMB
+On=Sí
+Off=No
+Left=Izquierda
+Center=Centro
+Right=Derecha
+Themes=Temas
+UI mode=Vista
+Text position=Posición del texto
+List icons=Iconos en la lista
+Icon pack=Paquete de iconos
+Fonts=Fuentes
+Music=Música
+Widgets=Widgets
+Welcome screen=Pantalla de bienvenida
+Check for updates=Buscar actualizaciones
+Built-in=Integrado
+current=actual
+
+# --- power menu ---
+Restart the console?=¿Reiniciar la consola?
+Sleep=Suspender
+Restart=Reiniciar
+Power off=Apagar
+Reboot to payload=Reiniciar con un payload
+
+# --- setup ---
+Setup complete. Welcome!=Configuración lista. ¡Bienvenido!
+A clean HOME Menu replacement=Un menú HOME limpio y sencillo
+Let's set it up - just a few seconds.=Vamos a configurarlo, solo unos segundos.
+Setup=Configuración
+Pick a theme=Elige un tema
+
+# --- dialogs ---
+No games to pick from=No hay juegos para elegir
+No payloads found in sdmc:/payloads=No hay payloads en sdmc:/payloads
+No music found=No se encontró música
+No .nro found in sdmc:/switch=No hay archivos .nro en sdmc:/switch
+No widgets found=No se encontraron widgets
+Close running application?=¿Cerrar la aplicación en ejecución?
+Yes=Sí
+No=No
+
+# --- button hints and everything else ---
+Saved=Guardado
+Theme renamed=Tema renombrado
+Order saved=Orden guardado
+Removed from menu=Quitado del menú
+Hidden=Oculto
+Shown=Visible
+Up/Down: Select   B: Back=Arriba/Abajo: elegir   B: atrás
+The suspended game will be closed.=El juego en pausa se cerrará.
+Turn the console off?=¿Apagar la consola?
+Up/Down: Select   A: Confirm   B: Back=Arriba/Abajo: elegir   A: confirmar   B: atrás
+Reboot to=Reiniciar con
+B: Back=B: atrás
+Up/Down: Select   A: Reboot into it   B: Back=Arriba/Abajo: elegir   A: reiniciar   B: atrás
+Let's play=A jugar
+Picking something...=Eligiendo...
+Version=Versión
+update available:=actualización disponible:
+up to date=al día
+update check off=búsqueda desactivada
+What's new=Novedades
+Up/Down: Scroll   B: Back=Arriba/Abajo: desplazar   B: atrás
+Theme applied=Tema aplicado
+Theme saved=Tema guardado
+Theme deleted=Tema eliminado
+Font applied=Fuente aplicada
+A: Get started=A: empezar
+Up/Down: Choose    A: Next    B: Back=Arriba/Abajo: elegir    A: siguiente    B: atrás
+Choose a layout=Elige una vista
+A simple scrolling text list=Una lista de texto sencilla
+A cover carousel (EmulationStation)=Un carrusel de portadas (EmulationStation)
+A grid of app icons=Una cuadrícula de iconos
+One fullscreen cover at a time=Una portada a pantalla completa
+An Xbox-360-style cover shelf=Un estante de portadas al estilo Xbox 360
+PSP/PS3 cross-media bar=La barra cross-media de PSP/PS3
+Good to know=Conviene saber
+Options on any entry: favourite, rename, move=En cualquier entrada: favorito, renombrar, mover
+Fonts, colours, background music, widgets=Fuentes, colores, música y widgets
+Browse .nro files and pin them to this menu=Busca archivos .nro y fíjalos en este menú
+Suspends your game and brings this back=Pausa el juego y vuelve aquí
+A: Next    B: Back=A: siguiente    B: atrás
+You're all set=Todo listo
+Enjoy sLaunch.=Disfruta de sLaunch.
+Check for updates on startup=Buscar actualizaciones al iniciar
+Left/Right: Change    A: Finish    B: Back=Izq./Der.: cambiar    A: terminar    B: atrás
++: Power=+: encendido
+A: Select    X: Options=A: elegir    X: opciones
+A: Launch    X: Options    Left/Right: Browse=A: abrir    X: opciones    Izq./Der.: navegar
+sort=orden
+A: Launch    X: Options=A: abrir    X: opciones
+A: Select    X: Options    L/R: Jump    +: Power=A: elegir    X: opciones    L/R: saltar    +: encendido
+Up/Down: Select   A: Open   Left/Right: Change   B: Back=Arriba/Abajo: elegir   A: abrir   Izq./Der.: cambiar   B: atrás
+Enabled=Activado
+Track=Pista
+Volume=Volumen
+Shuffle=Aleatorio
+Put mp3/ogg files in sdmc:/slaunch/music=Pon archivos mp3/ogg en sdmc:/slaunch/music
+Up/Down: Select   A/Left/Right: Change   B: Back=Arriba/Abajo: elegir   A/Izq./Der.: cambiar   B: atrás
+Scanning homebrew...=Buscando homebrew...
+pinned=fijado
+Drop .lua widgets in sdmc:/slaunch/widgets/=Pon archivos .lua en sdmc:/slaunch/widgets/
+Left/Right: On/Off   A: Configure   B: Back=Izq./Der.: activar   A: configurar   B: atrás
+This widget has no options=Este widget no tiene opciones
+(not set)=(sin definir)
+A: Edit/Toggle   Left/Right: Toggle   B: Back=A: editar/cambiar   Izq./Der.: cambiar   B: atrás
++ New custom theme=+ Tema nuevo
+A: Create new theme    B: Back=A: crear un tema    B: atrás
+A: Apply    Y: Edit    B: Back=A: aplicar    Y: editar    B: atrás
+A: Apply    B: Back=A: aplicar    B: atrás
+Background=Fondo
+Photo=Foto
+Dim=Oscurecer
+Blur=Desenfoque
+Blur radius=Radio del desenfoque
+Snow=Nieve
+Video fps=Fps del vídeo
+Gradient top=Degradado arriba
+Gradient bottom=Degradado abajo
+Text=Texto
+Accent=Acento
+Secondary=Secundario
+Title=Título
+Icon background=Fondo de los iconos
+Wave lines=Número de ondas
+Wave thickness=Grosor de las ondas
+Wave amplitude=Altura de las ondas
+Ribbon seed=Semilla de las cintas
+Ribbon layers=Capas de cintas
+Ribbon Y=Altura de las cintas
+Save & Apply=Guardar y aplicar
+Delete theme=Eliminar el tema
+Ribbon=Cintas
+Gradient=Degradado
+(none)=(ninguno)
+Up/Down: Row    Left/Right: Change background type    B: Back=Arriba/Abajo: fila    Izq./Der.: tipo de fondo    B: atrás
+Up/Down: Row    Left/Right: Choose photo overlay    B: Back=Arriba/Abajo: fila    Izq./Der.: elegir foto    B: atrás
+Up/Down: Row    Left/Right/A: Toggle effect    Left/Right: Adjust value    B: Back=Arriba/Abajo: fila    Izq./Der./A: efecto    Izq./Der.: valor    B: atrás
+Up/Down: Row    Left/Right: Adjust video fps    B: Back=Arriba/Abajo: fila    Izq./Der.: fps del vídeo    B: atrás
+Up/Down: Row    Left/Right: Adjust value    B: Back=Arriba/Abajo: fila    Izq./Der.: valor    B: atrás
+Up/Down: Row    A: Save & apply    B: Back=Arriba/Abajo: fila    A: guardar    B: atrás
+Up/Down: Row    A: Rename    B: Back=Arriba/Abajo: fila    A: renombrar    B: atrás
+Up/Down: Row    A: Delete this theme    B: Back=Arriba/Abajo: fila    A: eliminar el tema    B: atrás
+Up/Down: Row    A: Edit color    B: Back=Arriba/Abajo: fila    A: editar el color    B: atrás
+Color=Color
+applied=aplicado
+Up/Down: Preview    A: Apply    B: Back=Arriba/Abajo: vista previa    A: aplicar    B: atrás
+(empty)=(vacío)
+A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel=A: escribir   X: mayús.   Y: borrar   +: listo   B: cancelar
+Up/Down: Choose    A: Confirm    B: Cancel=Arriba/Abajo: elegir    A: confirmar    B: cancelar
+Welcome home=Bienvenido de nuevo
+Good to see you=Me alegro de verte
+Ready when you are=Cuando quieras
+SD card removed=Tarjeta SD extraída
+Please only remove the SD card while the console is off.=Extrae la tarjeta SD solo con la consola apagada.
+Taking it out while powered on can corrupt your data.=Sacarla con la consola encendida puede dañar tus datos.
+Restarting...=Reiniciando...

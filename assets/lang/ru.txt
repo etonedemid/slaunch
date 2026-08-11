@@ -1,0 +1,227 @@
+# sLaunch Russian locale. Generated from template.txt.
+
+# --- main menu shortcuts ---
+Theming=Оформление
+Random game=Случайная игра
+Controllers=Контроллеры
+Album=Альбом
+User Page=Профиль
+Web Browser=Браузер
+Mii Edit=Редактор Mii
+Settings=Настройки
+Power=Питание
+Homebrew menu=Меню homebrew
+User=Пользователь
+Network=Сеть
+Games=Игры
+Homebrew=Homebrew
+
+# --- entry options (X) ---
+Renamed=Переименовано
+Remove from Favourites=Убрать из избранного
+Add to Favourites=В избранное
+Rename=Переименовать
+Homebrew donor (set)=Слот для homebrew (выбран)
+Use as homebrew donor=Использовать как слот для homebrew
+Remove from menu=Убрать из меню
+Move=Переместить
+Close game=Закрыть игру
+Sort: =Сортировка:
+Cancel=Отмена
+Move: D-pad to reorder, A to place=Крестовина - перемещение, A - поставить
+Rename theme=Переименовать тему
+
+# --- sort modes ---
+Title A - Z=По названию (А-Я)
+Title Z - A=По названию (Я-А)
+Game card first=Картриджи сначала
+Recently played=Недавние
+Most played=По времени игры
+Default=По умолчанию
+Default payload=Пейлоад по умолчанию
+
+# --- play time ---
+Today=Сегодня
+Yesterday=Вчера
+days ago=дн. назад
+months ago=мес. назад
+years ago=г. назад
+
+# --- entry state ---
+Loading games...=Загрузка игр...
+No apps found=Приложения не найдены
+Game card=Картридж
+Nintendo Switch=Nintendo Switch
+Running=Запущено
+Update available=Есть обновление
+
+# --- theming + appearance ---
+Menu entries=Пункты меню
+found=найдено
+Back=Назад
+About=О программе
+Applied=Применено
+List=Список
+Line=Линия
+Grid=Сетка
+Cover=Обложка
+Shelf=Полка
+XMB=XMB
+On=Вкл
+Off=Выкл
+Left=Слева
+Center=По центру
+Right=Справа
+Themes=Темы
+UI mode=Вид меню
+Text position=Положение текста
+List icons=Значки в списке
+Icon pack=Набор значков
+Fonts=Шрифты
+Music=Музыка
+Widgets=Виджеты
+Welcome screen=Экран приветствия
+Check for updates=Проверять обновления
+Built-in=Встроенный
+current=текущая
+
+# --- power menu ---
+Restart the console?=Перезагрузить консоль?
+Sleep=Спящий режим
+Restart=Перезагрузка
+Power off=Выключить
+Reboot to payload=Загрузить пейлоад
+
+# --- setup ---
+Setup complete. Welcome!=Настройка завершена. Добро пожаловать!
+A clean HOME Menu replacement=Аккуратная замена меню HOME
+Let's set it up - just a few seconds.=Настроим за пару секунд.
+Setup=Настройка
+Pick a theme=Выберите тему
+
+# --- dialogs ---
+No games to pick from=Нет игр для выбора
+No payloads found in sdmc:/payloads=В sdmc:/payloads нет пейлоадов
+No music found=Музыка не найдена
+No .nro found in sdmc:/switch=В sdmc:/switch нет файлов .nro
+No widgets found=Виджеты не найдены
+Close running application?=Закрыть запущенное приложение?
+Yes=Да
+No=Нет
+
+# --- button hints and everything else ---
+Saved=Сохранено
+Theme renamed=Тема переименована
+Order saved=Порядок сохранён
+Removed from menu=Убрано из меню
+Hidden=Скрыто
+Shown=Показано
+Up/Down: Select   B: Back=Вверх/Вниз: выбор   B: назад
+The suspended game will be closed.=Приостановленная игра будет закрыта.
+Turn the console off?=Выключить консоль?
+Up/Down: Select   A: Confirm   B: Back=Вверх/Вниз: выбор   A: подтвердить   B: назад
+Reboot to=Загрузить
+B: Back=B: назад
+Up/Down: Select   A: Reboot into it   B: Back=Вверх/Вниз: выбор   A: загрузить   B: назад
+Let's play=Играем
+Picking something...=Выбираем...
+Version=Версия
+update available:=есть обновление:
+up to date=последняя версия
+update check off=проверка отключена
+What's new=Что нового
+Up/Down: Scroll   B: Back=Вверх/Вниз: прокрутка   B: назад
+Theme applied=Тема применена
+Theme saved=Тема сохранена
+Theme deleted=Тема удалена
+Font applied=Шрифт применён
+A: Get started=A: начать
+Up/Down: Choose    A: Next    B: Back=Вверх/Вниз: выбор    A: далее    B: назад
+Choose a layout=Выберите вид меню
+A simple scrolling text list=Простой текстовый список
+A cover carousel (EmulationStation)=Карусель обложек (EmulationStation)
+A grid of app icons=Сетка значков
+One fullscreen cover at a time=Обложка на весь экран
+An Xbox-360-style cover shelf=Полка обложек в стиле Xbox 360
+PSP/PS3 cross-media bar=Кросс-медиа панель PSP/PS3
+Good to know=Полезно знать
+Options on any entry: favourite, rename, move=Для любого пункта: избранное, переименование, перемещение
+Fonts, colours, background music, widgets=Шрифты, цвета, музыка, виджеты
+Browse .nro files and pin them to this menu=Найдите .nro и закрепите их в меню
+Suspends your game and brings this back=Приостановит игру и вернёт это меню
+A: Next    B: Back=A: далее    B: назад
+You're all set=Всё готово
+Enjoy sLaunch.=Приятного пользования sLaunch.
+Check for updates on startup=Проверять обновления при запуске
+Left/Right: Change    A: Finish    B: Back=Влево/Вправо: изменить    A: готово    B: назад
++: Power=+: питание
+A: Select    X: Options=A: выбрать    X: меню
+A: Launch    X: Options    Left/Right: Browse=A: запустить    X: меню    Влево/Вправо: листать
+sort=сортировка
+A: Launch    X: Options=A: запустить    X: меню
+A: Select    X: Options    L/R: Jump    +: Power=A: выбрать    X: меню    L/R: пролистать    +: питание
+Up/Down: Select   A: Open   Left/Right: Change   B: Back=Вверх/Вниз: выбор   A: открыть   Влево/Вправо: изменить   B: назад
+Enabled=Включено
+Track=Трек
+Volume=Громкость
+Shuffle=Перемешать
+Put mp3/ogg files in sdmc:/slaunch/music=Положите mp3/ogg в sdmc:/slaunch/music
+Up/Down: Select   A/Left/Right: Change   B: Back=Вверх/Вниз: выбор   A/Влево/Вправо: изменить   B: назад
+Scanning homebrew...=Поиск homebrew...
+pinned=закреплено
+Drop .lua widgets in sdmc:/slaunch/widgets/=Положите .lua в sdmc:/slaunch/widgets/
+Left/Right: On/Off   A: Configure   B: Back=Влево/Вправо: вкл/выкл   A: настроить   B: назад
+This widget has no options=У этого виджета нет настроек
+(not set)=(не задано)
+A: Edit/Toggle   Left/Right: Toggle   B: Back=A: изменить   Влево/Вправо: переключить   B: назад
++ New custom theme=+ Новая тема
+A: Create new theme    B: Back=A: создать тему    B: назад
+A: Apply    Y: Edit    B: Back=A: применить    Y: изменить    B: назад
+A: Apply    B: Back=A: применить    B: назад
+Background=Фон
+Photo=Фото
+Dim=Затемнение
+Blur=Размытие
+Blur radius=Радиус размытия
+Snow=Снег
+Video fps=Кадры видео
+Gradient top=Градиент сверху
+Gradient bottom=Градиент снизу
+Text=Текст
+Accent=Акцент
+Secondary=Второстепенный
+Title=Заголовок
+Icon background=Фон значков
+Wave lines=Число волн
+Wave thickness=Толщина волн
+Wave amplitude=Высота волн
+Ribbon seed=Зерно лент
+Ribbon layers=Слои лент
+Ribbon Y=Положение лент
+Save & Apply=Сохранить и применить
+Delete theme=Удалить тему
+Ribbon=Ленты
+Gradient=Градиент
+(none)=(нет)
+Up/Down: Row    Left/Right: Change background type    B: Back=Вверх/Вниз: строка    Влево/Вправо: тип фона    B: назад
+Up/Down: Row    Left/Right: Choose photo overlay    B: Back=Вверх/Вниз: строка    Влево/Вправо: выбор фото    B: назад
+Up/Down: Row    Left/Right/A: Toggle effect    Left/Right: Adjust value    B: Back=Вверх/Вниз: строка    Влево/Вправо/A: эффект    Влево/Вправо: значение    B: назад
+Up/Down: Row    Left/Right: Adjust video fps    B: Back=Вверх/Вниз: строка    Влево/Вправо: кадры видео    B: назад
+Up/Down: Row    Left/Right: Adjust value    B: Back=Вверх/Вниз: строка    Влево/Вправо: значение    B: назад
+Up/Down: Row    A: Save & apply    B: Back=Вверх/Вниз: строка    A: сохранить    B: назад
+Up/Down: Row    A: Rename    B: Back=Вверх/Вниз: строка    A: переименовать    B: назад
+Up/Down: Row    A: Delete this theme    B: Back=Вверх/Вниз: строка    A: удалить тему    B: назад
+Up/Down: Row    A: Edit color    B: Back=Вверх/Вниз: строка    A: изменить цвет    B: назад
+Color=Цвет
+applied=применено
+Up/Down: Preview    A: Apply    B: Back=Вверх/Вниз: просмотр    A: применить    B: назад
+(empty)=(пусто)
+A: Type   X: Shift   Y: Backspace   +: Done   B: Cancel=A: ввод   X: регистр   Y: стереть   +: готово   B: отмена
+Up/Down: Choose    A: Confirm    B: Cancel=Вверх/Вниз: выбор    A: подтвердить    B: отмена
+Welcome home=С возвращением
+Good to see you=Рады видеть
+Ready when you are=Всё готово
+SD card removed=SD-карта извлечена
+Please only remove the SD card while the console is off.=Извлекайте SD-карту только при выключенной консоли.
+Taking it out while powered on can corrupt your data.=Извлечение при включённой консоли может повредить данные.
+Restarting...=Перезагрузка...

@@ -21,3 +21,8 @@ assets/fonts/Wingdings.ttf
 projects/sInstaller/romfs/payload
 graphify-out
 NEXT_TASKS.md
+# Staged by the installer Makefile from assets/ at build time
+projects/sInstaller/romfs/ui
+# Local build helper
+wsl_build_debug.sh
+*.elf
