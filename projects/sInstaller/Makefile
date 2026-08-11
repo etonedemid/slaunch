@@ -18,7 +18,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sLaunch Installer
 APP_AUTHOR  := sLaunch
-APP_VERSION := 0.7.0
+APP_VERSION := 0.8.0
 APP_ICON    := ../../assets/icon.jpg
 
 PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
@@ -67,9 +67,17 @@ romfs_stage:
 	@cp -r $(SDOUT)/atmosphere $(ROMFS)/payload/ 2>/dev/null || true
 	@cp -r $(SDOUT)/slaunch    $(ROMFS)/payload/ 2>/dev/null || true
 	@cp ../../icon.png $(ROMFS)/icon.png 2>/dev/null || true
+	@# Line art for the installer's own three action tiles.
+	@mkdir -p $(ROMFS)/ui
+	@cp -f ../../assets/install.png ../../assets/update.png ../../assets/quit.png \
+	       ../../assets/disable.png $(ROMFS)/ui/ 2>/dev/null || true
 
-# Build the NRO with romfs + icon.
-$(OUTDIR)/$(TARGET).nro: $(BUILD)/$(TARGET).nacp $(BUILD)/$(TARGET).elf | $(OUTDIR)
+# Build the NRO with romfs + icon. romfs_stage is a prerequisite (not just an
+# earlier goal in `all`) so the NRO is rebuilt whenever the staged payload
+# changes. Without it make saw only the .elf and .nacp, and an assets-only
+# change - a new font, a new locale, a rebuilt sMenu - left the installer
+# quietly shipping the previous payload.
+$(OUTDIR)/$(TARGET).nro: romfs_stage $(BUILD)/$(TARGET).nacp $(BUILD)/$(TARGET).elf | $(OUTDIR)
 	@elf2nro $(BUILD)/$(TARGET).elf $@ --nacp=$(BUILD)/$(TARGET).nacp \
 	    --romfsdir=$(ROMFS) \
 	    $(if $(wildcard $(APP_ICON)),--icon=$(APP_ICON),)

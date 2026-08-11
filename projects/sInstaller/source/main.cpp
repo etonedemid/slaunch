@@ -23,7 +23,7 @@ struct Col { Uint8 r, g, b; };
 // AMOLED palette
 static const Col kBlack{0, 0, 0}, kBg{5, 5, 8}, kBg2{10, 10, 14},
                  kFg{240, 242, 248}, kDim{40, 42, 50},
-                 kAccent{95, 200, 255}, kGreen{100, 220, 140}, kRed{235, 80, 80};
+                 kAccent{255, 255, 255}, kGreen{100, 220, 140}, kRed{235, 80, 80};
 
 static void FillRect(int x, int y, int w, int h, Col c, Uint8 a = 255) {
     SDL_SetRenderDrawColor(g_ren, c.r, c.g, c.b, a);
@@ -39,13 +39,6 @@ static void Text(TTF_Font *f, int x, int y, Col c, const char *s, bool center = 
     SDL_Rect dst{center ? x - surf->w / 2 : x, y, surf->w, surf->h};
     SDL_FreeSurface(surf);
     if (tex) { SDL_RenderCopy(g_ren, tex, nullptr, &dst); SDL_DestroyTexture(tex); }
-}
-
-static int TextWidth(TTF_Font *f, const char *s) {
-    if (!f || !s || !s[0]) return 0;
-    int w = 0, h = 0;
-    TTF_SizeUTF8(f, s, &w, &h);
-    return w;
 }
 
 // ---- recursive copy / delete ---------------------------------------------
@@ -171,7 +164,17 @@ static bool RemoveEverything() {
 }
 
 // ---- reboot ----------------------------------------------------------------
+// Orderly reboot via spsm (the full shutdown state machine, same thing the
+// reboot_to_payload homebrew uses); raw bpc only as a fallback, since yanking
+// the PMIC from a fully-awake system can leave it half-asleep instead.
 static void RebootSystem() {
+    if (R_SUCCEEDED(spsmInitialize())) {
+        Result rc = spsmShutdown(true);
+        spsmExit();
+        if (R_SUCCEEDED(rc)) {
+            while (true) svcSleepThread(100'000'000ULL);  // reboot is coming
+        }
+    }
     if (R_SUCCEEDED(bpcInitialize())) { bpcRebootSystem(); bpcExit(); }
 }
 
@@ -322,76 +325,65 @@ static bool ExtractZip(const char *zipPath) {
     return ok;
 }
 
-// ---- carousel helpers ------------------------------------------------------
-struct MockItem {
-    const char *label;
-    bool        running;
-    bool        favourite;
+// ---- main-menu tiles -------------------------------------------------------
+// Shelf-style row (the menu's Shelf mode, minus the scrolling): three uniform
+// tiles centred as a group, the selected one lifted by a highlight card and an
+// accent frame. There are only ever three actions, so the layout is fixed.
+enum class Act { Install, Update, Remove, Exit };
+
+struct Tile {
+    const char  *label;
+    const char  *desc;
+    Act          act;
+    SDL_Texture *icon;
 };
 
-static void DrawCarousel(const std::vector<MockItem> &items, int cursor,
-                         float &scroll_pos, int center_y, int spacing,
-                         bool left_align = false, int margin = 120) {
-    scroll_pos += (cursor - scroll_pos) * 0.30f;
-    if (std::abs(cursor - scroll_pos) < 0.01f) scroll_pos = (float)cursor;
+static constexpr int kTileSize = 200;
+static constexpr int kTileGap  = 56;
+static constexpr int kTileTop  = (H - kTileSize) / 2;   // row centred on the screen
 
-    const int span = 7;
-    for (int off = -span; off <= span; off++) {
-        int idx = (int)lroundf(scroll_pos) + off;
-        if (idx < 0 || idx >= (int)items.size()) continue;
+static void DrawTileRow(const Tile *tiles, int count, int cursor) {
+    const int rowW = count * kTileSize + (count - 1) * kTileGap;
+    const int x0   = (W - rowW) / 2;
 
-        const float vdist = std::abs((float)idx - scroll_pos);
-        const bool  big   = vdist < 0.5f;
-        const bool  sel   = (idx == cursor);
-        TTF_Font   *fs    = big ? g_fM : g_fS;
-        const float alpha = std::max(0.06f, 1.0f - vdist * 0.13f);
+    for (int i = 0; i < count; i++) {
+        const int  x   = x0 + i * (kTileSize + kTileGap);
+        const bool sel = (i == cursor);
 
-        char text[256];
-        text[0] = '\0';
-        if (items[idx].running) strcat(text, "\xE2\x97\x8F ");
-        if (items[idx].favourite) strcat(text, "\xE2\x98\x85 ");
-        strcat(text, items[idx].label);
+        // Highlight card, extending under the label like the Shelf's info card.
+        if (sel) FillRect(x - 14, kTileTop - 14, kTileSize + 28, kTileSize + 76, kFg, 14);
 
-        int lw = TextWidth(fs, text);
-        int tx = left_align ? margin : (W - lw) / 2;
-        int y  = center_y + (int)((idx - scroll_pos) * spacing) - (big ? 14 : 10);
-
-        if (sel) {
-            Text(g_fM, tx - 34, y, kAccent, ">");
-        }
-
-        Col nameCol;
-        if (sel || big) {
-            nameCol = items[idx].running ? kAccent : kFg;
+        if (tiles[i].icon) {
+            // The icons are white line art on black. Additive blending drops
+            // their background so the card shows through, and the colour mod
+            // dims the two that aren't selected.
+            const Uint8 v = sel ? 255 : 90;
+            SDL_SetTextureColorMod(tiles[i].icon, v, v, v);
+            // They are 64px pixel art: draw them at an exact 2x inside the tile.
+            // A stretch to the full 200 would land on fractional pixels and turn
+            // the thin strokes ragged.
+            const int art = 128, pad = (kTileSize - art) / 2;
+            SDL_Rect dst{ x + pad, kTileTop + pad, art, art };
+            SDL_RenderCopy(g_ren, tiles[i].icon, nullptr, &dst);
         } else {
-            nameCol = items[idx].running ? Col{26, 58, 74} : kDim;
+            FillRect(x, kTileTop, kTileSize, kTileSize, kBg2);
         }
 
-        Uint8 a = (Uint8)(alpha * 255);
-        SDL_Surface *surf = TTF_RenderUTF8_Blended(fs, text,
-            SDL_Color{nameCol.r, nameCol.g, nameCol.b, a});
-        if (surf) {
-            SDL_Texture *tex = SDL_CreateTextureFromSurface(g_ren, surf);
-            SDL_Rect dst{tx, y, surf->w, surf->h};
-            SDL_FreeSurface(surf);
-            if (tex) { SDL_RenderCopy(g_ren, tex, nullptr, &dst); SDL_DestroyTexture(tex); }
+        FillRect(x, kTileTop, kTileSize, 3, kAccent, sel ? 255 : 80);   // accent strip
+
+        if (sel) {   // thin frame, clear of the art
+            FillRect(x - 4,         kTileTop - 4,         kTileSize + 8, 4,             kAccent);
+            FillRect(x - 4,         kTileTop + kTileSize, kTileSize + 8, 4,             kAccent);
+            FillRect(x - 4,         kTileTop - 4,         4,             kTileSize + 8, kAccent);
+            FillRect(x + kTileSize, kTileTop - 4,         4,             kTileSize + 8, kAccent);
         }
 
-        if (items[idx].running) {
-            const char *tag = "running";
-            int tw = TextWidth(g_fS, tag);
-            int ty = y + TTF_FontHeight(fs) - TTF_FontHeight(g_fS) - 2;
-            int tag_x = tx + lw + 18;
-            SDL_Surface *ts = TTF_RenderUTF8_Blended(g_fS, tag,
-                SDL_Color{kAccent.r, kAccent.g, kAccent.b, a});
-            if (ts) {
-                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-                SDL_Rect tdst{tag_x, ty, ts->w, ts->h};
-                SDL_FreeSurface(ts);
-                if (tt) { SDL_RenderCopy(g_ren, tt, nullptr, &tdst); SDL_DestroyTexture(tt); }
-            }
-        }
+        Text(g_fM, x + kTileSize / 2, kTileTop + kTileSize + 18, sel ? kFg : kDim,
+             tiles[i].label, true);
     }
+
+    // One line about whatever is selected, under the row.
+    Text(g_fS, W / 2, kTileTop + kTileSize + 78, kDim, tiles[cursor].desc, true);
 }
 
 // ---- dialog ----------------------------------------------------------------
@@ -419,7 +411,6 @@ static void DrawConfirmDialog(const char *title, const char *subtitle,
     }
 }
 
-// ---- mock home menu data ---------------------------------------------------
 // ---------------------------------------------------------------------------
 int main() {
     romfsInit();
@@ -446,6 +437,18 @@ int main() {
 
     SDL_Texture *icon = IMG_LoadTexture(g_ren, "romfs:/icon.png");
 
+    // Action icons for the tile row. They are white line art on an opaque black
+    // square, so additive blending is what makes the black disappear.
+    auto loadTileIcon = [&](const char *path) {
+        SDL_Texture *t = IMG_LoadTexture(g_ren, path);
+        if (t) SDL_SetTextureBlendMode(t, SDL_BLENDMODE_ADD);
+        return t;
+    };
+    SDL_Texture *icInstall = loadTileIcon("romfs:/ui/install.png");
+    SDL_Texture *icUpdate  = loadTileIcon("romfs:/ui/update.png");
+    SDL_Texture *icDisable = loadTileIcon("romfs:/ui/disable.png");
+    SDL_Texture *icQuit    = loadTileIcon("romfs:/ui/quit.png");
+
     // --- installer state ---
     enum class Screen { MainMenu, ConfirmInstall, ConfirmRemove,
                         Installing, Removing, Done, Failed,
@@ -455,20 +458,26 @@ int main() {
     bool installed = IsInstalled();
     bool rebootAfter = false;   // Done came from an install/update (offer reboot)
 
-    // Online-update state.
-    enum class Act { Install, Update, Remove, Exit };
-    struct InstallerItem { std::string label; Act act; };
-    std::vector<InstallerItem> installerItems;
+    // Fixed row of actions. Remove only joins it once there is something to
+    // remove - the row is centred either way, so it simply gets narrower.
+    Tile tiles[4] = {};
+    int  tileCount  = 3;
+    int  instCursor = 0;
     auto buildMenu = [&]() {
-        installerItems.clear();
-        installerItems.push_back({installed ? "Re-install sLaunch" : "Install sLaunch", Act::Install});
-        installerItems.push_back({"Check for updates", Act::Update});
-        if (installed) installerItems.push_back({"Remove sLaunch", Act::Remove});
-        installerItems.push_back({"Exit installer", Act::Exit});
+        tiles[0] = { installed ? "Re-install" : "Install",
+                     installed ? "Copy this build over the installed one"
+                               : "Copy sLaunch to your SD card",
+                     Act::Install, icInstall };
+        tiles[1] = { "Update", "Check GitHub for a newer release", Act::Update, icUpdate };
+        int n = 2;
+        if (installed)
+            tiles[n++] = { "Remove", "Delete every sLaunch file from the SD card",
+                           Act::Remove, icDisable };
+        tiles[n++] = { "Exit", "Close the installer", Act::Exit, icQuit };
+        tileCount = n;
+        if (instCursor >= tileCount) instCursor = tileCount - 1;
     };
     buildMenu();
-    int instCursor = 0;
-    float instScroll = 0.0f;
 
     std::string latestTag, zipUrl;   // filled by the update check
     const char *updErr = "";         // failure detail for the Failed screen
@@ -481,8 +490,8 @@ int main() {
     const u64 RepeatDelay = (360 * freq) / 1000;
     auto ms = [&](u64 m) { return (m * freq) / 1000; };
     
-    int held_v = 0;
-    u64 next_v = 0, start_v = 0;
+    int held_v = 0, held_h = 0;
+    u64 next_v = 0, start_v = 0, next_h = 0, start_h = 0;
 
     while (appletMainLoop()) {
         padUpdate(&pad);
@@ -494,9 +503,17 @@ int main() {
         if (held & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) dir_v = -1;
         else if (held & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) dir_v = 1;
 
+        // The tile row is horizontal, so left/right drives the main screen while
+        // up/down keeps driving the Yes/No dialogs.
+        int dir_h = 0;
+        if (held & (HidNpadButton_Left | HidNpadButton_StickLLeft | HidNpadButton_StickRLeft)) dir_h = -1;
+        else if (held & (HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_StickRRight)) dir_h = 1;
+
         const u64 now = armGetSystemTick();
         bool move_up = false;
         bool move_down = false;
+        bool move_left = false;
+        bool move_right = false;
 
         auto step = [&](int dir, int &held_state, u64 &next, u64 &start, bool &fire_up, bool &fire_down) {
             if (dir == 0) { held_state = 0; return; }
@@ -519,15 +536,16 @@ int main() {
             }
         };
 
-        step(dir_v, held_v, next_v, start_v, move_up, move_down);
+        step(dir_v, held_v, next_v, start_v, move_up,   move_down);
+        step(dir_h, held_h, next_h, start_h, move_left, move_right);
 
         // ---- input ----
         if (screen == Screen::MainMenu) {
-            if (move_up)   instCursor = (instCursor + (int)installerItems.size() - 1) % (int)installerItems.size();
-            if (move_down) instCursor = (instCursor + 1) % (int)installerItems.size();
+            if (move_left)  instCursor = (instCursor + tileCount - 1) % tileCount;
+            if (move_right) instCursor = (instCursor + 1) % tileCount;
 
             if (down & HidNpadButton_A) {
-                switch (installerItems[instCursor].act) {
+                switch (tiles[instCursor].act) {
                     case Act::Install: dialogCursor = 1; screen = Screen::ConfirmInstall; break;
                     case Act::Update:  screen = Screen::Checking; break;
                     case Act::Remove:  dialogCursor = 1; screen = Screen::ConfirmRemove; break;
@@ -581,71 +599,21 @@ int main() {
         FillRect(0, 0, W, H, kBlack);
 
         if (screen == Screen::MainMenu) {
-            time_t now = time(nullptr);
-            struct tm tm_now;
-            localtime_r(&now, &tm_now);
-            char clock[32];
-            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
-            Text(g_fS, 40, 16, kDim, clock);
-
-            u32 charge = 0;
-            psmGetBatteryChargePercentage(&charge);
-            char batt[16];
-            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
-            int bw = TextWidth(g_fS, batt);
-            Text(g_fS, W - 40 - bw, 16, kDim, batt);
-
             Text(g_fL, W / 2, 100, kFg, "sLaunch", true);
-            Text(g_fS, W / 2, 160, kDim, "Home menu replacement", true);
-            FillRect(W / 2 - 200, 190, 400, 1, kBg2);
+            char sub[64];
+            if (installed) snprintf(sub, sizeof(sub), "Installed  -  v%s", SL_VERSION);
+            else           snprintf(sub, sizeof(sub), "Home menu replacement");
+            Text(g_fS, W / 2, 160, installed ? kGreen : kDim, sub, true);
+            FillRect(W / 2 - 200, 200, 400, 1, kBg2);
 
-            std::vector<MockItem> instMock;
-            for (auto &it : installerItems) instMock.push_back({it.label.c_str(), false, false});
-            DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
+            DrawTileRow(tiles, tileCount, instCursor);
 
         } else if (screen == Screen::ConfirmInstall) {
-            time_t now = time(nullptr);
-            struct tm tm_now;
-            localtime_r(&now, &tm_now);
-            char clock[32];
-            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
-            Text(g_fS, 40, 16, kDim, clock);
-            u32 charge = 0;
-            psmGetBatteryChargePercentage(&charge);
-            char batt[16];
-            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
-            int bw = TextWidth(g_fS, batt);
-            Text(g_fS, W - 40 - bw, 16, kDim, batt);
-            Text(g_fL, W / 2, 100, kFg, "sLaunch Installer", true);
-            Text(g_fS, W / 2, 160, kDim, "A clean HOME Menu replacement", true);
-            FillRect(W / 2 - 200, 190, 400, 1, kBg2);
-            std::vector<MockItem> instMock;
-            for (auto &it : installerItems) instMock.push_back({it.label.c_str(), false, false});
-            DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
-
-            DrawConfirmDialog("Install sLaunch?",
+            // The dialog paints the whole screen, so nothing is drawn behind it.
+            DrawConfirmDialog(installed ? "Re-install sLaunch?" : "Install sLaunch?",
                 "This will copy files to your SD card.", dialogCursor, false);
 
         } else if (screen == Screen::ConfirmRemove) {
-            time_t now = time(nullptr);
-            struct tm tm_now;
-            localtime_r(&now, &tm_now);
-            char clock[32];
-            strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
-            Text(g_fS, 40, 16, kDim, clock);
-            u32 charge = 0;
-            psmGetBatteryChargePercentage(&charge);
-            char batt[16];
-            snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
-            int bw = TextWidth(g_fS, batt);
-            Text(g_fS, W - 40 - bw, 16, kDim, batt);
-            Text(g_fL, W / 2, 100, kFg, "sLaunch Installer", true);
-            Text(g_fS, W / 2, 160, kDim, "A clean HOME Menu replacement", true);
-            FillRect(W / 2 - 200, 190, 400, 1, kBg2);
-            std::vector<MockItem> instMock;
-            for (auto &it : installerItems) instMock.push_back({it.label.c_str(), false, false});
-            DrawCarousel(instMock, instCursor, instScroll, 340, 48, true);
-
             DrawConfirmDialog(installed ? "Remove sLaunch?" : "Do nothing?",
                 installed ? "This will delete all sLaunch files." : "This will do nothing.",
                 dialogCursor, true);
@@ -771,6 +739,10 @@ int main() {
 
 cleanup:
     if (icon) SDL_DestroyTexture(icon);
+    if (icInstall) SDL_DestroyTexture(icInstall);
+    if (icUpdate)  SDL_DestroyTexture(icUpdate);
+    if (icDisable) SDL_DestroyTexture(icDisable);
+    if (icQuit)    SDL_DestroyTexture(icQuit);
     if (g_fL) TTF_CloseFont(g_fL);
     if (g_fM) TTF_CloseFont(g_fM);
     if (g_fS) TTF_CloseFont(g_fS);

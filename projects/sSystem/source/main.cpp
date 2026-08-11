@@ -18,6 +18,7 @@
 #include <sl/sys/app/Application.hpp>
 #include <sl/sys/la/LibraryApplet.hpp>
 #include <sl/sys/ecs/ExternalContent.hpp>
+#include <sl/sys/pwr/Power.hpp>
 
 using namespace sl;
 using namespace sl::smi;
@@ -35,12 +36,14 @@ enum class Pending {
     None, LaunchApp, ResumeApp, OpenAlbum, OpenUserPage, OpenNetConnect,
     OpenMiiEdit, OpenWebBrowser, OpenControllers, OpenHomebrewMenu,
     OpenHomebrew, LaunchHomebrewApp, OpenSystemSettings,
+    Reboot, Shutdown, RebootPayload,
 };
 static Pending g_Pending      = Pending::None;
 static u64     g_PendingAppId = 0;
 static char    g_PendingHbPath[FS_MAX_PATH] = {};
 static char    g_PendingHbArgv[512] = {};
 static u64     g_PendingDonorId = 0;
+static char    g_PendingPayload[FS_MAX_PATH] = {};
 // While an NRO runs as an application in a donor's slot, this is the donor id so
 // we can unregister the ECS override (restore the game) once it exits.
 static u64     g_HbOverrideDonor = 0;
@@ -67,6 +70,18 @@ static void PushMenuEvent(MenuMessage evt) {
     CommandHeader hdr { Magic, static_cast<u32>(evt) };
     appletStorageWrite(&st, 0, &hdr, sizeof(hdr));
     la::PushStorage(st);
+}
+
+// A power request that could not be carried out (only reboot-to-payload can
+// fail) leaves its reason here; the menu shows it once and deletes the file.
+static void WritePowerError(const char *msg) {
+    if (!msg || !msg[0]) return;
+    mkdir("sdmc:/slaunch", 0777);
+    mkdir("sdmc:/slaunch/config", 0777);
+    FILE *fp = fopen(PowerErrorPath, "w");
+    if (!fp) return;
+    fprintf(fp, "%s\n", msg);
+    fclose(fp);
 }
 
 // Drop the active homebrew-as-app ECS override (restore the donor game). Safe to
@@ -130,9 +145,22 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
             if (app::g_AppRunning) app::Terminate();
             CleanupHbOverride();   // if it was a homebrew-as-app, restore the donor
             break;
-        case SystemMessage::OpenPowerMenu:
-            appletStartSleepSequence(true);
+        case SystemMessage::OpenPowerMenu:   // legacy opcode: plain sleep
+        case SystemMessage::PowerSleep:
+            pwr::Sleep();
             break;
+
+        // Reboot / shutdown / chainload tear the whole system down, so they wait
+        // for the menu applet to close like every other pending action does.
+        case SystemMessage::PowerReboot:   g_Pending = Pending::Reboot;   break;
+        case SystemMessage::PowerShutdown: g_Pending = Pending::Shutdown; break;
+        case SystemMessage::RebootToPayload: {
+            auto *rb = static_cast<const PayloadReboot*>(payload);
+            g_Pending = Pending::RebootPayload;
+            strncpy(g_PendingPayload, rb->payload_path, sizeof(g_PendingPayload) - 1);
+            g_PendingPayload[sizeof(g_PendingPayload) - 1] = '\0';
+            break;
+        }
         case SystemMessage::RestartMenu:
         case SystemMessage::TerminateMenu:
         default:
@@ -241,9 +269,12 @@ static void RunPendingAction() {
             Result rc = ecs::RegisterExternalContent(ecs::HbloaderProgramId, ecs::HbloaderExefsDir);
             DaemonLog("hbmenu: register hbloader rc=0x%x", rc);
             if (R_SUCCEEDED(rc)) {
+                DaemonLog("hbmenu: launching hbloader applet (blocking)");
                 la::OpenSystemApplet(ecs::HbloaderAppletId, 0); // blocks until hbmenu closes
+                DaemonLog("hbmenu: hbloader applet exited");
                 ecs::UnregisterExternalContent(ecs::HbloaderProgramId);
             }
+            DaemonLog("hbmenu: relaunching sMenu");
             LaunchMenu();
             break;
         }
@@ -257,10 +288,13 @@ static void RunPendingAction() {
             Result rc = ecs::RegisterExternalContent(ecs::HbloaderProgramId, ecs::HbloaderExefsDir);
             DaemonLog("hb: register rc=0x%x nro=%s", rc, g_PendingHbPath);
             if (R_SUCCEEDED(rc)) {
+                DaemonLog("hb: launching hbloader applet for %s (blocking)", g_PendingHbPath);
                 la::OpenSystemApplet(ecs::HbloaderAppletId, 0); // blocks until it exits
+                DaemonLog("hb: hbloader applet exited");
                 ecs::UnregisterExternalContent(ecs::HbloaderProgramId);
             }
             remove("sdmc:/slaunch/hbtarget.txt"); // one-shot: don't retarget hbmenu
+            DaemonLog("hb: relaunching sMenu");
             LaunchMenu();
             break;
         }
@@ -279,8 +313,17 @@ static void RunPendingAction() {
             Result rc = ecs::RegisterExternalContent(g_PendingDonorId, ecs::HbloaderAppExefsDir);
             DaemonLog("hbapp: donor=0x%016lx register rc=0x%x nro=%s",
                       g_PendingDonorId, rc, g_PendingHbPath);
-            if (R_SUCCEEDED(rc) && R_SUCCEEDED(app::Launch(g_PendingDonorId, g_SelectedUser))) {
-                g_HbOverrideDonor = g_PendingDonorId;   // app runs; cleaned up on exit
+            if (R_SUCCEEDED(rc)) {
+                Result lr = app::Launch(g_PendingDonorId, g_SelectedUser);
+                DaemonLog("hbapp: Launch(0x%016lx) rc=0x%x", g_PendingDonorId, lr);
+                if (R_SUCCEEDED(lr)) {
+                    g_HbOverrideDonor = g_PendingDonorId;   // app runs; cleaned up on exit
+                    DaemonLog("hbapp: running as app, will clean up on exit");
+                } else {
+                    ecs::UnregisterExternalContent(g_PendingDonorId);
+                    remove("sdmc:/slaunch/hbtarget.txt");
+                    LaunchMenu();
+                }
             } else {
                 ecs::UnregisterExternalContent(g_PendingDonorId);
                 remove("sdmc:/slaunch/hbtarget.txt");
@@ -288,6 +331,41 @@ static void RunPendingAction() {
             }
             break;
         }
+        // ---- power ----------------------------------------------------------
+        // The game is closed first so it shuts down cleanly rather than being cut
+        // off mid-frame by the reboot. Each of these only comes back if it failed,
+        // in which case the menu is put back up (with the reason, for payloads).
+        case Pending::Reboot:
+            if (app::g_AppRunning) app::Terminate();
+            CleanupHbOverride();
+            // Stop the menu holder completely before reboot to avoid leaving
+            // stale state that can block bpcRebootSystem.
+            la::StopMenu();
+            DaemonLog("power: calling Reboot()");
+            pwr::Reboot();
+            DaemonLog("power: reboot did not take (returned)");
+            LaunchMenu();
+            break;
+        case Pending::Shutdown:
+            if (app::g_AppRunning) app::Terminate();
+            CleanupHbOverride();
+            la::StopMenu();
+            DaemonLog("power: calling Shutdown()");
+            pwr::Shutdown();
+            DaemonLog("power: shutdown did not take (returned)");
+            LaunchMenu();
+            break;
+        case Pending::RebootPayload: {
+            if (app::g_AppRunning) app::Terminate();
+            CleanupHbOverride();
+            const auto r = pwr::RebootToPayload(g_PendingPayload);
+            DaemonLog("power: payload=%s failed (%s)", g_PendingPayload,
+                      pwr::PayloadResultText(r));
+            WritePowerError(pwr::PayloadResultText(r));
+            LaunchMenu();
+            break;
+        }
+
         case Pending::None:
         default:
             LaunchMenu();
@@ -302,6 +380,7 @@ static void DrainSMIQueue() {
         PayloadSetUser   set_user;
         PayloadAppLaunch app_launch;
         PayloadHomebrew  homebrew;
+        PayloadReboot    reboot;
         u8               raw[sizeof(PayloadHomebrew)];
     } payload = {};
 
@@ -331,15 +410,7 @@ enum SystemAppletMessage : u32 {
 };
 
 static void HandleSleep() {
-    appletStartSleepSequence(true);
-}
-
-// Reboot the console. Best-effort: bpc is what the system uses to reset.
-static void RebootSystem() {
-    if (R_SUCCEEDED(bpcInitialize())) {
-        bpcRebootSystem();   // does not return on success
-        bpcExit();
-    }
+    pwr::Sleep();
 }
 
 // The SD card was physically removed while the console is on. Everything sMenu
@@ -352,7 +423,7 @@ static void HandleSdCardRemoved() {
     if (la::IsMenuAlive())
         PushMenuEvent(MenuMessage::SdCardEjected);
     svcSleepThread(3'000'000'000ULL);   // leave the warning up long enough to read
-    RebootSystem();
+    pwr::Reboot();
 }
 
 // HOME button toggles between a game and the menu, like the real HOME Menu:
@@ -535,7 +606,9 @@ namespace ams {
             // game the game is intentionally backgrounded, and its suspend
             // state-change must not be misread as an exit (which would close it).
             if (!la::IsMenuAlive() && app::g_AppRunning && app::Update()) {
+                DaemonLog("app: exited naturally (hb_override=0x%016lx)", g_HbOverrideDonor);
                 CleanupHbOverride();  // homebrew-as-app exited -> restore the donor
+                DaemonLog("app: relaunching sMenu after app exit");
                 ::LaunchMenu();
             }
 

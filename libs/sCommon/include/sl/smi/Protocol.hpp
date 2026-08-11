@@ -13,7 +13,7 @@ namespace sl::smi {
     constexpr u32 Magic = 0x214C4D53; // "SML!"
     constexpr size_t StorageSize = 0x4000;
 
-    // Commands: sMenu → sSystem
+    // Commands: sMenu -> sSystem
     enum class SystemMessage : u32 {
         Invalid = 0,
         SetSelectedUser,
@@ -29,14 +29,21 @@ namespace sl::smi {
         OpenWebBrowser,        // offline web applet
         OpenControllers,       // controller-management applet
         OpenHomebrewMenu,      // launch the installed hbmenu NRO
-        OpenPowerMenu,
+        OpenPowerMenu,         // legacy: sleeps immediately (kept for old menus)
         RestartMenu,
         ReloadAppList,
         TerminateMenu,
         OpenSystemSettings,    // full System Settings ("set" applet, id 0x16)
+        // Power menu. Appended at the end on purpose: the menu is deployed
+        // without a reboot while the daemon needs one, so the two binaries can be
+        // different versions for a while and existing opcodes must not shift.
+        PowerSleep,
+        PowerReboot,
+        PowerShutdown,
+        RebootToPayload,       // chainload a payload (hekate, ...) on reboot
     };
 
-    // Events: sSystem → sMenu (async)
+    // Events: sSystem -> sMenu (async)
     enum class MenuMessage : u32 {
         Invalid = 0,
         HomeRequested,
@@ -69,7 +76,17 @@ namespace sl::smi {
         u64  donor_id;   // LaunchHomebrewApplication: game slot to run the NRO in
     };
 
-    // Passed from sSystem → sMenu at startup via input storage
+    // Payload for RebootToPayload: the .bin to chainload on the next boot.
+    struct PayloadReboot {
+        char payload_path[FS_MAX_PATH];
+    };
+
+    // A reboot-to-payload that never happened leaves the reason here (one line of
+    // text). The daemon writes it just before relaunching the menu; the menu shows
+    // it as a status message and deletes the file.
+    constexpr const char *PowerErrorPath = "sdmc:/slaunch/config/power_err.txt";
+
+    // Passed from sSystem -> sMenu at startup via input storage
     struct SystemStatus {
         AccountUid selected_user;
         u64        suspended_app_id;      // 0 if none

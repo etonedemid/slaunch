@@ -12,9 +12,9 @@
 namespace sl::sys::ecs {
 
     // We take over the "shop" applet slot. On current firmware libnx's
-    // AppletId_LibraryAppletShop launches program 0x…1042 (systemWeb, the
+    // AppletId_LibraryAppletShop launches program 0x...1042 (systemWeb, the
     // web-based shop) -- confirmed empirically -- so the ECS program id and the
-    // applet's NPDM (sMenu.json) must both be 0x…1042 for our menu to be served.
+    // applet's NPDM (sMenu.json) must both be 0x...1042 for our menu to be served.
     constexpr AppletId MenuAppletId  = AppletId_LibraryAppletShop;
     constexpr u64      MenuProgramId = 0x0100000000001042ULL;
     // SD path (relative to the SD root) of sMenu's exefs folder.
