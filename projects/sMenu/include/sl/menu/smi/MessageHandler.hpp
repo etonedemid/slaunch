@@ -1,7 +1,7 @@
 #pragma once
 #include <sl/smi/Protocol.hpp>
 
-// Handles async MenuMessage events sent from sSystem → sMenu
+// Handles async MenuMessage events sent from sSystem -> sMenu
 // Call PollMessages() each frame; register callbacks before the loop.
 
 namespace sl::menu::smi {

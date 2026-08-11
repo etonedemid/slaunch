@@ -9,7 +9,7 @@ BUILD    := build
 
 SOURCES  := source source/sl/menu/ui source/sl/menu/gfx source/sl/menu/smi \
             source/sl/menu/net source/sl/menu/widgets source/sl/menu/audio \
-            source/sl/menu/hb ../../libs/Lua
+            source/sl/menu/hb source/sl/menu/play ../../libs/Lua
 
 INCLUDES := include ../../libs/sCommon/include \
             ../../libs/Lua ../../libs/sol2/include
@@ -37,7 +37,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 0.7.0
+APP_VERSION := 0.8.0
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
@@ -73,9 +73,14 @@ CXXFLAGS = $(CFLAGS) -std=gnu++20 -fno-rtti -fno-exceptions \
 
 ASFLAGS  := -g $(ARCH)
 
+# ignore-in-shared-libs, NOT ignore-in-object-files: the latter lets a function
+# that is declared but never defined link anyway, as an unresolved PLT stub full
+# of zeroes. Calling one executes 0x00000000 and fatals with an Undefined
+# Instruction at a PC inside .bss, which reads like memory corruption and is
+# miserable to trace back to a missing definition. Our own objects must resolve.
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
             -Wl,-Map,$(TARGET).map \
-            -Wl,--unresolved-symbols=ignore-in-object-files
+            -Wl,--unresolved-symbols=ignore-in-shared-libs
 
 # Network libs first (curl -> mbedtls -> z), then SDL (whose flags end with
 # -lnx) so libnx resolves everything last.

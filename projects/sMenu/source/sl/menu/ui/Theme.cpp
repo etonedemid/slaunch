@@ -119,7 +119,28 @@ namespace sl::menu::ui {
                 else if (!strcmp(field, "accent")) ParseColor(val, c.accent);
                 else if (!strcmp(field, "dim"))    ParseColor(val, c.dim);
                 else if (!strcmp(field, "title"))  ParseColor(val, c.title);
+                else if (!strcmp(field, "icon_bg")) ParseColor(val, c.icon_bg);
                 else if (!strcmp(field, "wallpaper")) { strncpy(c.wallpaper, val, sizeof(c.wallpaper) - 1); c.wallpaper[sizeof(c.wallpaper) - 1] = '\0'; }
+                else if (!strcmp(field, "background_style")) c.background_style = atoi(val);
+                else if (!strcmp(field, "ribbon_lines"))     c.ribbon_line_count  = atoi(val);
+                else if (!strcmp(field, "ribbon_thickness")) c.ribbon_thickness   = atoi(val);
+                else if (!strcmp(field, "ribbon_amplitude")) c.ribbon_amplitude   = atoi(val);
+                else if (!strcmp(field, "ribbon_seed"))      c.ribbon_seed        = atoi(val);
+                else if (!strcmp(field, "ribbon_layers"))    c.ribbon_layers      = atoi(val);
+                else if (!strcmp(field, "ribbon_y_center"))  c.ribbon_y_center    = atoi(val);
+                else if (!strcmp(field, "wallpaper_effect")) {
+                    // Backward compat: old single enum -> new toggles.
+                    int eff = atoi(val);
+                    if (eff == 1) { c.wallpaper_dim = 1; }
+                    else if (eff == 2) { c.wallpaper_blur = 1; c.wallpaper_dim = 0; }
+                    else if (eff == 3) { c.wallpaper_snow = 1; }
+                    // eff==0 -> all off (default)
+                }
+                else if (!strcmp(field, "wallpaper_dim"))           c.wallpaper_dim           = std::max(0, std::min(1, atoi(val)));
+                else if (!strcmp(field, "wallpaper_blur"))          c.wallpaper_blur          = std::max(0, std::min(1, atoi(val)));
+                else if (!strcmp(field, "wallpaper_blur_radius"))   c.wallpaper_blur_radius   = std::max(2, std::min(32, atoi(val)));
+                else if (!strcmp(field, "wallpaper_snow"))          c.wallpaper_snow          = std::max(0, std::min(1, atoi(val)));
+                else if (!strcmp(field, "wallpaper_fps"))           c.wallpaper_fps           = atoi(val);
             }
         }
         fclose(fp);
@@ -145,7 +166,20 @@ namespace sl::menu::ui {
             snprintf(k, sizeof(k), "c%d_accent", i); WriteColor(fp, k, c.accent);
             snprintf(k, sizeof(k), "c%d_dim", i);    WriteColor(fp, k, c.dim);
             snprintf(k, sizeof(k), "c%d_title", i);  WriteColor(fp, k, c.title);
+            snprintf(k, sizeof(k), "c%d_icon_bg", i); WriteColor(fp, k, c.icon_bg);
             fprintf(fp, "c%d_wallpaper=%s\n", i, c.wallpaper);
+            fprintf(fp, "c%d_background_style=%d\n", i, c.background_style);
+            fprintf(fp, "c%d_ribbon_lines=%d\n",     i, c.ribbon_line_count);
+            fprintf(fp, "c%d_ribbon_thickness=%d\n", i, c.ribbon_thickness);
+            fprintf(fp, "c%d_ribbon_amplitude=%d\n", i, c.ribbon_amplitude);
+            fprintf(fp, "c%d_ribbon_seed=%d\n",      i, c.ribbon_seed);
+            fprintf(fp, "c%d_ribbon_layers=%d\n",    i, c.ribbon_layers);
+            fprintf(fp, "c%d_ribbon_y_center=%d\n",  i, c.ribbon_y_center);
+            fprintf(fp, "c%d_wallpaper_dim=%d\n",           i, c.wallpaper_dim);
+            fprintf(fp, "c%d_wallpaper_blur=%d\n",          i, c.wallpaper_blur);
+            fprintf(fp, "c%d_wallpaper_blur_radius=%d\n",   i, c.wallpaper_blur_radius);
+            fprintf(fp, "c%d_wallpaper_snow=%d\n",          i, c.wallpaper_snow);
+            fprintf(fp, "c%d_wallpaper_fps=%d\n",           i, c.wallpaper_fps);
         }
         fclose(fp);
     }

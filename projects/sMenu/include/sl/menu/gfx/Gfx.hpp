@@ -29,6 +29,7 @@ namespace sl::menu::gfx {
 
         // Primitives
         void FillRect(int x, int y, int w, int h, SDL_Color c);
+        void FillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, SDL_Color c);
         void GradientV(SDL_Color top, SDL_Color bottom);
 
         // Text
@@ -39,6 +40,13 @@ namespace sl::menu::gfx {
 
         // Images
         SDL_Texture *LoadImage(const char *path);   // nullptr on failure
+        // Load a system-entry icon (a white shape on a solid field). Icons that
+        // carry no real alpha channel would blit their field as an opaque black
+        // square, welding the background into the artwork; this turns their
+        // brightness into the alpha channel so the field becomes a theme colour
+        // (Theme::icon_bg) drawn behind them. Files that already have alpha are
+        // loaded unchanged. Pass w/h = 0 to keep the file's own resolution.
+        SDL_Texture *LoadGlyph(const char *path, int w, int h);
         // Load an image and downscale it once into a wxh static texture, so later
         // per-frame blits are cheap and it uses far less VRAM than the full-size
         // source (used for grid/line app icons). Falls back to the full image if

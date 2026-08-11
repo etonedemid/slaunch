@@ -2,6 +2,7 @@
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
+#include <SDL2/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -15,6 +16,62 @@ namespace sl::menu::ui {
 
     using gfx::FontSize;
 
+    // ---- submenu row ids ---------------------------------------------------
+    // Declared up here rather than beside each screen's handler because the
+    // touch code near the top of the file has to know how many rows a screen
+    // has; a stale hand-counted number there silently makes the last row
+    // untappable.
+    namespace {
+        enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
+               TH_IconPack, TH_Fonts, TH_Music, TH_Widgets, TH_Entries,
+               TH_Welcome, TH_Updates,
+               TH_About, TH_Back, TH_Count };
+
+        enum { EF_Background = 0, EF_Wallpaper, EF_WallpaperDim, EF_WallpaperBlur,
+               EF_WallpaperBlurRadius, EF_WallpaperSnow, EF_WallpaperFps,
+               EF_Top, EF_Bottom, EF_Text,
+               EF_Accent, EF_Secondary, EF_Title, EF_IconBg,
+               EF_RibbonLines, EF_RibbonThickness, EF_RibbonAmplitude,
+               EF_RibbonSeed, EF_RibbonLayers, EF_RibbonYCenter,
+               EF_Rename, EF_Save, EF_Delete, EF_Count };
+
+        enum { MU_Enabled = 0, MU_Track, MU_Volume, MU_Shuffle, MU_Back, MU_Count };
+
+        // Return true when row *r* belongs to the wallpaper-effects block.
+        inline bool IsEffectRow(int r) {
+            return r >= EF_WallpaperDim && r <= EF_WallpaperSnow;
+        }
+        // Return true when row *r* is the blur-radius setting (hidden when blur off).
+        inline bool IsBlurRadiusRow(int r) { return r == EF_WallpaperBlurRadius; }
+        // Return true when row *r* belongs to the ribbon block.
+        inline bool IsRibbonRow(int r) {
+            return r >= EF_RibbonLines && r <= EF_RibbonYCenter;
+        }
+        // Return true when the wallpaper path is a directory (video frame sequence).
+        inline bool IsVideoPath(const char *path) {
+            if (!path || !path[0]) return false;
+            struct stat st;
+            return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+        }
+
+        // The entries the user can hide from the main menu. Theming is
+        // deliberately absent: it has to stay or these toggles become
+        // unreachable.
+        struct SysEntry { ItemKind kind; const char *name; };
+        const SysEntry kSysEntries[] = {
+            { ItemKind::RandomGame,   "Random game"   },
+            { ItemKind::Controllers,  "Controllers"   },
+            { ItemKind::Album,        "Album"         },
+            { ItemKind::UserPage,     "User Page"     },
+            { ItemKind::WebBrowser,   "Web Browser"   },
+            { ItemKind::MiiEdit,      "Mii Edit"      },
+            { ItemKind::Settings,     "Settings"      },
+            { ItemKind::Power,        "Power"         },
+            { ItemKind::HomebrewMenu, "Homebrew menu" },
+        };
+        constexpr int kSysEntryN = (int)(sizeof(kSysEntries) / sizeof(kSysEntries[0]));
+    }
+
     // Layout (1280x720)
     static constexpr int kTopBarH   = 56;
     static constexpr int kListX      = 120;
@@ -22,6 +79,50 @@ namespace sl::menu::ui {
     static constexpr int kRowH       = 54;
     static constexpr int kListW       = 1040;
     static constexpr int kHintY       = 682;
+
+    // On-screen distance between neighbouring entries, per layout. Touch drag
+    // divides by these to move the content at the same rate as the finger, and
+    // the hit-tests invert them, so they have to be the numbers the renderers
+    // actually use.
+    static constexpr int kListSpacing = 48;    // List/Cover: row to row
+    static constexpr int kListCenterY = 360;   // vertical centre of the carousel
+    static constexpr int kLinePitch   = 210;   // Line: cover centre to cover centre
+    static constexpr int kGridTile    = 120;   // Grid: tile edge
+    static constexpr int kGridGap     = 18;    // Grid: gap between tiles
+    static constexpr int kGridPitch   = kGridTile + kGridGap;   // Grid: row to row
+    static constexpr int kGridTopBase = 80;    // Grid: y of row 0 at scroll 0
+
+    // Shelf mode geometry (Xbox-360 "My Games" style): uniform covers in a row,
+    // the selected one anchored near the left. Shared by draw, hit-test and
+    // touch scrolling (OnTouch).
+    static constexpr int kShelfTile    = 208;   // cover edge
+    static constexpr int kShelfGap     = 20;
+    static constexpr int kShelfPitch   = kShelfTile + kShelfGap;
+    static constexpr int kShelfAnchorX = 88;    // left edge of the selected cover
+    static constexpr int kShelfTop     = 150;   // top edge of the cover row
+
+    // XMB geometry (PSP cross-media bar, scaled to 1280x720). The bar row and
+    // the entry column cross at (kXmbAnchorX, kXmbItemY); every other position
+    // is derived from that. Shared by the renderer and the touch hit-tests.
+    // The bar sits high so the column below it has room: five entries read at a
+    // glance, which matters far more on a games console than the handheld's
+    // symmetry did. Category icons span kXmbBarY..+kXmbCatSel with their label
+    // just under, and the entry fade has to finish above that label.
+    static constexpr int kXmbAnchorX   = 268;   // centre X of the selected column
+    static constexpr int kXmbBarY      = 116;   // top of the selected category icon
+    static constexpr int kXmbCatSel    = 88;    // selected category icon edge
+    static constexpr int kXmbCatUnsel  = 56;    // unselected category icon edge
+    static constexpr int kXmbCatPitch  = 152;   // spacing between category centres
+    static constexpr int kXmbBarMidY   = kXmbBarY + kXmbCatSel / 2;  // the bar's glow line
+    static constexpr int kXmbItemY     = 348;   // centre Y of the selected entry
+    static constexpr int kXmbItemPitch = 60;    // spacing between entry centres
+    static constexpr int kXmbItemSel   = 58;    // selected entry icon edge
+    static constexpr int kXmbItemUnsel = 44;    // unselected entry icon edge
+    static constexpr int kXmbFadeStart = 306;   // entries are fully lit at/below this
+    static constexpr int kXmbFadeEnd   = 250;   // ...and fully gone at/above it
+    static constexpr int kXmbItemBottom = 600;  // last row that clears the status line
+    static constexpr int kXmbAbove     = 2;     // entries kept above the selection
+    static constexpr int kXmbBelow     = 5;     // ...and below it
 
     static SDL_Color WithAlpha(SDL_Color c, Uint8 a) { return SDL_Color{ c.r, c.g, c.b, a }; }
 
@@ -78,6 +179,10 @@ namespace sl::menu::ui {
         LoadSettings();
         LoadSysEntries();
         LoadNames();
+        ScanIconPacks();
+        LoadIconPackSetting();
+        LoadPlayCache();    // last run's play times, refreshed from pdm after frame 1
+        ShowPowerError();   // a chainload the daemon could not carry out
         // Widget loading (Lua parse + curl init) is deferred to InitDeferred so it
         // doesn't sit on the suspend->first-frame critical path.
 
@@ -169,6 +274,11 @@ namespace sl::menu::ui {
             threadClose(&m_upd_thread);
             m_upd_running = false;
         }
+        if (m_play_running) {
+            threadWaitForExit(&m_play_thread);
+            threadClose(&m_play_thread);
+            m_play_running = false;
+        }
         // Free SFX chunks before Music::Exit() closes the mixer, then stop the
         // network thread.
         m_sfx.Exit();
@@ -178,6 +288,8 @@ namespace sl::menu::ui {
         // only after the Menu is destroyed).
         m_icons.Exit();
         m_hb_icons.Exit();
+        if (m_wallpaper)   { m_gfx->FreeImage(m_wallpaper);   m_wallpaper = nullptr; }
+        if (m_wallpaper_blur) { m_gfx->FreeImage(m_wallpaper_blur); m_wallpaper_blur = nullptr; }
         for (auto &kv : m_sys_icons)
             if (kv.second) m_gfx->FreeImage(kv.second);
         m_sys_icons.clear();
@@ -202,6 +314,16 @@ namespace sl::menu::ui {
             auto title = [](const MenuItem &x, const MenuItem &y) {
                 return strcasecmp(x.name.c_str(), y.name.c_str());
             };
+            // Play-stat sorts: entries with no record (homebrew, never-launched
+            // games) keep their relative order at the bottom rather than mixing
+            // into the middle as zeroes.
+            auto by_stat = [&](const MenuItem &x, const MenuItem &y, bool recent) {
+                const play::PlayInfo *px = Play(x.app_id), *py = Play(y.app_id);
+                const u64 vx = !px ? 0 : (recent ? px->last_played : px->seconds);
+                const u64 vy = !py ? 0 : (recent ? py->last_played : py->seconds);
+                if (vx != vy) return vx > vy;
+                return title(x, y) < 0;
+            };
             switch (m_sort) {
                 case SortMode::TitleAsc:
                     std::sort(v.begin(), v.end(),
@@ -218,6 +340,14 @@ namespace sl::menu::ui {
                                   if (x.is_gamecard != y.is_gamecard) return x.is_gamecard;
                                   return title(x, y) < 0;
                               });
+                    break;
+                case SortMode::RecentlyPlayed:
+                    std::stable_sort(v.begin(), v.end(),
+                              [&](const MenuItem &x, const MenuItem &y){ return by_stat(x, y, true); });
+                    break;
+                case SortMode::MostPlayed:
+                    std::stable_sort(v.begin(), v.end(),
+                              [&](const MenuItem &x, const MenuItem &y){ return by_stat(x, y, false); });
                     break;
                 default: break;   // Default: keep the built arrangement (custom
                                   // move-order is applied to the whole list below)
@@ -270,19 +400,35 @@ namespace sl::menu::ui {
         // only reflects entries the user has actually moved; new/unlisted entries
         // sort stably to the end in their default position. Default sort only.
         if (m_sort == SortMode::Default && !m_order.empty()) {
-            auto rank = [this](const std::string &key) {
-                for (int i = 0; i < (int)m_order.size(); i++)
-                    if (m_order[i] == key) return i;
-                return (int)m_order.size() + 1;
-            };
-            std::stable_sort(m_items.begin(), m_items.end(),
-                [&](const MenuItem &x, const MenuItem &y){
-                    return rank(ItemKey(x)) < rank(ItemKey(y));
-                });
+            // Rank each entry once up front. Looking the key up inside the
+            // comparator instead (a scan of m_order per comparison, plus an
+            // ItemKey string built per comparison) made this the slowest thing
+            // in the menu on a large library.
+            std::unordered_map<std::string, int> rank_of;
+            rank_of.reserve(m_order.size());
+            for (int i = 0; i < (int)m_order.size(); i++)
+                rank_of.emplace(m_order[i], i);
+            const int unranked = (int)m_order.size() + 1;
+
+            std::vector<std::pair<int, const MenuItem *>> keyed;
+            keyed.reserve(m_items.size());
+            for (const auto &it : m_items) {
+                auto f = rank_of.find(ItemKey(it));
+                keyed.emplace_back(f == rank_of.end() ? unranked : f->second, &it);
+            }
+            std::stable_sort(keyed.begin(), keyed.end(),
+                [](const auto &x, const auto &y){ return x.first < y.first; });
+
+            std::vector<MenuItem> sorted;
+            sorted.reserve(m_items.size());
+            for (const auto &k : keyed) sorted.push_back(*k.second);
+            m_items = std::move(sorted);
         }
 
         if (m_cursor >= (int)m_items.size())
             m_cursor = m_items.empty() ? 0 : (int)m_items.size() - 1;
+
+        XmbRebuild();   // regroup the cross-media bar for the new list
     }
 
     // ---- Favourites + sorting ----------------------------------------------
@@ -391,6 +537,7 @@ namespace sl::menu::ui {
                 m_cursor = i;
                 m_scroll_pos = (float)i;
                 m_grid_scroll = (float)(i / GridColumns());
+                XmbSyncFromCursor();
                 return;
             }
     }
@@ -446,6 +593,7 @@ namespace sl::menu::ui {
                 m_cursor = i;
                 m_scroll_pos = (float)i;
                 m_grid_scroll = (float)(i / GridColumns());
+                XmbSyncFromCursor();
                 return true;
             }
         }
@@ -454,6 +602,7 @@ namespace sl::menu::ui {
 
     void Menu::SetApps(std::vector<AppEntry> apps) {
         m_apps = std::move(apps);
+        m_play_dirty = true;   // new/removed titles -> re-query their play stats
         RebuildItems();
         // Drop the cursor onto the suspended game so it's one button away. Only
         // mark it done once the jump actually lands - the game may not be in the
@@ -672,10 +821,14 @@ namespace sl::menu::ui {
         return false;
     }
 
-    // Touch input. On the keyboard a tap presses a key; in the colour picker a
-    // tap/drag moves a slider; on the home screen a long-press (1.5s) on a widget
-    // grabs it for dragging (drop on release) and a double-tap elsewhere launches
-    // the item under the finger.
+    // Touch input.
+    // - Keyboard: tap a key.
+    // - Colour picker: tap/drag an R/G/B slider.
+    // - Home screen (Main):
+    //     * touch on widget -> grab & drag to move, release to drop
+    //     * touch elsewhere + short tap -> select item under finger (or launch if already selected)
+    //     * touch elsewhere + vertical/horizontal drag beyond threshold -> scroll the list/grid/line/shelf
+    // - Submenus (Theming, Themes, etc.): tap on a row selects it.
     Menu::Action Menu::OnTouch(int phase, int x, int y, u64 &out_app_id) {
         out_app_id = 0;
         if (m_sd_removed) return Action::None;   // frozen: awaiting reboot
@@ -710,44 +863,218 @@ namespace sl::menu::ui {
             return Action::None;
         }
 
-        // home screen: a touch on a widget grabs it (never the UI); a touch
-        // elsewhere selects the item, or launches it if already selected; a touch
-        // on nothing is ignored.
-        if (m_screen != Screen::Main || m_options_open || m_dialog != Dialog::None) {
-            m_touching = false; m_drag_active = false;
+        // ---- submenus: tap to select a row ----
+        if (m_screen != Screen::Main && !m_options_open && m_dialog == Dialog::None) {
+            if (phase == 0) {
+                // Which cursor this screen drives, how many rows it has, and the
+                // scroll value its carousel is actually animating. All three have
+                // to come from the same place: a reference cannot be rebound, so
+                // the old switch assigned each screen's cursor *into* the Theming
+                // one and every submenu tap moved the Theming cursor instead.
+                int *cursor = nullptr;
+                int  rows   = 0;
+                float scroll = m_sub_scroll;   // what DrawCarousel eases
+
+                switch (m_screen) {
+                    case Screen::Theming:
+                        cursor = &m_theming_cursor;   rows = TH_Count; break;
+                    case Screen::Themes:
+                        cursor = &m_theme_cursor;     rows = m_theme.Count() + 1; break;
+                    case Screen::ThemeEditor:
+                        cursor = &m_edit_cursor;      rows = EF_Count;
+                        scroll = m_edit_scroll;       break;
+                    case Screen::Fonts:
+                        cursor = &m_font_cursor;      rows = (int)m_font_names.size(); break;
+                    case Screen::Widgets:
+                        cursor = &m_widget_cursor;    rows = m_widgets.Count(); break;
+                    case Screen::WidgetOptions:
+                        cursor = &m_widgetopt_cursor;
+                        if (widgets::IWidget *w = m_widgets.At(m_widget_sel)) rows = w->OptionCount();
+                        break;
+                    case Screen::Music:
+                        cursor = &m_music_cursor;     rows = MU_Count; break;
+                    case Screen::Homebrew:
+                        cursor = &m_hb_cursor;        rows = (int)m_hb.size(); break;
+                    case Screen::SysEntries:
+                        cursor = &m_sys_cursor;       rows = kSysEntryN; break;
+                    case Screen::Power:
+                        cursor = &m_power_cursor;     rows = (int)m_power_rows.size(); break;
+                    case Screen::Payloads:
+                        cursor = &m_payload_cursor;   rows = (int)m_payloads.size() + 1; break;
+                    default: break;   // About/Keyboard/Welcome: not a row list
+                }
+                if (!cursor || rows <= 0) return Action::None;
+
+                // The editor hides rows (ribbon settings, blur radius) so screen
+                // position maps to the visible list, not to the raw row ids.
+                const float off = (float)(y - kListCenterY) / (float)kListSpacing;
+                int target = (int)lroundf(scroll + off);
+                if (m_screen == Screen::ThemeEditor) {
+                    const Theme *c = m_theme.IsCustom(m_editing_theme)
+                                   ? &m_theme.CustomAt(m_editing_theme) : nullptr;
+                    if (!c) return Action::None;
+                    int vis[EF_Count], n = 0;
+                    for (int i = 0; i < EF_Count; i++) {
+                        if (IsRibbonRow(i) && c->background_style != BackgroundStyle_Ribbon) continue;
+                        if (i == EF_WallpaperFps && !IsVideoPath(c->wallpaper)) continue;
+                        if (IsBlurRadiusRow(i) && !c->wallpaper_blur) continue;
+                        vis[n++] = i;
+                    }
+                    if (n == 0) return Action::None;
+                    if (target < 0) target = 0;
+                    if (target >= n) target = n - 1;
+                    m_edit_cursor = vis[target];
+                    return Action::None;
+                }
+
+                if (target < 0) target = 0;
+                if (target >= rows) target = rows - 1;
+                *cursor = target;
+            }
             return Action::None;
         }
 
-        if (phase == 1) {                          // move: drag the held widget
-            if (m_drag_active)
+        // ---- home screen ----
+        if (m_screen != Screen::Main || m_options_open || m_dialog != Dialog::None) {
+            m_touching = false; m_drag_active = false;
+            m_touch_scroll_active = false;
+            return Action::None;
+        }
+
+        // move: either drag a widget or scroll the list/grid/line/shelf
+        if (phase == 1) {
+            if (m_drag_active) {
                 m_widgets.MoveBy(m_drag_widget, x - m_touch_lx, y - m_touch_ly);
+                m_touch_lx = x; m_touch_ly = y;
+                return Action::None;
+            }
+
+            // If not yet scrolling, check if the finger moved enough to start scrolling.
+            const int dx_move = x - m_touch_start_x;
+            const int dy_move = y - m_touch_start_y;
+            const int move_dist_sq = dx_move * dx_move + dy_move * dy_move;
+            constexpr int kScrollThresholdSq = 100; // ~10px threshold
+
+            if (!m_touch_scroll_active && move_dist_sq >= kScrollThresholdSq) {
+                m_touch_scroll_active = true;
+            }
+
+            // Touch scrolling: adjust scroll_pos based on drag distance.
+            if (m_touch_scroll_active) {
+                const int dx = x - m_touch_start_x;
+                const int dy = y - m_touch_start_y;
+
+                // A drag moves the content, not the cursor: the row (or column)
+                // sticks to the finger and the selection rides along with it.
+                //
+                // Every layout places its entries at
+                //     position = anchor + (index - scroll) * pitch
+                // so the scroll value has to move *against* the drag for the
+                // entries to follow it, and dividing by that same pitch is what
+                // makes the movement track the finger one-to-one. Getting the
+                // pitch wrong is as wrong as getting the sign wrong: the content
+                // slides faster or slower than the finger holding it.
+                const int last = (int)m_items.size() - 1;
+                auto dragged = [&](int delta_px, int pitch) {
+                    return m_touch_scroll_start - (float)delta_px / (float)pitch;
+                };
+                auto clamped = [](float p, int hi) {
+                    if (p < 0) p = 0;
+                    if (hi >= 0 && p > (float)hi) p = (float)hi;
+                    return p;
+                };
+
+                switch (m_ui_mode) {
+                    case UiMode::Line:      // horizontal cover carousel
+                        m_scroll_pos = clamped(dragged(dx, kLinePitch), last);
+                        m_cursor = (int)lroundf(m_scroll_pos);
+                        break;
+                    case UiMode::Shelf:     // horizontal cover row
+                        m_scroll_pos = clamped(dragged(dx, kShelfPitch), last);
+                        m_cursor = (int)lroundf(m_scroll_pos);
+                        break;
+                    case UiMode::XMB:
+                        // The open column only. Categories are changed by tapping
+                        // the bar, so a diagonal drag can never fight the column.
+                        if (m_xmb_col >= 0 && m_xmb_col < (int)m_xmb_cols.size()) {
+                            const int lastc = (int)m_xmb_cols[m_xmb_col].items.size() - 1;
+                            m_xmb_item_scroll = clamped(dragged(dy, kXmbItemPitch), lastc);
+                            m_xmb_item = (int)lroundf(m_xmb_item_scroll);
+                            XmbApplyCursor();
+                        }
+                        break;
+                    case UiMode::Grid:      // scrolls by whole rows
+                        m_grid_scroll = clamped(dragged(dy, kGridPitch),
+                                                (int)m_items.size() / GridColumns() - 1);
+                        break;
+                    default:                // List and Cover
+                        m_scroll_pos = clamped(dragged(dy, kListSpacing), last);
+                        m_cursor = (int)lroundf(m_scroll_pos);
+                        break;
+                }
+            }
+
             m_touch_lx = x; m_touch_ly = y;
             return Action::None;
         }
 
-        if (phase == 2) {                          // up: drop
+        // up: drop widget or end touch scroll, possibly launching on tap
+        if (phase == 2) {
+            bool was_widget_drag = false;
             if (m_drag_active) {
                 m_drag_active = false;
                 m_widgets.SavePositions();
+                was_widget_drag = true;
             }
+
+            // If we were scrolling, commit the cursor position.
+            bool was_scroll = m_touch_scroll_active;
+            m_touch_scroll_active = false;
+
+            if (!was_widget_drag && !was_scroll) {
+                // XMB: a tap on the bar opens that category outright.
+                if (m_ui_mode == UiMode::XMB) {
+                    const int c = XmbColAt(x, y);
+                    if (c >= 0) {
+                        if (c != m_xmb_col) {
+                            m_xmb_col = c; m_xmb_item = 0; m_xmb_item_scroll = 0.0f;
+                            XmbApplyCursor();
+                        }
+                        m_touching = false; m_touch_widget = -1;
+                        return Action::None;
+                    }
+                }
+                // Short tap: select or launch item under finger.
+                const int idx = MainItemAt(x, y);
+                if (idx >= 0 && idx < (int)m_items.size()) {
+                    if (idx == m_cursor) return OnButtonMain(Btn::A, out_app_id);
+                    m_cursor = idx;
+                    if (m_ui_mode == UiMode::XMB) XmbSyncFromCursor();
+                }
+            }
+
             m_touching = false; m_touch_widget = -1;
             return Action::None;
         }
 
-        // down
+        // down: start widget drag or prepare for touch scroll / tap
         m_touching = true;
         m_touch_lx = x; m_touch_ly = y;
+        m_touch_start_x = x; m_touch_start_y = y;
+        m_touch_scroll_start = (m_ui_mode == UiMode::Grid) ? m_grid_scroll
+                             : (m_ui_mode == UiMode::XMB)  ? m_xmb_item_scroll
+                                                           : m_scroll_pos;
+
+        // Check for widget hit first.
         m_touch_widget = m_widgets.AnyEnabled() ? m_widgets.HitTest(x, y) : -1;
-        if (m_touch_widget >= 0) {                  // grab it - drag to move, release to drop
+        if (m_touch_widget >= 0) {
             m_drag_active = true; m_drag_widget = m_touch_widget;
             return Action::None;
         }
 
-        const int idx = MainItemAt(x, y);           // select, or launch if already selected
-        if (idx >= 0 && idx < (int)m_items.size()) {
-            if (idx == m_cursor) return OnButtonMain(Btn::A, out_app_id);
-            m_cursor = idx;
-        }
+        // Not on a widget: start in "tap" mode. If the finger moves beyond a
+        // threshold before lift, we switch to scrolling.
+        m_touch_scroll_active = false;
         return Action::None;
     }
 
@@ -789,6 +1116,8 @@ namespace sl::menu::ui {
             case Screen::About:         return OnButtonAbout(b);
             case Screen::Welcome:       return OnButtonWelcome(b);
             case Screen::SysEntries:    return OnButtonSysEntries(b);
+            case Screen::Power:         return OnButtonPower(b);
+            case Screen::Payloads:      return OnButtonPayloads(b);
         }
         return Action::None;
     }
@@ -834,7 +1163,7 @@ namespace sl::menu::ui {
 
     Menu::Action Menu::OnButtonMain(Btn b, u64 &out_app_id) {
         if (m_items.empty()) {
-            if (b == Btn::Plus) return Action::OpenPower;
+            if (b == Btn::Plus) EnterPower();
             return Action::None;
         }
         // Move mode: the D-pad reorders the held entry instead of navigating.
@@ -872,6 +1201,53 @@ namespace sl::menu::ui {
             if (b == Btn::Up)    { if (m_cursor - cols >= 0) m_cursor -= cols; return Action::None; }
             if (b == Btn::R) { step(cols * 3);  return Action::None; }
             if (b == Btn::L) { step(-cols * 3); return Action::None; }
+        } else if (m_ui_mode == UiMode::XMB) {
+            // Cross-media bar: left/right rides the category bar, up/down walks
+            // the selected category's column. Both keep m_cursor pointing at the
+            // same entry, so A/X and the options overlay need no special case.
+            if (m_xmb_cols.empty()) return Action::None;
+            if (m_xmb_col < 0) XmbSyncFromCursor();
+            if (m_xmb_col < 0) { m_xmb_col = 0; m_xmb_item = 0; }
+
+            const int ncols = (int)m_xmb_cols.size();
+            const int ncur  = (int)m_xmb_cols[m_xmb_col].items.size();
+
+            // Columns clamp at the ends like the handheld's: there are only a
+            // few and they are all on screen, so wrapping would just disorient.
+            if (b == Btn::Right || b == Btn::Left) {
+                const int dir = (b == Btn::Right) ? +1 : -1;
+                const int next = m_xmb_col + dir;
+                if (next >= 0 && next < ncols) {
+                    m_xmb_col  = next;
+                    // Land on the entry you were last on in that column would be
+                    // nice, but the handheld always opens a column at the top.
+                    m_xmb_item = 0;
+                    m_xmb_item_scroll = 0.0f;
+                    XmbApplyCursor();
+                }
+                return Action::None;
+            }
+            // The column does wrap on a fresh press: a library can be hundreds
+            // of entries long and reaching the end from the top is otherwise a
+            // very long hold. Auto-repeat still stops at the ends.
+            if (b == Btn::Down) {
+                if (m_xmb_item < ncur - 1)   m_xmb_item++;
+                else if (m_nav_fresh)      { m_xmb_item = 0; m_xmb_item_scroll = 0.0f; }
+                XmbApplyCursor();
+                return Action::None;
+            }
+            if (b == Btn::Up) {
+                if (m_xmb_item > 0)          m_xmb_item--;
+                else if (m_nav_fresh)      { m_xmb_item = ncur - 1; m_xmb_item_scroll = (float)m_xmb_item; }
+                XmbApplyCursor();
+                return Action::None;
+            }
+            // Shoulders page through the column, matching the other layouts.
+            if (b == Btn::R || b == Btn::L) {
+                m_xmb_item = std::min(std::max(0, m_xmb_item + (b == Btn::R ? 5 : -5)), ncur - 1);
+                XmbApplyCursor();
+                return Action::None;
+            }
         } else if (m_ui_mode == UiMode::Line || m_ui_mode == UiMode::Cover ||
                    m_ui_mode == UiMode::Shelf) {
             if (b == Btn::Right || b == Btn::Down) { wrapNext(); return Action::None; }
@@ -894,6 +1270,8 @@ namespace sl::menu::ui {
                     if (m_suspended != 0) {
                         m_pending_launch = it.app_id;
                         m_dialog_cursor  = 1;
+                        m_dialog_title.clear();   // default "Close running application?"
+                        m_dialog_note.clear();
                         m_dialog = Dialog::ConfirmCloseForLaunch;
                         return Action::None;
                     }
@@ -906,6 +1284,8 @@ namespace sl::menu::ui {
                     if (m_suspended != 0) {
                         m_pending_launch = pick;
                         m_dialog_cursor  = 1;
+                        m_dialog_title.clear();
+                        m_dialog_note.clear();
                         m_dialog = Dialog::ConfirmCloseForLaunch;
                         return Action::None;
                     }
@@ -936,7 +1316,7 @@ namespace sl::menu::ui {
                     // Run as an application if a donor is set, else as an applet.
                     return m_hb_donor ? Action::LaunchHomebrewApp : Action::LaunchHomebrew;
                 case ItemKind::Settings:     return Action::OpenNetConnect;
-                case ItemKind::Power:        return Action::OpenPower;
+                case ItemKind::Power:        EnterPower(); return Action::None;
             }
         }
         if (b == Btn::X) {
@@ -945,7 +1325,7 @@ namespace sl::menu::ui {
             if (!m_options.empty()) m_options_open = true;
             return Action::None;
         }
-        if (b == Btn::Plus) return Action::OpenPower;
+        if (b == Btn::Plus) { EnterPower(); return Action::None; }
         return Action::None;
     }
 
@@ -979,10 +1359,12 @@ namespace sl::menu::ui {
 
     const char *Menu::SortLabel() const {
         switch (m_sort) {
-            case SortMode::TitleAsc:      return T("Title A - Z");
-            case SortMode::TitleDesc:     return T("Title Z - A");
-            case SortMode::GamecardFirst: return T("Game card first");
-            default:                      return T("Default");
+            case SortMode::TitleAsc:       return T("Title A - Z");
+            case SortMode::TitleDesc:      return T("Title Z - A");
+            case SortMode::GamecardFirst:  return T("Game card first");
+            case SortMode::RecentlyPlayed: return T("Recently played");
+            case SortMode::MostPlayed:     return T("Most played");
+            default:                       return T("Default");
         }
     }
 
@@ -1057,10 +1439,7 @@ namespace sl::menu::ui {
         }
     }
 
-    // ---- Theming submenu (appearance + widgets) ----------------------------
-    namespace { enum { TH_Themes = 0, TH_Fonts, TH_TextPos, TH_UiMode, TH_ListIcons,
-                       TH_Entries, TH_Widgets, TH_Music, TH_Welcome, TH_Updates,
-                       TH_About, TH_Back, TH_Count }; }
+    // ---- Theming submenu ---------------------------------------------------
 
     // ---- online update check (opt-out) -------------------------------------
     namespace {
@@ -1118,13 +1497,16 @@ namespace sl::menu::ui {
 
     // ---- Welcome (after setup / once per boot) -----------------------------
     namespace {
-        constexpr u64 kWelcomeMs = 4600;   // ~the opening jingle's length
+        constexpr u64 kWelcomeMs   = 4600;   // ~the opening jingle's length
+        constexpr u64 kWelcomeFade = 520;    // in at the start, out at the end
 
+        // The greeting itself is the only varying text, so the screen stays a
+        // greeting and a name rather than a greeting, a name and a slogan.
         const char *kWelcomeMsgs[] = {
-            "Remember to update your software",
-            "Your games are waiting",
-            "Thanks for using this",
-            "Have fun",
+            "Welcome home",
+            "Good to see you",
+            "Ready when you are",
+            "Let's play",
         };
         constexpr int kWelcomeMsgN = (int)(sizeof(kWelcomeMsgs) / sizeof(kWelcomeMsgs[0]));
     }
@@ -1136,23 +1518,8 @@ namespace sl::menu::ui {
     }
 
     // ---- system entry visibility -------------------------------------------
-    // The entries the user can hide. Theming is deliberately absent: it has to
-    // stay on the menu or these toggles become unreachable.
-    namespace {
-        struct SysEntry { ItemKind kind; const char *name; };
-        const SysEntry kSysEntries[] = {
-            { ItemKind::RandomGame,   "Random game"   },
-            { ItemKind::Controllers,  "Controllers"   },
-            { ItemKind::Album,        "Album"         },
-            { ItemKind::UserPage,     "User Page"     },
-            { ItemKind::WebBrowser,   "Web Browser"   },
-            { ItemKind::MiiEdit,      "Mii Edit"      },
-            { ItemKind::Settings,     "Settings"      },
-            { ItemKind::Power,        "Power"         },
-            { ItemKind::HomebrewMenu, "Homebrew menu" },
-        };
-        constexpr int kSysEntryN = (int)(sizeof(kSysEntries) / sizeof(kSysEntries[0]));
-    }
+    // kSysEntries / kSysEntryN live near the top of the file (the touch code
+    // needs the row count).
 
     bool Menu::IsSysHidden(ItemKind k) const {
         if (k == ItemKind::Theming) return false;      // never hideable
@@ -1202,6 +1569,262 @@ namespace sl::menu::ui {
         }
         DrawCarousel(labels, values, m_sys_cursor, m_sub_scroll);
         DrawHint("Up/Down: Select   B: Back");
+    }
+
+    // ---- Power screen -------------------------------------------------------
+    // The daemon is the one that can actually sleep/reboot/shut the console down,
+    // so every row here ends up as an SMI command; the menu only picks which one
+    // and asks for confirmation first.
+    namespace {
+        enum { PW_Sleep = 0, PW_Restart, PW_Shutdown, PW_Payload, PW_Back };
+
+        // Where payloads live on a normal Atmosphere/hekate card.
+        const char *kPayloadDirs[] = { "sdmc:/payloads", "sdmc:/bootloader/payloads" };
+        constexpr const char *kDefaultPayload = "sdmc:/atmosphere/reboot_payload.bin";
+    }
+
+    void Menu::ScanPayloads() {
+        if (m_payloads_scanned) return;   // cheap, but the dirs cannot change under us
+        m_payloads_scanned = true;
+        m_payloads.clear();
+        m_payload_names.clear();
+
+        std::vector<std::pair<std::string, std::string>> found;   // name, path
+        auto add = [&](std::string path, std::string name) {
+            for (auto &f : found) if (f.second == path) return;   // listed twice
+            found.emplace_back(std::move(name), std::move(path));
+        };
+
+        for (const char *dir : kPayloadDirs) {
+            DIR *d = opendir(dir);
+            if (!d) continue;
+            while (dirent *e = readdir(d)) {
+                const size_t len = strlen(e->d_name);
+                if (len < 5 || strcasecmp(e->d_name + len - 4, ".bin") != 0) continue;
+                add(std::string(dir) + "/" + e->d_name, std::string(e->d_name, len - 4));
+            }
+            closedir(d);
+        }
+        // The payload Atmosphere itself reboots into, if one is set up.
+        struct stat st;
+        if (stat(kDefaultPayload, &st) == 0 && st.st_size > 0)
+            add(kDefaultPayload, T("Default payload"));
+
+        std::sort(found.begin(), found.end(),
+                  [](const auto &a, const auto &b) {
+                      return strcasecmp(a.first.c_str(), b.first.c_str()) < 0;
+                  });
+        for (auto &f : found) {
+            m_payload_names.push_back(f.first);
+            m_payloads.push_back(f.second);
+        }
+        if (m_payload_cursor >= (int)m_payloads.size()) m_payload_cursor = 0;
+    }
+
+    void Menu::BuildPowerRows() {
+        m_power_rows.clear();
+        m_power_rows.push_back(PW_Sleep);
+        m_power_rows.push_back(PW_Restart);
+        m_power_rows.push_back(PW_Shutdown);
+        if (!m_payloads.empty()) m_power_rows.push_back(PW_Payload);  // nothing to
+        m_power_rows.push_back(PW_Back);                              // chainload -> hide
+    }
+
+    void Menu::EnterPower() {
+        ScanPayloads();
+        BuildPowerRows();
+        m_power_cursor = 0;
+        m_sub_scroll   = 0;
+        m_screen       = Screen::Power;
+    }
+
+    void Menu::AskPower(Action act, const char *prompt) {
+        m_power_confirm = act;
+        m_dialog_title  = T(prompt);
+        m_dialog_note   = (m_suspended != 0) ? T("The suspended game will be closed.") : "";
+        m_dialog_cursor = 1;      // default to No: none of this is undoable
+        m_dialog        = Dialog::ConfirmPower;
+    }
+
+    Menu::Action Menu::OnButtonPower(Btn b) {
+        if (b == Btn::B) { m_screen = Screen::Main; return Action::None; }
+        const int n = (int)m_power_rows.size();
+        if (n == 0) return Action::None;
+        if (b == Btn::Down) m_power_cursor = (m_power_cursor + 1) % n;
+        if (b == Btn::Up)   m_power_cursor = (m_power_cursor + n - 1) % n;
+        if (b != Btn::A) return Action::None;
+
+        switch (m_power_rows[m_power_cursor]) {
+            case PW_Sleep:
+                // The console wakes back into the menu, so leave the main screen up.
+                m_screen = Screen::Main;
+                return Action::PowerSleep;
+            case PW_Restart:  AskPower(Action::PowerReboot,   "Restart the console?");  break;
+            case PW_Shutdown: AskPower(Action::PowerShutdown, "Turn the console off?"); break;
+            case PW_Payload:
+                m_screen         = Screen::Payloads;
+                m_payload_cursor = 0;
+                m_sub_scroll     = 0;
+                break;
+            default: m_screen = Screen::Main; break;   // PW_Back
+        }
+        return Action::None;
+    }
+
+    void Menu::DrawPower() {
+        DrawTopBar("Power");
+        std::vector<std::string> labels, values;
+        for (int id : m_power_rows) {
+            switch (id) {
+                case PW_Sleep:    labels.push_back(T("Sleep"));     values.push_back(""); break;
+                case PW_Restart:  labels.push_back(T("Restart"));   values.push_back(""); break;
+                case PW_Shutdown: labels.push_back(T("Power off")); values.push_back(""); break;
+                case PW_Payload: {
+                    char c[32];
+                    snprintf(c, sizeof(c), "%d %s", (int)m_payloads.size(), T("found"));
+                    labels.push_back(T("Reboot to payload"));
+                    values.push_back(c);
+                    break;
+                }
+                default: labels.push_back(T("Back")); values.push_back(""); break;
+            }
+        }
+        DrawCarousel(labels, values, m_power_cursor, m_sub_scroll);
+        DrawHint("Up/Down: Select   A: Confirm   B: Back");
+    }
+
+    Menu::Action Menu::OnButtonPayloads(Btn b) {
+        if (b == Btn::B) { m_screen = Screen::Power; m_sub_scroll = (float)m_power_cursor; return Action::None; }
+        const int n = (int)m_payloads.size();
+        if (n == 0) return Action::None;
+        if (b == Btn::Down) m_payload_cursor = (m_payload_cursor + 1) % n;
+        if (b == Btn::Up)   m_payload_cursor = (m_payload_cursor + n - 1) % n;
+        if (b == Btn::A) {
+            m_payload_path = m_payloads[m_payload_cursor];
+            char prompt[128];
+            snprintf(prompt, sizeof(prompt), "%s %s?", T("Reboot to"),
+                     m_payload_names[m_payload_cursor].c_str());
+            AskPower(Action::PowerPayload, prompt);
+        }
+        return Action::None;
+    }
+
+    void Menu::DrawPayloads() {
+        DrawTopBar("Reboot to payload");
+        if (m_payloads.empty()) {
+            const Theme &t = m_theme.Current();
+            m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim,
+                                T("No payloads found in sdmc:/payloads"));
+            DrawHint("B: Back");
+            return;
+        }
+        std::vector<std::string> values(m_payload_names.size());
+        DrawCarousel(m_payload_names, values, m_payload_cursor, m_sub_scroll);
+        DrawHint("Up/Down: Select   A: Reboot into it   B: Back");
+    }
+
+    // A chainload the daemon could not carry out leaves its reason on the SD;
+    // show it once on the next menu start, then drop it.
+    void Menu::ShowPowerError() {
+        FILE *fp = fopen(sl::smi::PowerErrorPath, "r");
+        if (!fp) return;
+        char line[160] = {};
+        if (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (line[0]) SetStatus(line);
+        }
+        fclose(fp);
+        remove(sl::smi::PowerErrorPath);
+    }
+
+    // ---- Play statistics ----------------------------------------------------
+    // Last run's numbers, kept next to the app-list cache. Without them a
+    // play-ordered menu would come up title-ordered and visibly reshuffle a few
+    // frames later, when the pdm worker lands.
+    namespace { constexpr const char *kPlayCachePath = "sdmc:/slaunch/cache/playstats.txt"; }
+
+    void Menu::LoadPlayCache() {
+        FILE *fp = fopen(kPlayCachePath, "r");
+        if (!fp) return;
+        char line[96];
+        while (fgets(line, sizeof(line), fp)) {
+            unsigned long long id = 0, secs = 0, last = 0;
+            unsigned launches = 0;
+            if (sscanf(line, "%llX=%llu,%llu,%u", &id, &secs, &last, &launches) != 4) continue;
+            if (id == 0) continue;
+            play::PlayInfo pi;
+            pi.seconds     = secs;
+            pi.last_played = last;
+            pi.launches    = launches;
+            m_play[id] = pi;
+        }
+        fclose(fp);
+    }
+
+    void Menu::SavePlayCache() const {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/cache", 0777);
+        FILE *fp = fopen(kPlayCachePath, "w");
+        if (!fp) return;
+        for (auto &kv : m_play)
+            fprintf(fp, "%016llX=%llu,%llu,%u\n", (unsigned long long)kv.first,
+                    (unsigned long long)kv.second.seconds,
+                    (unsigned long long)kv.second.last_played, kv.second.launches);
+        fclose(fp);
+    }
+
+    const play::PlayInfo *Menu::Play(u64 app_id) const {
+        if (app_id == 0) return nullptr;          // homebrew / system entries
+        auto it = m_play.find(app_id);
+        return (it == m_play.end()) ? nullptr : &it->second;
+    }
+
+    void Menu::PlayStatsTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        play::Query(m->m_play_ids, m->m_play_result);
+        m->m_play_done.store(true, std::memory_order_release);
+    }
+
+    void Menu::StartPlayStats() {
+        if (m_play_running || m_apps.empty()) return;
+        m_play_ids.clear();
+        m_play_ids.reserve(m_apps.size());
+        for (auto &a : m_apps) m_play_ids.push_back(a.app_id);
+        m_play_result.clear();
+        m_play_dirty = false;
+        m_play_done.store(false, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_play_thread, &Menu::PlayStatsTrampoline, this,
+                                     nullptr, 0x8000, 0x3B, -2))) {
+            threadStart(&m_play_thread);
+            m_play_running = true;
+        }
+    }
+
+    void Menu::PollPlayStats() {
+        if (!m_play_running) {
+            // Only after the first frame: play stats are background information and
+            // must never hold up the menu appearing.
+            if (m_deferred_done && m_play_dirty) StartPlayStats();
+            return;
+        }
+        if (!m_play_done.load(std::memory_order_acquire)) return;
+        threadWaitForExit(&m_play_thread);
+        threadClose(&m_play_thread);
+        m_play_running = false;
+
+        for (size_t i = 0; i < m_play_ids.size() && i < m_play_result.size(); i++)
+            m_play[m_play_ids[i]] = m_play_result[i];
+        m_play_result.clear();
+        SavePlayCache();   // next menu start has these on its first frame
+
+        // The numbers just changed (a game was played since we last looked), so
+        // redo the play-based sorts, keeping the cursor on the same entry.
+        if (m_sort == SortMode::RecentlyPlayed || m_sort == SortMode::MostPlayed) {
+            const std::string key = m_items.empty() ? std::string()
+                                                    : ItemKey(m_items[m_cursor]);
+            RebuildItems();
+            if (!key.empty()) SelectByKey(key);
+        }
     }
 
     // ---- Random game roll ---------------------------------------------------
@@ -1270,26 +1893,44 @@ namespace sl::menu::ui {
         return Action::None;
     }
 
+    // Two lines and a rule, centred on the screen: a greeting, the user's name,
+    // and a hairline that draws itself outward underneath. Everything shares one
+    // fade so the screen arrives and leaves as a single object instead of a
+    // stack of separately animated parts.
     void Menu::DrawWelcome() {
         const Theme &t = m_theme.Current();
         const int cx = gfx::Gfx::Width / 2;
+        const int cy = gfx::Gfx::Height / 2;
 
-        // Ease in over the first ~600ms so it doesn't pop.
         const u64 freq = armGetSystemTickFreq();
         const u64 ms   = (armGetSystemTick() - m_welcome_start) * 1000 / freq;
-        float in = ms < 600 ? (float)ms / 600.0f : 1.0f;
-        if (in < 0.0f) in = 0.0f;
-        const Uint8 a = (Uint8)(in * 255.0f);
 
-        m_gfx->TextCentered(FontSize::Normal, cx, 250, WithAlpha(t.dim, a), T("Welcome home "));
+        // Fade in, hold, fade out. Without the tail the screen used to cut
+        // straight to the menu the instant the timer expired.
+        float k = 1.0f;
+        if (ms < kWelcomeFade)                    k = (float)ms / (float)kWelcomeFade;
+        else if (ms > kWelcomeMs - kWelcomeFade)  k = (float)(kWelcomeMs - ms) / (float)kWelcomeFade;
+        if (k < 0.0f) k = 0.0f;
+        if (k > 1.0f) k = 1.0f;
+        const Uint8 a = (Uint8)(k * 255.0f);
 
-        if (m_nickname[0])
-            m_gfx->TextCentered(FontSize::Title, cx, 300, WithAlpha(t.title, a), m_nickname);
+        // Ease the rise so the text settles rather than sliding linearly.
+        const float ease = 1.0f - (1.0f - k) * (1.0f - k);
+        const int   rise = (int)((1.0f - ease) * 16.0f);
 
-        const int lw = (int)(240 * in);
-        m_gfx->FillRect(cx - lw / 2, 400, lw, 3, WithAlpha(t.accent, a));
-        m_gfx->TextCentered(FontSize::Small, cx, 436, WithAlpha(t.dim, a),
-                            T(kWelcomeMsgs[m_welcome_msg % kWelcomeMsgN]));
+        const char *greet = T(kWelcomeMsgs[m_welcome_msg % kWelcomeMsgN]);
+        const bool  named = (m_nickname[0] != '\0');
+
+        if (named) {
+            m_gfx->TextCentered(FontSize::Small, cx, cy - 74 + rise, WithAlpha(t.dim, a), greet);
+            m_gfx->TextCentered(FontSize::Title, cx, cy - 38 + rise, WithAlpha(t.title, a), m_nickname);
+        } else {
+            // No account name to show, so the greeting carries the screen alone.
+            m_gfx->TextCentered(FontSize::Title, cx, cy - 38 + rise, WithAlpha(t.title, a), greet);
+        }
+
+        const int lw = (int)(200.0f * ease);
+        m_gfx->FillRect(cx - lw / 2, cy + 40, lw, 2, WithAlpha(t.accent, a));
     }
 
     // ---- About + changelog -------------------------------------------------
@@ -1297,6 +1938,14 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         const LogLine kChangelog[] = {
+            { true,  "v0.8.0" },
+            { false, "XMB mode - the PSP cross-media bar, with touch" },
+            { false, "Closing a homebrew returns to the menu instead of relaunching it" },
+            { false, "Reboot and shutdown fixed (no more half-asleep console)" },
+            { false, "Icon packs (Theming > Icon pack) + bundled Minimal pack" },
+            { false, "Translations: Russian, Japanese, German, Spanish, Chinese" },
+            { false, "Korean/Chinese consoles now use their own system font" },
+            { false, "Theme colour for the icon background; drag scrolls the content" },
             { true,  "v0.7.0" },
             { false, "Welcome screen that greets you by name on boot and after setup" },
             { false, "Show or hide any system entry (Theming > Menu entries)" },
@@ -1379,16 +2028,6 @@ namespace sl::menu::ui {
     }
 
     Menu::Action Menu::OnButtonTheming(Btn b) {
-        auto cycleAlign = [&](int dir) {
-            m_align = (TextAlign)(((int)m_align + dir + 3) % 3);
-            SaveSettings();
-        };
-        auto cycleUiMode = [&](int dir) {
-            const int n = (int)UiMode::Count;
-            m_ui_mode = (UiMode)(((int)m_ui_mode + dir + n) % n);
-            m_grid_hl_x = -1.0f; // re-prime the grid animation on (re)entry
-            SaveSettings();
-        };
         auto openWidgets = [&]() {
             m_screen = Screen::Widgets;
             m_widget_cursor = 0;
@@ -1396,37 +2035,57 @@ namespace sl::menu::ui {
         };
         if (b == Btn::Down) m_theming_cursor = (m_theming_cursor + 1) % TH_Count;
         if (b == Btn::Up)   m_theming_cursor = (m_theming_cursor + TH_Count - 1) % TH_Count;
-        if (m_theming_cursor == TH_TextPos) {
-            if (b == Btn::Right) cycleAlign(+1);
-            if (b == Btn::Left)  cycleAlign(-1);
-        }
-        if (m_theming_cursor == TH_UiMode) {
-            if (b == Btn::Right) cycleUiMode(+1);
-            if (b == Btn::Left)  cycleUiMode(-1);
-        }
+        auto cycleUiMode = [&]() {
+            const int dir = (b == Btn::Right) ? +1 : -1;
+            const int n = (int)UiMode::Count;
+            m_ui_mode = (UiMode)(((int)m_ui_mode + dir + n) % n);
+            // A deliberate switch into XMB keeps the entry you were on, rather
+            // than resetting the bar to its Games default.
+            XmbSyncFromCursor(); m_xmb_placed = true;
+            SaveSettings();
+        };
+        auto cycleAlign = [&]() {
+            const int dir = (b == Btn::Right) ? +1 : -1;
+            m_align = (TextAlign)(((int)m_align + dir + 3) % 3);
+            SaveSettings();
+        };
         auto toggleListIcons = [&]() { m_list_icons = !m_list_icons; SaveSettings(); };
-        if (m_theming_cursor == TH_ListIcons && (b == Btn::Left || b == Btn::Right))
-            toggleListIcons();
+        // Index 0 is the built-in set; 1.. are the folders found under
+        // sdmc:/slaunch/icon_packs. Switching drops the cached textures so the
+        // new art shows up on the next frame.
+        auto cycleIconPack = [&](int dir) {
+            const int n = (int)m_icon_packs.size() + 1;
+            m_icon_pack_idx = (m_icon_pack_idx + dir + n) % n;
+            InvalidateSysIcons();
+            SaveIconPackSetting();
+        };
         auto toggleUpdates = [&]() { m_check_updates = !m_check_updates; SaveSettings(); };
         if (m_theming_cursor == TH_Updates && (b == Btn::Left || b == Btn::Right))
             toggleUpdates();
         auto toggleWelcome = [&]() { m_welcome_enabled = !m_welcome_enabled; SaveSettings(); };
         if (m_theming_cursor == TH_Welcome && (b == Btn::Left || b == Btn::Right))
             toggleWelcome();
+        if (m_theming_cursor == TH_UiMode && (b == Btn::Left || b == Btn::Right))
+            cycleUiMode();
+        if (m_theming_cursor == TH_TextPos && (b == Btn::Left || b == Btn::Right))
+            cycleAlign();
+        if (m_theming_cursor == TH_ListIcons && (b == Btn::Left || b == Btn::Right))
+            toggleListIcons();
+        if (m_theming_cursor == TH_IconPack && (b == Btn::Left || b == Btn::Right))
+            cycleIconPack(b == Btn::Right ? +1 : -1);
         if (b == Btn::A) {
             switch (m_theming_cursor) {
-                case TH_Themes:  m_screen = Screen::Themes; m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
-                case TH_Fonts:   m_screen = Screen::Fonts;  m_font_cursor = m_font_applied; m_sub_scroll = m_font_cursor; break;
-                case TH_TextPos: cycleAlign(+1); break;
-                case TH_UiMode:  cycleUiMode(+1); break;
-                case TH_ListIcons: toggleListIcons(); break;
-                case TH_Entries: m_screen = Screen::SysEntries; m_sys_cursor = 0; m_sub_scroll = 0; break;
-                case TH_Widgets: openWidgets(); break;
-                case TH_Music:   m_screen = Screen::Music; m_music_cursor = 0; m_sub_scroll = 0; break;
-                case TH_Welcome: toggleWelcome(); break;
-                case TH_Updates: toggleUpdates(); break;
-                case TH_About:   m_screen = Screen::About; m_about_scroll = 0; break;
-                case TH_Back:    m_screen = Screen::Main; break;
+                case TH_Themes:      m_screen = Screen::Themes;       m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
+                case TH_Fonts:       m_screen = Screen::Fonts;        m_font_cursor = m_font_applied; m_sub_scroll = m_font_cursor; break;
+                case TH_Music:       m_screen = Screen::Music;        m_music_cursor = 0; m_sub_scroll = 0; break;
+                case TH_Widgets:     openWidgets(); break;
+                case TH_Entries:     m_screen = Screen::SysEntries;   m_sys_cursor = 0; m_sub_scroll = 0; break;
+                case TH_IconPack:    cycleIconPack(+1); break;
+                case TH_Welcome:     toggleWelcome(); break;
+                case TH_Updates:     toggleUpdates(); break;
+                case TH_About:       m_screen = Screen::About;        m_about_scroll = 0; break;
+                case TH_Back:        m_screen = Screen::Main; break;
+                default: break; // UI mode / text pos / list icons: left/right already handles them
             }
         }
         if (b == Btn::B) m_screen = Screen::Main;
@@ -1525,13 +2184,9 @@ namespace sl::menu::ui {
         return Action::None;
     }
 
-    // Theme-editor rows: a background selector, six Color slots, then rename /
-    // save / delete.
+    // Theme-editor rows (EF_*) and their visibility predicates live near the top
+    // of the file; the touch code needs them. This is just the colour lookup.
     namespace {
-        enum { EF_Background = 0, EF_Top, EF_Bottom, EF_Text,
-               EF_Accent, EF_Secondary, EF_Title, EF_Rename, EF_Save, EF_Delete, EF_Count };
-    }
-
     static SDL_Color *EditorColor(Theme &c, int row) {
         switch (row) {
             case EF_Top:       return &c.bg_top;
@@ -1540,8 +2195,10 @@ namespace sl::menu::ui {
             case EF_Accent:    return &c.accent;
             case EF_Secondary: return &c.dim;
             case EF_Title:     return &c.title;
+            case EF_IconBg:    return &c.icon_bg;
             default:           return nullptr;
         }
+    }
     }
 
     void Menu::ScanWallpapers() {
@@ -1567,22 +2224,83 @@ namespace sl::menu::ui {
         }
     }
 
+    // ---- Icon packs --------------------------------------------------------
+    // Discover user icon packs: each subdirectory of sdmc:/slaunch/icon_packs/
+    // is treated as a pack. The pack name is the directory name.
+    void Menu::ScanIconPacks() {
+        m_icon_packs.clear();
+        DIR *d = opendir("sdmc:/slaunch/icon_packs");
+        if (!d) return;
+        struct dirent *e;
+        while ((e = readdir(d)) != nullptr) {
+            if (e->d_type == DT_DIR && e->d_name[0] != '.') {
+                m_icon_packs.push_back(e->d_name);
+            }
+        }
+        closedir(d);
+        std::sort(m_icon_packs.begin(), m_icon_packs.end());
+    }
+
+    void Menu::LoadIconPackSetting() {
+        FILE *fp = fopen("sdmc:/slaunch/config/icon_pack.txt", "r");
+        if (!fp) return;
+        char line[64];
+        while (fgets(line, sizeof(line), fp)) {
+            int v = 0;
+            if (sscanf(line, "icon_pack=%d", &v) == 1)
+                m_icon_pack_idx = v;
+        }
+        fclose(fp);
+        // Clamp to valid range (0 = built-in, 1..N = packs)
+        const int max_idx = (int)m_icon_packs.size();
+        if (m_icon_pack_idx < 0) m_icon_pack_idx = 0;
+        if (m_icon_pack_idx > max_idx) m_icon_pack_idx = 0;
+    }
+
+    void Menu::SaveIconPackSetting() {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/config", 0777);
+        FILE *fp = fopen("sdmc:/slaunch/config/icon_pack.txt", "w");
+        if (!fp) return;
+        fprintf(fp, "icon_pack=%d\n", m_icon_pack_idx);
+        fclose(fp);
+    }
+
     void Menu::CycleBackground(int dir) {
         if (!m_theme.IsCustom(m_editing_theme)) return;
         Theme &c = m_theme.CustomAt(m_editing_theme);
-        const int n = (int)m_wallpapers.size();       // option 0 = Gradient
-        int cur = 0;
-        for (int i = 0; i < n; i++)
-            if (m_wallpapers[i] == c.wallpaper) { cur = i + 1; break; }
-        cur = (cur + dir + (n + 1)) % (n + 1);
-        if (cur == 0) c.wallpaper[0] = '\0';
-        else {
-            strncpy(c.wallpaper, m_wallpapers[cur - 1].c_str(), sizeof(c.wallpaper) - 1);
+        const int maxStyle = 2; // Gradient <-> Ribbon
+        c.background_style = (c.background_style + dir + maxStyle) % maxStyle;
+        m_theme.Select(m_editing_theme);
+        m_theme_cursor    = m_editing_theme;
+        m_wallpaper_theme = -1;
+    }
+
+    // Cycle the optional photo overlay (independent of background style).
+    // Rotates: empty -> first wallpaper -> next wallpaper -> ... -> empty.
+    void Menu::CycleWallpaper(int dir) {
+        if (!m_theme.IsCustom(m_editing_theme)) return;
+        Theme &c = m_theme.CustomAt(m_editing_theme);
+        if (m_wallpapers.empty()) {
+            c.wallpaper[0] = '\0';
+            return;
+        }
+        // Find current index (or -1 if empty).
+        int idx = -1;
+        for (int i = 0; i < (int)m_wallpapers.size(); i++) {
+            if (m_wallpapers[i] == c.wallpaper) { idx = i; break; }
+        }
+        int n = (int)m_wallpapers.size() + 1; // +1 for the empty slot
+        idx = (idx + 1 + dir + n) % n;        // +1 because idx=-1 maps to slot 0
+        if (idx == 0) {
+            c.wallpaper[0] = '\0';
+        } else {
+            strncpy(c.wallpaper, m_wallpapers[idx - 1].c_str(), sizeof(c.wallpaper) - 1);
             c.wallpaper[sizeof(c.wallpaper) - 1] = '\0';
         }
         m_theme.Select(m_editing_theme);
         m_theme_cursor    = m_editing_theme;
-        m_wallpaper_theme = -1; // force the wallpaper cache to reload
+        m_wallpaper_theme = -1;
     }
 
     void Menu::OpenColorPicker(SDL_Color *target) {
@@ -1596,12 +2314,90 @@ namespace sl::menu::ui {
         if (!m_theme.IsCustom(m_editing_theme)) { m_screen = Screen::Themes; return Action::None; }
         Theme &c = m_theme.CustomAt(m_editing_theme);
 
-        if (b == Btn::Down) m_edit_cursor = (m_edit_cursor + 1) % EF_Count;
-        if (b == Btn::Up)   m_edit_cursor = (m_edit_cursor + EF_Count - 1) % EF_Count;
+        if (b == Btn::Down) {
+            m_edit_cursor = (m_edit_cursor + 1) % EF_Count;
+            auto skipHidden = [&](int &cursor, int dir) {
+                while (IsRibbonRow(cursor) && c.background_style != BackgroundStyle_Ribbon) {
+                    cursor = (cursor + dir + EF_Count) % EF_Count;
+                }
+                while (cursor == EF_WallpaperFps && !IsVideoPath(c.wallpaper)) {
+                    cursor = (cursor + dir + EF_Count) % EF_Count;
+                }
+                while (IsBlurRadiusRow(cursor) && !c.wallpaper_blur) {
+                    cursor = (cursor + dir + EF_Count) % EF_Count;
+                }
+            };
+            skipHidden(m_edit_cursor, +1);
+        }
+        if (b == Btn::Up) {
+            m_edit_cursor = (m_edit_cursor + EF_Count - 1) % EF_Count;
+            auto skipHidden = [&](int &cursor, int dir) {
+                while (IsRibbonRow(cursor) && c.background_style != BackgroundStyle_Ribbon) {
+                    cursor = (cursor + dir + EF_Count) % EF_Count;
+                }
+                while (cursor == EF_WallpaperFps && !IsVideoPath(c.wallpaper)) {
+                    cursor = (cursor + dir + EF_Count) % EF_Count;
+                }
+                while (IsBlurRadiusRow(cursor) && !c.wallpaper_blur) {
+                    cursor = (cursor + dir + EF_Count) % EF_Count;
+                }
+            };
+            skipHidden(m_edit_cursor, -1);
+        }
 
         if (m_edit_cursor == EF_Background) {
             if (b == Btn::Right) CycleBackground(+1);
             if (b == Btn::Left)  CycleBackground(-1);
+        }
+        if (m_edit_cursor == EF_Wallpaper) {
+            if (b == Btn::Right) CycleWallpaper(+1);
+            if (b == Btn::Left)  CycleWallpaper(-1);
+        }
+        // Toggle individual effects with left/right/A.
+        if (m_edit_cursor == EF_WallpaperDim) {
+            if (b == Btn::Right || b == Btn::Left || b == Btn::A) c.wallpaper_dim = !c.wallpaper_dim;
+        }
+        if (m_edit_cursor == EF_WallpaperBlur) {
+            if (b == Btn::Right || b == Btn::Left || b == Btn::A) c.wallpaper_blur = !c.wallpaper_blur;
+        }
+        if (m_edit_cursor == EF_WallpaperBlurRadius) {
+            if (b == Btn::Right) c.wallpaper_blur_radius = (c.wallpaper_blur_radius < 32) ? c.wallpaper_blur_radius + 2 : 2;
+            if (b == Btn::Left)  c.wallpaper_blur_radius = (c.wallpaper_blur_radius >  2) ? c.wallpaper_blur_radius - 2 : 32;
+        }
+        if (m_edit_cursor == EF_WallpaperSnow) {
+            if (b == Btn::Right || b == Btn::Left || b == Btn::A) c.wallpaper_snow = !c.wallpaper_snow;
+        }
+        if (m_edit_cursor == EF_WallpaperFps) {
+            if (b == Btn::Right) c.wallpaper_fps = (c.wallpaper_fps < 30) ? c.wallpaper_fps + 1 : 1;
+            if (b == Btn::Left)  c.wallpaper_fps = (c.wallpaper_fps >  1) ? c.wallpaper_fps - 1 : 30;
+        }
+
+        // Adjust ribbon parameters with left/right.
+        if (c.background_style == BackgroundStyle_Ribbon) {
+            if (m_edit_cursor == EF_RibbonLines) {
+                if (b == Btn::Right) c.ribbon_line_count  = (c.ribbon_line_count  < 40) ? c.ribbon_line_count  + 1 : 1;
+                if (b == Btn::Left)  c.ribbon_line_count  = (c.ribbon_line_count  >  1) ? c.ribbon_line_count  - 1 : 40;
+            }
+            if (m_edit_cursor == EF_RibbonThickness) {
+                if (b == Btn::Right) c.ribbon_thickness   = (c.ribbon_thickness   < 20) ? c.ribbon_thickness   + 1 : 1;
+                if (b == Btn::Left)  c.ribbon_thickness   = (c.ribbon_thickness   >  1) ? c.ribbon_thickness   - 1 : 20;
+            }
+            if (m_edit_cursor == EF_RibbonAmplitude) {
+                if (b == Btn::Right) c.ribbon_amplitude   = (c.ribbon_amplitude   < 60) ? c.ribbon_amplitude   + 1 : 5;
+                if (b == Btn::Left)  c.ribbon_amplitude   = (c.ribbon_amplitude   >  5) ? c.ribbon_amplitude   - 1 : 60;
+            }
+            if (m_edit_cursor == EF_RibbonSeed) {
+                if (b == Btn::Right) c.ribbon_seed = (c.ribbon_seed < 99) ? c.ribbon_seed + 1 : 0;
+                if (b == Btn::Left)  c.ribbon_seed = (c.ribbon_seed >  0) ? c.ribbon_seed - 1 : 99;
+            }
+            if (m_edit_cursor == EF_RibbonLayers) {
+                if (b == Btn::Right) c.ribbon_layers = (c.ribbon_layers < 4) ? c.ribbon_layers + 1 : 1;
+                if (b == Btn::Left)  c.ribbon_layers = (c.ribbon_layers > 1) ? c.ribbon_layers - 1 : 4;
+            }
+            if (m_edit_cursor == EF_RibbonYCenter) {
+                if (b == Btn::Right) c.ribbon_y_center = (c.ribbon_y_center < 680) ? c.ribbon_y_center + 10 : 40;
+                if (b == Btn::Left)  c.ribbon_y_center = (c.ribbon_y_center >  40) ? c.ribbon_y_center - 10 : 680;
+            }
         }
 
         if (b == Btn::A) {
@@ -1691,8 +2487,11 @@ namespace sl::menu::ui {
                 const char *name = e->d_name;
                 size_t len = strlen(name);
                 if (len < 5) continue;
+                // .ttc is a TrueType collection; FreeType opens face 0, which is
+                // what the bundled CJK font wants.
                 const char *ext = name + len - 4;
-                if (strcasecmp(ext, ".ttf") != 0 && strcasecmp(ext, ".otf") != 0) continue;
+                if (strcasecmp(ext, ".ttf") != 0 && strcasecmp(ext, ".otf") != 0 &&
+                    strcasecmp(ext, ".ttc") != 0) continue;
 
                 std::string display(name, len - 4); // strip extension
                 std::string path = std::string("sdmc:/slaunch/fonts/") + name;
@@ -1762,37 +2561,368 @@ namespace sl::menu::ui {
             bool yes = (m_dialog_cursor == 0);
             Dialog which = m_dialog;
             m_dialog = Dialog::None;
-            if (!yes) { m_pending_launch = 0; return Action::None; }
+            if (!yes) { m_pending_launch = 0; m_power_confirm = Action::None; return Action::None; }
             if (which == Dialog::ConfirmCloseForLaunch) {
                 out_app_id = m_pending_launch;
                 m_pending_launch = 0;
                 return Action::LaunchApp;
             }
             if (which == Dialog::ConfirmCloseGame) return Action::TerminateApp;
+            if (which == Dialog::ConfirmPower) {
+                const Action act = m_power_confirm;
+                m_power_confirm  = Action::None;
+                return act;
+            }
         }
         return Action::None;
+    }
+
+    // =========================================================================
+    // CPU Gaussian blur -- reads an image file as SDL_Surface (CPU memory),
+    // applies a separable Gaussian convolution, uploads the result as a
+    // new texture.
+    //
+    // sigma is derived from wallpaper_blur_radius (2-32) as sigma = radius/2
+    // so sigma in [1 .. 16].  Kernel half-width = ceil(3*sigma) which covers
+    // +/-3sigma of the distribution.  The kernel is normalised to 2^16 so we use
+    // fixed-point arithmetic and shift right by 16 at the end -- no float
+    // math needed in the inner loop.
+    SDL_Texture *Menu::BlurImage(const char *path) {
+        if (!path) return nullptr;
+
+        // Load as SDL_Surface -- always CPU-accessible, unlike SDL_Texture.
+        SDL_Surface *surface = IMG_Load(path);
+        if (!surface) return nullptr;
+
+        int sw = surface->w;
+        int sh = surface->h;
+
+        const Theme &t = m_theme.Current();
+        int radius = t.wallpaper_blur_radius;
+        if (radius < 2)  radius = 2;
+        if (radius > 32) radius = 32;
+        float sigma = radius / 2.0f;  // 1 .. 16
+
+        // ---- Build Gaussian kernel (fixed-point, Q16) ----
+        int half = (int)lroundf(3.0f * sigma) + 1;  // +/-3sigma coverage
+        if (half < 1) half = 1;
+        const int kernel_size = 2 * half + 1;
+        std::vector<uint16_t> kernel(kernel_size);
+        double sum = 0;
+        for (int i = -half; i <= half; i++) {
+            double w = exp(-0.5 * i * i / (sigma * sigma));
+            kernel[i + half] = (uint16_t)(w * 65536.0 + 0.5);
+            sum += w;
+        }
+        // Normalise so weights sum to 65536 (= 1.0 in Q16)
+        for (int i = 0; i < kernel_size; i++)
+            kernel[i] = (uint16_t)(kernel[i] * 65536.0 / sum + 0.5);
+
+        // ---- Convert surface to RGBA8888 buffer ----
+        const int np = sw * sh;
+        std::vector<uint8_t> rgba(np * 4);
+        {
+            SDL_Surface *conv = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA8888, 0);
+            if (conv) {
+                memcpy(rgba.data(), conv->pixels, (size_t)np * 4);
+                SDL_FreeSurface(conv);
+            } else {
+                // Fallback: manual pixel copy (may be wrong channel order)
+                memcpy(rgba.data(), surface->pixels, (size_t)sh * surface->pitch);
+            }
+        }
+        SDL_FreeSurface(surface);
+
+        // ---- Separable Gaussian convolution ----
+        std::vector<uint8_t> tmp(np * 4);
+
+        // Horizontal pass: rgba -> tmp
+        for (int y = 0; y < sh; y++) {
+            for (int x = 0; x < sw; x++) {
+                uint32_t acc[4] = {0};
+                for (int k = -half; k <= half; k++) {
+                    int sx = x + k;
+                    if (sx < 0) sx = 0;
+                    if (sx >= sw) sx = sw - 1;
+                    uint16_t w = kernel[k + half];
+                    const uint8_t *px = &rgba[(y * sw + sx) * 4];
+                    acc[0] += px[0] * w;
+                    acc[1] += px[1] * w;
+                    acc[2] += px[2] * w;
+                    acc[3] += px[3] * w;
+                }
+                uint8_t *dst = &tmp[(y * sw + x) * 4];
+                dst[0] = (uint8_t)(acc[0] >> 16);
+                dst[1] = (uint8_t)(acc[1] >> 16);
+                dst[2] = (uint8_t)(acc[2] >> 16);
+                dst[3] = (uint8_t)(acc[3] >> 16);
+            }
+        }
+
+        // Vertical pass: tmp -> rgba
+        for (int y = 0; y < sh; y++) {
+            for (int x = 0; x < sw; x++) {
+                uint32_t acc[4] = {0};
+                for (int k = -half; k <= half; k++) {
+                    int sy = y + k;
+                    if (sy < 0) sy = 0;
+                    if (sy >= sh) sy = sh - 1;
+                    uint16_t w = kernel[k + half];
+                    const uint8_t *px = &tmp[(sy * sw + x) * 4];
+                    acc[0] += px[0] * w;
+                    acc[1] += px[1] * w;
+                    acc[2] += px[2] * w;
+                    acc[3] += px[3] * w;
+                }
+                uint8_t *dst = &rgba[(y * sw + x) * 4];
+                dst[0] = (uint8_t)(acc[0] >> 16);
+                dst[1] = (uint8_t)(acc[1] >> 16);
+                dst[2] = (uint8_t)(acc[2] >> 16);
+                dst[3] = (uint8_t)(acc[3] >> 16);
+            }
+        }
+
+        // ---- Upload result ----
+        SDL_Renderer *rend = m_gfx->Renderer();
+        SDL_Texture *dst = SDL_CreateTexture(rend, SDL_PIXELFORMAT_RGBA8888,
+                                             SDL_TEXTUREACCESS_STATIC, sw, sh);
+        if (!dst) return nullptr;
+        SDL_UpdateTexture(dst, nullptr, rgba.data(), sw * 4);
+        SDL_SetTextureBlendMode(dst, SDL_BLENDMODE_BLEND);
+        return dst;
     }
 
     // =========================================================================
     // Rendering
     void Menu::EnsureWallpaper() {
         int idx = m_theme.CurrentIndex();
-        if (idx == m_wallpaper_theme) return;
-        if (m_wallpaper) { m_gfx->FreeImage(m_wallpaper); m_wallpaper = nullptr; }
         const Theme &t = m_theme.Current();
-        if (g_sd_ok && t.wallpaper[0])
-            m_wallpaper = m_gfx->LoadImage(t.wallpaper); // nullptr if file missing
-        m_wallpaper_theme = idx;
+
+        auto reloadBlur = [&]() {
+            if (m_wallpaper_blur) { m_gfx->FreeImage(m_wallpaper_blur); m_wallpaper_blur = nullptr; }
+            if (t.wallpaper_blur && !m_wallpaper_path.empty())
+                m_wallpaper_blur = BlurImage(m_wallpaper_path.c_str());
+        };
+
+        // Check if wallpaper path changed -> reload
+        if (idx != m_wallpaper_theme) {
+            if (m_wallpaper) { m_gfx->FreeImage(m_wallpaper); m_wallpaper = nullptr; }
+            if (m_wallpaper_blur) { m_gfx->FreeImage(m_wallpaper_blur); m_wallpaper_blur = nullptr; }
+            m_wallpaper_path.clear();
+            m_wallpaper_theme = idx;
+            m_video_frames.clear();
+            m_video_frame_idx = 0;
+            m_video_frame_tick = 0;
+
+            if (g_sd_ok && t.wallpaper[0]) {
+                // Check if it's a directory (video frame sequence)
+                struct stat st;
+                if (stat(t.wallpaper, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    DIR *d = opendir(t.wallpaper);
+                    if (d) {
+                        struct dirent *e;
+                        while ((e = readdir(d)) != nullptr) {
+                            const char *name = e->d_name;
+                            size_t len = strlen(name);
+                            if (len < 5) continue;
+                            const char *e4 = name + len - 4;
+                            const char *e5 = len >= 5 ? name + len - 5 : "";
+                            if (strcasecmp(e4, ".jpg") == 0 || strcasecmp(e4, ".png") == 0 ||
+                                strcasecmp(e4, ".bmp") == 0 || strcasecmp(e5, ".jpeg") == 0)
+                                m_video_frames.push_back(std::string(t.wallpaper) + "/" + name);
+                        }
+                        closedir(d);
+                        std::sort(m_video_frames.begin(), m_video_frames.end());
+                    }
+                }
+                // If not a directory or directory was empty, load as single image
+                if (m_video_frames.empty()) {
+                    m_wallpaper_path = t.wallpaper;
+                    m_wallpaper = m_gfx->LoadImage(t.wallpaper);
+                } else {
+                    m_wallpaper_path = m_video_frames[0];
+                    m_wallpaper = m_gfx->LoadImage(m_video_frames[0].c_str());
+                }
+                reloadBlur();
+            }
+        } else {
+            // Same theme - advance video frame if configured
+            if (!m_video_frames.empty()) {
+                const u64 now = armGetSystemTick();
+                const int fps = t.wallpaper_fps;
+                const u64 interval = armGetSystemTickFreq() / (fps > 0 ? fps : 10);
+                if (now - m_video_frame_tick >= interval) {
+                    m_video_frame_tick = now;
+                    m_video_frame_idx = (m_video_frame_idx + 1) % (int)m_video_frames.size();
+                    m_wallpaper_path = m_video_frames[m_video_frame_idx];
+                    if (m_wallpaper) { m_gfx->FreeImage(m_wallpaper); m_wallpaper = nullptr; }
+                    m_wallpaper = m_gfx->LoadImage(m_video_frames[m_video_frame_idx].c_str());
+                    reloadBlur();
+                }
+            }
+        }
+    }
+
+    namespace {
+        // =========================================================================
+        // PS3 XMB-style ribbon background: several translucent horizontal lines
+        // that undulate slowly in a sinusoidal fashion, flowing across the screen.
+        //
+        // Each "line" is a thin filled band whose Y position follows a sine wave
+        // over both X (spatial) and time (temporal).  The band is drawn as a series
+        // of small horizontal segments so the wave looks smooth.
+        // =========================================================================
+
+        void DrawRibbonBackground(gfx::Gfx *gfx, const Theme &t) {
+            const int W = gfx::Gfx::Width;
+            const int H = gfx::Gfx::Height;
+            const float elapsed = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
+
+            // Pre-compute the three palette colors.
+            SDL_Color colors[3];
+            colors[0] = t.accent; // accent
+            colors[1] = SDL_Color{255, 255, 255, 0}; // white wash
+            colors[2] = t.dim;    // dim tint
+
+            // Clamp theme parameters to safe ranges.
+            int numLines   = t.ribbon_line_count;
+            int thickness  = t.ribbon_thickness;
+            int amplitude  = t.ribbon_amplitude;
+            int seed       = t.ribbon_seed;
+            int layers     = t.ribbon_layers;
+            int y_center    = t.ribbon_y_center;
+            if (numLines   <  1) numLines   =  1;
+            if (numLines   > 40) numLines   = 40;
+            if (thickness  <  1) thickness  =  1;
+            if (thickness  >  20) thickness  =  20;
+            if (amplitude  <  1) amplitude  =  1;
+            if (amplitude  > 60) amplitude  = 60;
+            if (seed       <  0) seed       =  0;
+            if (seed      > 99) seed       = 99;
+            if (layers     <  1) layers     =  1;
+            if (layers     >  4) layers     =  4;
+            if (y_center   <  40) y_center   =  40;
+            if (y_center  > 680) y_center   = 680;
+
+            const int step = 4;
+            const float margin = 40.0f;
+            const float usableH = (float)(H - 2 * margin);
+
+            // Multi-layer rendering: each layer adds a full pass of ribbon lines
+            // with a phase offset derived from the seed, creating XMB-style depth.
+            const float layerAlphaDiv = 1.0f / (float)layers;
+
+            for (int L = 0; L < layers; L++) {
+                float layerPhase = (float)L * 1.618f + (float)seed * 0.37f;
+
+                for (int li = 0; li < numLines; li++) {
+                // Which color layer: 0=accent, 1=white-wash, 2=dim
+                // Distribute: ~55% accent, ~30% white-wash, ~15% dim
+                int colorIdx;
+                if (li < (numLines * 55 + 49) / 100)       colorIdx = 0;
+                else if (li < (numLines * 85 + 49) / 100)  colorIdx = 1;
+                else                                       colorIdx = 2;
+
+                SDL_Color c = colors[colorIdx];
+
+                // Base alpha divided by layer count to avoid washout when stacking.
+                float baseAlpha;
+                switch (colorIdx) {
+                    case 0: baseAlpha = 45.0f; break;
+                    case 1: baseAlpha = 18.0f; break;
+                    default: baseAlpha = 12.0f; break;
+                }
+                baseAlpha *= layerAlphaDiv;
+
+                // Slow alpha breathing per line.
+                float pulseFreq = 0.04f + (li % 5) * 0.015f;
+                baseAlpha *= (0.7f + 0.3f * sinf((elapsed * pulseFreq + li * 0.7f) * 6.2831853f));
+                c.a = (Uint8)baseAlpha;
+
+                // Vertical position: pseudo-random spread around y_center.
+                // Uses a deterministic hash so the layout is stable per frame
+                // but lines don't cluster evenly by index.
+                float hash = sinf(li * 127.1f + seed * 317.0f) * 43758.5453f;
+                hash = hash - (int)hash; // fraction 0..1
+                float spread = usableH * 0.45f; // half-spread around center
+                float baseY = (float)y_center + (hash - 0.5f) * 2.0f * spread;
+
+                // Seed perturbs spatial frequency so different seeds look distinct.
+                float seedSpatial = (float)seed * 0.05f;
+                float spatialFreq = 0.8f + 0.6f * sinf(li * 1.3f + 0.5f + seedSpatial);
+
+                // Seed perturbs temporal frequency too.
+                float seedTemporal = (float)seed * 0.002f;
+                float temporalFreq;
+                switch (colorIdx) {
+                    case 0: temporalFreq = 0.06f + 0.03f * sinf(li * 0.9f) + seedTemporal; break;
+                    case 1: temporalFreq = 0.08f + 0.04f * sinf(li * 1.1f) + seedTemporal; break;
+                    default: temporalFreq = 0.04f + 0.02f * sinf(li * 0.7f) + seedTemporal; break;
+                }
+                if (temporalFreq < 0.03f) temporalFreq = 0.03f;
+
+                // Phase offset includes layer offset for depth.
+                float phase = (float)li / (float)numLines + 0.1f + layerPhase;
+
+                // Line-specific amplitude variation.
+                float lineAmp = (float)amplitude * (0.7f + 0.3f * sinf(li * 1.7f + 2.0f));
+
+                // Draw the wave as a chain of thin horizontal segments.
+                for (int x = 0; x < W; x += step) {
+                    float nx = (float)x / (float)W; // normalized 0..1
+                    float wave = sinf((nx * spatialFreq + elapsed * temporalFreq + phase) * 6.2831853f);
+                    int y = (int)(baseY + wave * lineAmp);
+                    gfx->FillRect(x, y, step, thickness, c);
+                }
+            }
+        }
+    }
     }
 
     void Menu::DrawBackground() {
         const Theme &t = m_theme.Current();
         m_gfx->GradientV(t.bg_top, t.bg_bottom);
+
+        // Wallpaper first (when set), so ribbons draw on top.
         EnsureWallpaper();
         if (m_wallpaper) {
-            m_gfx->DrawCover(m_wallpaper, 255);
-            // Darkening scrim so text stays legible over photos.
-            m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0,0,0,90});
+            const int W = gfx::Gfx::Width;
+            const int H = gfx::Gfx::Height;
+
+            // Draw the wallpaper (blurred if that toggle is on).
+            if (t.wallpaper_blur && m_wallpaper_blur) {
+                m_gfx->DrawCover(m_wallpaper_blur, 255);
+            } else {
+                m_gfx->DrawCover(m_wallpaper, 255);
+            }
+
+            // Dim overlay (independent toggle).
+            if (t.wallpaper_dim) {
+                m_gfx->FillRect(0, 0, W, H, SDL_Color{0,0,0,90});
+            }
+
+            // Snow overlay (independent toggle).
+            if (t.wallpaper_snow) {
+                const float elapsed = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
+                const int count = 120;
+                for (int i = 0; i < count; i++) {
+                    const float seed = (float)i * 7.77f;
+                    const int baseX = (int)((sinf(seed * 3.1f) * 0.5f + 0.5f) * (float)W);
+                    const float speed = 15.0f + sinf(seed * 2.3f) * 10.0f;
+                    const float drift = sinf(seed * 5.1f) * 30.0f;
+                    const int sz = 1 + (int)((sinf(seed * 1.7f) * 0.5f + 0.5f) * 3.0f);
+                    const Uint8 baseA = (Uint8)(60 + (int)((sinf(seed * 4.3f) * 0.5f + 0.5f) * 140));
+                    const float yf = fmodf(elapsed * speed + seed * 100.0f, (float)(H + 40)) - 20.0f;
+                    const int y = (int)yf;
+                    const int x = baseX + (int)(sinf(elapsed * 0.5f + seed) * drift);
+                    if (y < 0 || y >= H) continue;
+                    m_gfx->FillRect(x, y, sz, sz, SDL_Color{255, 255, 255, baseA});
+                }
+            }
+        }
+
+        if (t.background_style == BackgroundStyle_Ribbon) {
+            DrawRibbonBackground(m_gfx, t);
         }
     }
 
@@ -1806,12 +2936,20 @@ namespace sl::menu::ui {
         strftime(clock, sizeof(clock), "%H:%M   %a %b %d", &tm_now);
         m_gfx->Text(FontSize::Small, 40, 16, t.dim, clock);
 
-        // Right side: nickname then battery, laid out by measured width so the
-        // gap is even and the '%' never crowds the digits or the screen edge.
+        // Right side: nickname then battery (with charging indicator), laid out
+        // by measured width so the gap is even and nothing crowds the screen edge.
         u32 charge = 0;
         psmGetBatteryChargePercentage(&charge);
-        char batt[16];
-        snprintf(batt, sizeof(batt), "%lu%%", (unsigned long)charge);
+        PsmChargerType charger = PsmChargerType_Unconnected;
+        bool is_charging = false;
+        if (R_SUCCEEDED(psmGetChargerType(&charger)))
+            is_charging = charger != PsmChargerType_Unconnected;
+        // Charging is marked with a leading '+' rather than a bolt glyph: the
+        // menu can be rendered in any user-supplied font, and a font without
+        // that glyph draws tofu here.
+        char batt[24];
+        snprintf(batt, sizeof(batt), is_charging ? "+%lu%%" : "%lu%%",
+                 (unsigned long)charge);
         char name[24];
         snprintf(name, sizeof(name), "%.20s", m_nickname);
 
@@ -1885,6 +3023,7 @@ namespace sl::menu::ui {
         PollHbScan();       // swap in the homebrew browser list when its worker finishes
         PollResolvePins();  // fold in pinned-homebrew names/icons when its worker finishes
         PollUpdateCheck();  // join the update-check worker when it finishes
+        PollPlayStats();    // start/collect the pdm play-time query
 
         // SD card pulled while powered on: nothing else matters, show the warning
         // (in the always-loaded system font) until the daemon reboots the console.
@@ -1925,6 +3064,8 @@ namespace sl::menu::ui {
             case Screen::About:       DrawAbout(); break;
             case Screen::Welcome:     DrawWelcome(); break;
             case Screen::SysEntries:  DrawSysEntries(); break;
+            case Screen::Power:       DrawPower(); break;
+            case Screen::Payloads:    DrawPayloads(); break;
         }
         if (m_options_open) DrawOptions();
         if (m_dialog != Dialog::None) DrawDialog();
@@ -1941,13 +3082,15 @@ namespace sl::menu::ui {
         const SDL_Color soft  = { 205, 222, 255, 255 };
         m_gfx->FillRect(0, 0, W, H, blue);
 
-        m_gfx->TextCentered(FontSize::Title,  cx, 210, white, "SD card removed");
+        // Localised like everything else: the strings are already in memory, so
+        // losing the card does not cost us the translation.
+        m_gfx->TextCentered(FontSize::Title,  cx, 210, white, T("SD card removed"));
         m_gfx->FillRect(cx - 150, 292, 300, 3, white);
         m_gfx->TextCentered(FontSize::Normal, cx, 336, white,
-                            "Please only remove the SD card while the console is off.");
+                            T("Please only remove the SD card while the console is off."));
         m_gfx->TextCentered(FontSize::Small,  cx, 388, soft,
-                            "Taking it out while powered on can corrupt your data.");
-        m_gfx->TextCentered(FontSize::Normal, cx, 470, soft, "Restarting...");
+                            T("Taking it out while powered on can corrupt your data."));
+        m_gfx->TextCentered(FontSize::Normal, cx, 470, soft, T("Restarting..."));
     }
 
     void Menu::DrawOobe() {
@@ -1980,14 +3123,15 @@ namespace sl::menu::ui {
             case 2: { // Layout - same list, description under it
                 DrawTopBar(T("Setup"));
                 m_gfx->TextCentered(FontSize::Small, cx, 96, t.dim, T("Choose a layout"));
-                const char *names[5] = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
-                const char *desc[5]  = { T("A simple scrolling text list"),
+                const char *names[6] = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf"), T("XMB") };
+                const char *desc[6]  = { T("A simple scrolling text list"),
                                          T("A cover carousel (EmulationStation)"),
                                          T("A grid of app icons"),
                                          T("One fullscreen cover at a time"),
-                                         T("An Xbox-360-style cover shelf") };
+                                         T("An Xbox-360-style cover shelf"),
+                                         T("PSP/PS3 cross-media bar") };
                 std::vector<std::string> labels, values;
-                for (int i = 0; i < 5; i++) { labels.push_back(names[i]); values.emplace_back(); }
+                for (int i = 0; i < 6; i++) { labels.push_back(names[i]); values.emplace_back(); }
                 int cur = (int)m_ui_mode;
                 DrawCarousel(labels, values, cur, m_sub_scroll);
                 m_gfx->TextCentered(FontSize::Small, cx, 556, t.dim, desc[cur]);
@@ -2061,6 +3205,7 @@ namespace sl::menu::ui {
             case UiMode::Grid:    DrawMainGrid();    break;
             case UiMode::Cover:   DrawMainCover();   break;
             case UiMode::Shelf:   DrawMainShelf();   break;
+            case UiMode::XMB:     DrawMainXmb();     break;
             default:              DrawMainList();    break;
         }
 
@@ -2096,8 +3241,8 @@ namespace sl::menu::ui {
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
 
         const int margin   = kListX;      // left/right margin for text
-        const int center_y = 360;         // centre row's vertical centre
-        const int spacing  = 48;          // gap between adjacent items
+        const int center_y = kListCenterY; // centre row's vertical centre
+        const int spacing  = kListSpacing; // gap between adjacent items
         const int span     = 7;           // items drawn on each side of centre
 
         for (int off = -span; off <= span; off++) {
@@ -2174,7 +3319,34 @@ namespace sl::menu::ui {
             m_gfx->Text(FontSize::Small, gfx::Gfx::Width - pw - 40, 120, t.dim, pos);
         }
 
+        // Play time / last played for the selected game, under the counter. Only
+        // once pdm has answered, and only for games that have actually been played.
+        if (const play::PlayInfo *pi = Play(m_items[m_cursor].app_id)) {
+            if (pi->seconds > 0) {
+                const std::string line = play::FormatPlaytime(pi->seconds) + "   " +
+                                         play::FormatLastPlayed(pi->last_played);
+                const int w = m_gfx->TextWidth(FontSize::Small, line.c_str());
+                m_gfx->Text(FontSize::Small, gfx::Gfx::Width - w - 40, 150, t.dim, line.c_str());
+            }
+        }
+
         DrawStatusHint("A: Select    X: Options");
+    }
+
+    std::string Menu::Ellipsize(const std::string &s, int maxw, gfx::FontSize fs) const {
+        if (maxw <= 0) return std::string();
+        if (m_gfx->TextWidth(fs, s.c_str()) <= maxw) return s;
+
+        int lo = 0, hi = (int)s.size();
+        while (lo < hi) {
+            int mid = (lo + hi + 1) / 2;
+            while (mid > lo && ((unsigned char)s[mid] & 0xC0) == 0x80) mid--;  // UTF-8 boundary
+            if (mid == lo) break;
+            if (m_gfx->TextWidth(fs, (s.substr(0, mid) + "...").c_str()) <= maxw) lo = mid;
+            else                                                                  hi = mid - 1;
+        }
+        while (lo > 0 && ((unsigned char)s[lo] & 0xC0) == 0x80) lo--;
+        return s.substr(0, lo) + "...";
     }
 
     void Menu::DrawStatusHint(const char *hint) {
@@ -2193,9 +3365,18 @@ namespace sl::menu::ui {
     // One square app/entry tile: the cached icon when present, otherwise a
     // themed placeholder card carrying the item's initial + name so system
     // entries (Theming, Album, ...) and icon-less titles still read clearly.
+    // Clear all cached system icon textures so a pack switch takes effect.
+    void Menu::InvalidateSysIcons() {
+        for (auto &kv : m_sys_icons) { if (kv.second) m_gfx->FreeImage(kv.second); }
+        m_sys_icons.clear();
+    }
+
     // Load (and cache) the black/white icon drawn for a non-game menu entry.
-    // Files live at sdmc:/slaunch/icons/<name>.png; missing files -> nullptr and
-    // the tile falls back to its lettered placeholder.
+    // When a custom icon pack is active (m_icon_pack_idx > 0), the icon is loaded
+    // from sdmc:/slaunch/icon_packs/<pack_name>/<name>.png and rescaled to 64x64
+    // so it matches the built-in size. If the custom icon is missing the lookup
+    // falls back to the built-in at sdmc:/slaunch/icons/<name>.png.
+    // Missing files -> nullptr and the tile falls back to its lettered placeholder.
     SDL_Texture *Menu::SystemIcon(ItemKind kind) {
         auto it = m_sys_icons.find((int)kind);
         if (it != m_sys_icons.end()) return it->second;
@@ -2216,12 +3397,28 @@ namespace sl::menu::ui {
         }
         SDL_Texture *tex = nullptr;
         if (file) {
-            char path[64];
-            snprintf(path, sizeof(path), "sdmc:/slaunch/icons/%s.png", file);
-            tex = m_gfx->LoadImage(path);
-            // Force alpha blending: an icon PNG with no alpha channel loads with
-            // blend mode NONE, so our alpha-mod (the grey/transparency) is ignored.
-            if (tex) SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+            // Try custom icon pack first (if selected). LoadImageScaled handles
+            // both existence check and rescale in one pass, returning nullptr on miss.
+            // LoadGlyph separates the artwork from its background field so the
+            // theme can colour the field (see Theme::icon_bg); the shipped PNGs
+            // are white-on-black with no alpha channel.
+            //
+            // Loaded at native resolution. Forcing 64x64 here threw away most of
+            // a 256x256 pack and left the XMB bar upscaling a 64px texture to
+            // 88px, which is exactly as soft as it sounds. There are only ten of
+            // these and they are cached, so full size costs little.
+            if (m_icon_pack_idx > 0 && m_icon_pack_idx <= (int)m_icon_packs.size()) {
+                const std::string &pack = m_icon_packs[m_icon_pack_idx - 1];
+                char path[256];
+                snprintf(path, sizeof(path), "sdmc:/slaunch/icon_packs/%s/%s.png", pack.c_str(), file);
+                tex = m_gfx->LoadGlyph(path, 0, 0);
+            }
+            // Fall back to built-in icons if custom pack missing or icon not found
+            if (!tex) {
+                char path[64];
+                snprintf(path, sizeof(path), "sdmc:/slaunch/icons/%s.png", file);
+                tex = m_gfx->LoadGlyph(path, 0, 0);
+            }
         }
         m_sys_icons[(int)kind] = tex; // cache even nullptr so we don't re-stat
         return tex;
@@ -2230,7 +3427,7 @@ namespace sl::menu::ui {
     // Item index under a touch point in Grid mode (mirrors DrawMainGrid), or -1.
     int Menu::GridItemAt(int px, int py) const {
         const int cols = GridColumns();
-        const int tile = 120, gapX = 18, gapY = 18, pitch = tile + gapY, topBase = 80;
+        const int tile = kGridTile, gapX = kGridGap, pitch = kGridPitch, topBase = kGridTopBase;
         const int gridW = cols * tile + (cols - 1) * gapX;
         const int startX = (gfx::Gfx::Width - gridW) / 2;
         const float scrollPx = m_grid_scroll * pitch;
@@ -2251,27 +3448,43 @@ namespace sl::menu::ui {
 
     // Item index under a touch point in List mode (inverts the carousel), or -1.
     int Menu::ListItemAt(int /*px*/, int py) const {
-        const int center_y = 360, spacing = 48;
+        const int center_y = kListCenterY, spacing = kListSpacing;
         const int idx = (int)lroundf(m_scroll_pos + (float)(py - center_y) / spacing);
         return (idx >= 0 && idx < (int)m_items.size()) ? idx : -1;
     }
 
-    // Shelf mode geometry (Xbox-360 "My Games" style): uniform covers in a row,
-    // the selected one anchored near the left. Shared by the draw + hit-test.
-    namespace {
-        constexpr int kShelfTile    = 208;   // cover edge
-        constexpr int kShelfGap     = 20;
-        constexpr int kShelfPitch   = kShelfTile + kShelfGap;
-        constexpr int kShelfAnchorX = 88;    // left edge of the selected cover
-        constexpr int kShelfTop     = 150;   // top edge of the cover row
+    // XMB: which category icon is under a touch point, or -1. Only the bar row
+    // answers, so a tap on the column below never jumps categories.
+    int Menu::XmbColAt(int x, int y) const {
+        if (y < kXmbBarY - 20 || y > kXmbBarY + kXmbCatSel + 30) return -1;
+        for (int c = 0; c < (int)m_xmb_cols.size(); c++) {
+            const int cx = kXmbAnchorX + (int)((float)(c - m_xmb_col_scroll) * kXmbCatPitch);
+            if (std::abs(x - cx) <= kXmbCatPitch / 2) return c;
+        }
+        return -1;
+    }
+
+    // XMB: which entry of the open column is under a touch point, or -1. Mirrors
+    // the row placement in DrawMainXmb, and the whole row width is tappable.
+    int Menu::XmbItemAt(int x, int y) const {
+        (void)x;
+        if (m_xmb_col < 0 || m_xmb_col >= (int)m_xmb_cols.size()) return -1;
+        if (y < kXmbFadeStart - kXmbItemPitch / 2 || y > kXmbItemBottom) return -1;
+        const auto &items = m_xmb_cols[m_xmb_col].items;
+        const int i = (int)lroundf(m_xmb_item_scroll +
+                                   (float)(y - kXmbItemY) / (float)kXmbItemPitch);
+        if (i < 0 || i >= (int)items.size()) return -1;
+        return items[i];
     }
 
     // Item index under a touch point, dispatched by the active layout.
     int Menu::MainItemAt(int x, int y) const {
         const int last = (int)m_items.size() - 1;
         if (m_ui_mode == UiMode::Grid) return GridItemAt(x, y);
+        if (m_ui_mode == UiMode::XMB)  return XmbItemAt(x, y);
         if (m_ui_mode == UiMode::Line) {
-            const int idx = (int)lroundf(m_scroll_pos + (float)(x - gfx::Gfx::Width / 2) / 210.0f);
+            const int idx = (int)lroundf(m_scroll_pos +
+                                         (float)(x - gfx::Gfx::Width / 2) / (float)kLinePitch);
             return (idx >= 0 && idx <= last) ? idx : -1;
         }
         if (m_ui_mode == UiMode::Shelf) {   // left-anchored uniform row (see DrawMainShelf)
@@ -2296,10 +3509,13 @@ namespace sl::menu::ui {
                           : isHb   ? m_hb_icons.Get(it.hb_icon)
                           : SystemIcon(it.kind);
 
-        if (icon) {
-            // icon fills the tile; game/homebrew opaque, system icons dimmed to grey
-            const Uint8 ia = (isGame || isHb) ? alpha : (Uint8)(alpha * 195 / 255);
-            m_gfx->DrawImage(icon, x, y, size, size, ia);
+        if (icon && (isGame || isHb)) {
+            m_gfx->DrawImage(icon, x, y, size, size, alpha);   // real artwork
+        } else if (icon) {
+            // System entries: the themed plate, then the artwork exactly as the
+            // icon pack drew it. Only the plate is a theme colour.
+            m_gfx->FillRect(x, y, size, size, WithAlpha(t.icon_bg, alpha));
+            m_gfx->DrawImage(icon, x, y, size, size, alpha);
         } else {
             // no icon file: themed panel + big initial
             m_gfx->FillRect(x, y, size, size, WithAlpha(t.bg_bottom, (Uint8)(alpha * 180 / 255)));
@@ -2344,7 +3560,7 @@ namespace sl::menu::ui {
         const int center_x = gfx::Gfx::Width / 2;
         const int center_y = 348;         // vertical centre of the covers
         const int bigSize  = 240;         // selected cover edge length
-        const int spacing  = 210;         // horizontal gap between cover centres
+        const int spacing  = kLinePitch;  // horizontal gap between cover centres
         const int span     = 5;           // covers drawn each side of centre
 
         auto drawCover = [&](int off) {
@@ -2393,14 +3609,14 @@ namespace sl::menu::ui {
         // 8 columns x 4 visible rows. The name text is hidden, so tiles reach
         // further down. Keep these in sync with GridItemAt (touch hit-testing).
         const int cols     = GridColumns();               // 8
-        const int tile     = 120;
-        const int gapX     = 18;
-        const int gapY     = 18;
+        const int tile     = kGridTile;
+        const int gapX     = kGridGap;
+        const int gapY     = kGridGap;
         const int pitch    = tile + gapY;                 // vertical distance between rows
         const int rowsVis  = 4;                           // rows fully on screen
         const int gridW    = cols * tile + (cols - 1) * gapX;
         const int startX   = (gfx::Gfx::Width - gridW) / 2;
-        const int topBase  = 80;                          // y of row 0 at scroll 0
+        const int topBase  = kGridTopBase;                // y of row 0 at scroll 0
         const int total    = (int)m_items.size();
         const int rows     = (total + cols - 1) / cols;
 
@@ -2527,12 +3743,8 @@ namespace sl::menu::ui {
         const int top   = kShelfTop;
         const int pitch = kShelfPitch;
 
-        // Fit text into a pixel width, trailing "..." if it overflows.
-        auto ellipsize = [&](std::string s, int maxw, gfx::FontSize fs) {
-            if (m_gfx->TextWidth(fs, s.c_str()) <= maxw) return s;
-            while (!s.empty() && m_gfx->TextWidth(fs, (s + "...").c_str()) > maxw)
-                s.pop_back();
-            return s + "...";
+        auto ellipsize = [&](const std::string &s, int maxw, gfx::FontSize fs) {
+            return Ellipsize(s, maxw, fs);
         };
 
         // Header row below the top bar: sort on the left, position on the right.
@@ -2575,8 +3787,17 @@ namespace sl::menu::ui {
                         : (sel.kind == ItemKind::Game ? T("Nintendo Switch") : "");
         if (sub[0])
             m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 54, t.dim, sub);
-        if (sel.app_id == m_suspended && m_suspended != 0)
+        // Last line of the card: the running badge, or how much this game has been
+        // played (blank until the pdm worker lands, and for never-played titles).
+        if (sel.app_id == m_suspended && m_suspended != 0) {
             m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 76, t.accent, T("Running"));
+        } else if (const play::PlayInfo *pi = Play(sel.app_id)) {
+            if (pi->seconds > 0) {
+                const std::string line = play::FormatPlaytime(pi->seconds) + "   " +
+                                         play::FormatLastPlayed(pi->last_played);
+                m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 76, t.dim, line.c_str());
+            }
+        }
 
         DrawStatusHint("A: Launch    X: Options");
     }
@@ -2607,19 +3828,342 @@ namespace sl::menu::ui {
         }
     }
 
+
+    // ---------------------------------------------------------------------------
+    // XMB (PSP cross-media bar)
+    // ---------------------------------------------------------------------------
+    // Which column an entry belongs to. The six columns mirror the PSP's own
+    // (Settings, Photo, Music, Video, Game, Network) mapped onto what a Switch
+    // actually has, keeping Game in the same place along the bar.
+    Menu::XmbCat Menu::XmbCatOf(const MenuItem &it) {
+        switch (it.kind) {
+            case ItemKind::Game:
+            case ItemKind::RandomGame:   return XmbCat::Game;
+            case ItemKind::Homebrew:
+            case ItemKind::HomebrewMenu: return XmbCat::Homebrew;
+            case ItemKind::Album:        return XmbCat::Photo;
+            case ItemKind::UserPage:
+            case ItemKind::MiiEdit:      return XmbCat::User;
+            case ItemKind::WebBrowser:   return XmbCat::Network;
+            default:                     return XmbCat::Settings;   // Theming, Controllers, Settings, Power...
+        }
+    }
+
+    const char *Menu::XmbCatName(XmbCat c) {
+        switch (c) {
+            case XmbCat::Settings: return T("Settings");
+            case XmbCat::Photo:    return T("Album");
+            case XmbCat::User:     return T("User");
+            case XmbCat::Network:  return T("Network");
+            case XmbCat::Game:     return T("Games");
+            case XmbCat::Homebrew: return T("Homebrew");
+            default:               return "";
+        }
+    }
+
+    // Column headline icon, borrowed from the system entry that best represents it.
+    ItemKind Menu::XmbCatIconKind(XmbCat c) {
+        switch (c) {
+            case XmbCat::Settings: return ItemKind::Settings;
+            case XmbCat::Photo:    return ItemKind::Album;
+            case XmbCat::User:     return ItemKind::UserPage;
+            case XmbCat::Network:  return ItemKind::WebBrowser;
+            case XmbCat::Game:     return ItemKind::RandomGame;
+            case XmbCat::Homebrew: return ItemKind::HomebrewMenu;
+            default:               return ItemKind::Settings;
+        }
+    }
+
+    // Regroup m_items into the bar. Called from RebuildItems, so the per-frame
+    // work is only ever "walk the visible slice of one column".
+    void Menu::XmbRebuild() {
+        m_xmb_cols.clear();
+        std::vector<int> bucket[(int)XmbCat::Count];
+        for (int i = 0; i < (int)m_items.size(); i++)
+            bucket[(int)XmbCatOf(m_items[i])].push_back(i);
+
+        for (int c = 0; c < (int)XmbCat::Count; c++) {
+            if (bucket[c].empty()) continue;          // empty columns are not shown
+            m_xmb_cols.push_back({ (XmbCat)c, std::move(bucket[c]) });
+        }
+        if (m_xmb_cols.empty()) { m_xmb_col = -1; m_xmb_item = 0; return; }
+
+        // Every entry lands in exactly one column, so following m_cursor keeps
+        // the bar on whatever was selected across a rebuild (a favourite being
+        // toggled, the full app list replacing the cached one, ...). m_cursor is
+        // deliberately not written back here: the other layouts share it, and a
+        // rebuild must not move their selection.
+        m_xmb_col = -1;
+        XmbSyncFromCursor();
+        if (m_xmb_col < 0) { m_xmb_col = 0; m_xmb_item = 0; }
+    }
+
+    // Put the bar on the Games column. Used the first time XMB is actually shown:
+    // the flat cursor starts at the top of the list, which is a system entry, and
+    // opening the bar anywhere but Games would be odd on a games console (the
+    // handheld starts there too).
+    void Menu::XmbOpenDefaultColumn() {
+        m_xmb_placed = true;
+        for (int i = 0; i < (int)m_xmb_cols.size(); i++) {
+            if (m_xmb_cols[i].cat != XmbCat::Game) continue;
+            m_xmb_col = i; m_xmb_item = 0;
+            m_xmb_col_scroll = (float)i; m_xmb_item_scroll = 0.0f;
+            XmbApplyCursor();
+            return;
+        }
+    }
+
+    // Point the bar at whatever m_cursor currently selects, so switching into XMB
+    // from another layout (or back from a submenu) keeps your place.
+    void Menu::XmbSyncFromCursor() {
+        for (int c = 0; c < (int)m_xmb_cols.size(); c++) {
+            const auto &items = m_xmb_cols[c].items;
+            for (int i = 0; i < (int)items.size(); i++) {
+                if (items[i] != m_cursor) continue;
+                m_xmb_col  = c;
+                m_xmb_item = i;
+                m_xmb_col_scroll  = (float)c;
+                m_xmb_item_scroll = (float)i;
+                return;
+            }
+        }
+    }
+
+    void Menu::XmbApplyCursor() {
+        if (m_xmb_col < 0 || m_xmb_col >= (int)m_xmb_cols.size()) return;
+        const auto &items = m_xmb_cols[m_xmb_col].items;
+        if (m_xmb_item >= 0 && m_xmb_item < (int)items.size())
+            m_cursor = items[m_xmb_item];
+    }
+
+    // XMB mode: the PSP's cross-media bar. A horizontal row of category icons
+    // crosses the screen; the selected one is anchored at a fixed point and its
+    // entries hang below it in a vertical column, the selected entry anchored in
+    // turn. Moving sideways slides the bar, moving down slides the column under
+    // the crossing point, and entries that pass above it fade out behind the bar.
+    //
+    // Switch-side departures from the handheld, all in the name of usability:
+    // columns clamp at the ends (there are only six, all visible at once) while
+    // the column wraps on a fresh press, since a library can be hundreds long;
+    // the selected entry carries a play-time/state line; and everything is
+    // touchable.
+    // One entry in the cross-media bar: real cover art for games and homebrew,
+    // a theme-coloured glyph for system entries. Deliberately not DrawAppTile,
+    // which frames every tile with an accent strip and a selection box - that
+    // reads as a grid of cards, and the bar wants bare icons floating on the
+    // background with nothing but size and brightness separating them.
+    void Menu::DrawXmbIcon(const MenuItem &it, int cx, int cy, int size, Uint8 alpha) {
+        const Theme &t = m_theme.Current();
+        const bool isGame = (it.kind == ItemKind::Game);
+        const bool isHb   = (it.kind == ItemKind::Homebrew);
+        const int  x = cx - size / 2, y = cy - size / 2;
+
+        SDL_Texture *icon = isGame ? m_icons.Get(it.app_id)
+                          : isHb   ? m_hb_icons.Get(it.hb_icon)
+                                   : SystemIcon(it.kind);
+        if (icon && (isGame || isHb)) {
+            m_gfx->DrawImage(icon, x, y, size, size, alpha);
+        } else if (icon) {
+            m_gfx->FillRect(x, y, size, size, WithAlpha(t.icon_bg, alpha));
+            m_gfx->DrawImage(icon, x, y, size, size, alpha);
+        } else {
+            // No artwork cached yet: a plain plate with the initial, sized to
+            // match, so the column never gains or loses a row while icons load.
+            m_gfx->FillRect(x, y, size, size, WithAlpha(t.bg_bottom, (Uint8)(alpha * 170 / 255)));
+            char initial[2] = { it.name.empty() ? '?' : it.name[0], '\0' };
+            if (initial[0] >= 'a' && initial[0] <= 'z') initial[0] -= 32;
+            const int iw = m_gfx->TextWidth(FontSize::Normal, initial);
+            const int ih = m_gfx->LineHeight(FontSize::Normal);
+            m_gfx->Text(FontSize::Normal, cx - iw / 2, cy - ih / 2,
+                        WithAlpha(t.dim, alpha), initial);
+        }
+
+        // Running badge, kept tiny so it reads as a status dot, not decoration.
+        if (isGame && it.app_id == m_suspended && m_suspended != 0)
+            m_gfx->FillRect(x + size - 9, y - 3, 8, 8, WithAlpha(t.accent, alpha));
+    }
+
+    // XMB mode: the PSP's cross-media bar. Categories ride a horizontal bar; the
+    // selected one is anchored at a fixed point and its entries hang below it in
+    // a column, the selected entry anchored in turn at the crossing point.
+    //
+    // The look leans on scale, brightness and space rather than panels and
+    // outlines: no boxes, no frames, nothing enclosed. Entries drifting up past
+    // the bar fade out behind it, and the whole column dips while the bar slides
+    // sideways, so the two axes never look like two separate lists.
+    void Menu::DrawMainXmb() {
+        const Theme &t = m_theme.Current();
+        m_icons.SetScale(gfx::IconCache::GridScale);
+        DrawTopBar(nullptr);
+
+        if (m_items.empty() || m_xmb_cols.empty()) { DrawMainEmpty(); return; }
+        if (!m_xmb_placed) XmbOpenDefaultColumn();
+        if (m_xmb_col < 0) { m_xmb_col = 0; m_xmb_item = 0; }
+
+        const int W = gfx::Gfx::Width;
+
+        m_xmb_col_scroll  += ((float)m_xmb_col  - m_xmb_col_scroll)  * 0.20f;
+        m_xmb_item_scroll += ((float)m_xmb_item - m_xmb_item_scroll) * 0.26f;
+        if (std::abs((float)m_xmb_col  - m_xmb_col_scroll)  < 0.004f) m_xmb_col_scroll  = (float)m_xmb_col;
+        if (std::abs((float)m_xmb_item - m_xmb_item_scroll) < 0.004f) m_xmb_item_scroll = (float)m_xmb_item;
+
+        const XmbColumn &col   = m_xmb_cols[m_xmb_col];
+        const int        count = (int)col.items.size();
+
+        // --- readability scrim ----------------------------------------------
+        // Themes allow a photo wallpaper, and white text on an arbitrary photo
+        // is a coin toss. A soft top-down wash darkens the band the bar and the
+        // column live in, fading out before the bottom of the screen. Six rects
+        // rather than a real gradient: invisible banding at these alphas.
+        for (int i = 0; i < 6; i++) {
+            const int y0 = kXmbBarY - 60 + i * 90;
+            m_gfx->FillRect(0, y0, W, 90, SDL_Color{ 0, 0, 0, (Uint8)(52 - i * 8) });
+        }
+
+        // --- the bar --------------------------------------------------------
+        // A single hairline through the icon centres, brightest at the crossing
+        // point and falling away to each side, so the eye is pulled to the
+        // selection instead of to a uniform stripe across the screen.
+        for (int i = 0; i < 10; i++) {
+            const int seg = W / 10;
+            const int sx  = i * seg;
+            const float d = std::abs((float)(sx + seg / 2 - kXmbAnchorX)) / (float)W;
+            const Uint8 a = (Uint8)std::max(0.0f, 70.0f - d * 150.0f);
+            if (a) m_gfx->FillRect(sx, kXmbBarMidY, seg, 1, WithAlpha(t.accent, a));
+        }
+
+        // --- category row ---------------------------------------------------
+        for (int c = 0; c < (int)m_xmb_cols.size(); c++) {
+            const float dist = std::abs((float)c - m_xmb_col_scroll);
+            if (dist > 4.5f) continue;
+
+            const float f  = std::max(0.0f, 1.0f - dist);
+            const int   sz = kXmbCatUnsel + (int)((kXmbCatSel - kXmbCatUnsel) * f);
+            const int   cx = kXmbAnchorX + (int)((float)(c - m_xmb_col_scroll) * kXmbCatPitch);
+            if (cx < -kXmbCatSel || cx > W + kXmbCatSel) continue;
+
+            // Unselected categories sit well back; the selected one is the only
+            // fully lit thing on the bar. Distance drives brightness only - the
+            // artwork itself is never recoloured.
+            const Uint8 a = (Uint8)std::max(60.0f, 255.0f - dist * 130.0f);
+
+            if (SDL_Texture *icon = SystemIcon(XmbCatIconKind(m_xmb_cols[c].cat))) {
+                const int ix = cx - sz / 2, iy = kXmbBarMidY - sz / 2;
+                m_gfx->FillRect(ix, iy, sz, sz, WithAlpha(t.icon_bg, a));
+                m_gfx->DrawImage(icon, ix, iy, sz, sz, a);
+            }
+
+            if (c == m_xmb_col) {
+                const char *nm = XmbCatName(m_xmb_cols[c].cat);
+                m_gfx->TextCentered(FontSize::Small, cx, kXmbBarMidY + kXmbCatSel / 2 + 10,
+                                    WithAlpha(t.accent, (Uint8)(a * 0.92f)), nm);
+            }
+        }
+
+        // --- entry column ---------------------------------------------------
+        // The column dips and fades while the bar slides, which is what sells
+        // the two axes as one control rather than two stacked lists.
+        const float slide    = std::min(1.0f, std::abs((float)m_xmb_col - m_xmb_col_scroll));
+        const Uint8 colAlpha = (Uint8)(255.0f * (1.0f - slide));
+        const int   colDip   = (int)(slide * 26.0f);
+        if (colAlpha <= 8 || count == 0) {
+            DrawStatusHint("A: Select    X: Options    L/R: Jump    +: Power");
+            return;
+        }
+
+        const int firstv = std::max(0, (int)m_xmb_item_scroll - kXmbAbove - 1);
+        const int lastv  = std::min(count - 1, (int)m_xmb_item_scroll + kXmbBelow + 1);
+
+        for (int i = firstv; i <= lastv; i++) {
+            const float dy = (float)i - m_xmb_item_scroll;
+            const int   cy = kXmbItemY + (int)(dy * kXmbItemPitch) + colDip;
+            if (cy > kXmbItemBottom) break;
+
+            float fade = 1.0f;
+            if (cy < kXmbFadeEnd) continue;
+            if (cy < kXmbFadeStart)
+                fade = (float)(cy - kXmbFadeEnd) / (float)(kXmbFadeStart - kXmbFadeEnd);
+
+            const bool sel = (i == m_xmb_item);
+
+            // Size eases with distance instead of stepping, so a scroll reads as
+            // one continuous movement rather than icons popping between two sizes.
+            const float prox = std::max(0.0f, 1.0f - std::abs(dy));
+            const int   sz   = kXmbItemUnsel + (int)((kXmbItemSel - kXmbItemUnsel) * prox);
+            const Uint8 a    = (Uint8)(colAlpha * fade * (0.55f + 0.45f * prox));
+
+            DrawXmbIcon(m_items[col.items[i]], kXmbAnchorX, cy, sz, a);
+
+            // A small accent wedge marks the selection: XMB never boxes the
+            // current row, it just points at it.
+            if (sel) {
+                const int wx = kXmbAnchorX - kXmbItemSel / 2 - 20;
+                const SDL_Color ac = WithAlpha(t.accent, (Uint8)(colAlpha * fade));
+                m_gfx->FillTriangle(wx, cy - 8, wx + 9, cy, wx, cy + 8, ac);
+            }
+
+            const int      tx = kXmbAnchorX + kXmbItemSel / 2 + 26;
+            const FontSize fs = sel ? FontSize::Large : FontSize::Normal;
+            const int      th = m_gfx->LineHeight(fs);
+            const std::string label = Ellipsize(m_items[col.items[i]].name, W - 200 - tx, fs);
+            m_gfx->Text(fs, tx, cy - th / 2,
+                        WithAlpha(sel ? t.title : t.fg, a), label.c_str());
+        }
+
+        // --- selected entry, described under its own name --------------------
+        const MenuItem &sel = m_items[col.items[m_xmb_item]];
+        const int selY = kXmbItemY + colDip;
+
+        std::string info;
+        if (sel.app_id != 0 && sel.app_id == m_suspended) info = T("Running");
+        else if (sel.is_gamecard)                         info = T("Game card");
+        if (const play::PlayInfo *pi = Play(sel.app_id)) {
+            if (pi->seconds > 0) {
+                if (!info.empty()) info += "   ";
+                info += play::FormatPlaytime(pi->seconds) + "   " +
+                        play::FormatLastPlayed(pi->last_played);
+            }
+        }
+        if (sel.needs_update) {
+            if (!info.empty()) info += "   ";
+            info += T("Update available");
+        }
+        if (!info.empty()) {
+            const int tx = kXmbAnchorX + kXmbItemSel / 2 + 26;
+            m_gfx->Text(FontSize::Small, tx,
+                        selY + m_gfx->LineHeight(FontSize::Large) / 2 + 2,
+                        WithAlpha(t.dim, colAlpha),
+                        Ellipsize(info, W - 200 - tx, FontSize::Small).c_str());
+        }
+
+        // Position within the column, far right, aligned with the selection.
+        char pos[32];
+        snprintf(pos, sizeof(pos), "%d / %d", m_xmb_item + 1, count);
+        const int pw = m_gfx->TextWidth(FontSize::Small, pos);
+        const int ph = m_gfx->LineHeight(FontSize::Small);
+        m_gfx->Text(FontSize::Small, W - 48 - pw, selY - ph / 2,
+                    WithAlpha(t.dim, colAlpha), pos);
+
+        DrawStatusHint("A: Select    X: Options    L/R: Jump    +: Power");
+    }
+
     void Menu::DrawTheming() {
         DrawTopBar("Theming");
+        const char *modes[6]  = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf"), T("XMB") };
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
-        const char *modes[5]  = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf") };
         std::vector<std::string> labels = {
-            T("Themes"), T("Fonts"), T("Text position"), T("UI mode"), T("List icons"),
-            T("Menu entries"), T("Widgets"), T("Music"), T("Welcome screen"),
-            T("Check for updates"), T("About"), T("Back")
+            T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
+            T("Icon pack"), T("Fonts"), T("Music"), T("Widgets"), T("Menu entries"),
+            T("Welcome screen"), T("Check for updates"),
+            T("About"), T("Back")
         };
         std::vector<std::string> values(labels.size());
-        values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_UiMode]      = modes[(int)m_ui_mode];
+        values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_ListIcons]   = m_list_icons ? T("On") : T("Off");
+        values[TH_IconPack]    = (m_icon_pack_idx > 0 &&
+                                  m_icon_pack_idx <= (int)m_icon_packs.size())
+                               ? m_icon_packs[m_icon_pack_idx - 1] : T("Built-in");
         values[TH_Music]       = m_music.Enabled() ? T("On") : T("Off");
         values[TH_Welcome]     = m_welcome_enabled ? T("On") : T("Off");
         values[TH_Updates]     = m_check_updates ? T("On") : T("Off");
@@ -2631,11 +4175,10 @@ namespace sl::menu::ui {
         }
 
         DrawCarousel(labels, values, m_theming_cursor, m_sub_scroll);
-        DrawHint("Up/Down: Select   A: Open/Toggle   Left/Right: Change   B: Back");
+        DrawHint("Up/Down: Select   A: Open   Left/Right: Change   B: Back");
     }
 
     // ---- Music submenu -----------------------------------------------------
-    namespace { enum { MU_Enabled = 0, MU_Track, MU_Volume, MU_Shuffle, MU_Back, MU_Count }; }
 
     Menu::Action Menu::OnButtonMusic(Btn b) {
         if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = TH_Music; return Action::None; }
@@ -2982,37 +4525,142 @@ namespace sl::menu::ui {
         DrawTopBar(c.name);
 
         const char *labels[EF_Count] = {
-            T("Background"), T("Gradient top"), T("Gradient bottom"), T("Text"),
-            T("Accent"), T("Secondary"), T("Title"), T("Rename theme"),
-            T("Save & Apply"), T("Delete theme")
+            T("Background"), T("Photo"), T("Dim"), T("Blur"),
+            T("Blur radius"), T("Snow"), T("Video fps"),
+            T("Gradient top"), T("Gradient bottom"), T("Text"),
+            T("Accent"), T("Secondary"), T("Title"), T("Icon background"),
+            T("Wave lines"), T("Wave thickness"), T("Wave amplitude"),
+            T("Ribbon seed"), T("Ribbon layers"), T("Ribbon Y"),
+            T("Rename theme"), T("Save & Apply"), T("Delete theme")
         };
 
-        const int lx = 200, vx = 720, rowH = 50, top = 132;
+        // Build the visible row list (ribbon rows hidden when bg != Ribbon).
+        int vis_ids[EF_Count];
+        int vis_n = 0;
+        int cursor_vis = 0;
         for (int i = 0; i < EF_Count; i++) {
-            const bool sel = (i == m_edit_cursor);
-            const int  y   = top + i * rowH;
-            const SDL_Color rc = (i == EF_Delete) ? SDL_Color{235, 90, 90, 255}
-                                                  : (sel ? t.accent : t.fg);
-            if (sel) m_gfx->FillRect(lx - 30, y - 6, 900, rowH - 6, WithAlpha(t.accent, 46));
-            m_gfx->Text(FontSize::Normal, lx, y, rc, labels[i]);
+            if (IsRibbonRow(i) && c.background_style != BackgroundStyle_Ribbon)
+                continue;
+            if (i == EF_WallpaperFps && !IsVideoPath(c.wallpaper))
+                continue;
+            if (IsBlurRadiusRow(i) && !c.wallpaper_blur)
+                continue;
+            if (i == m_edit_cursor) cursor_vis = vis_n;
+            vis_ids[vis_n++] = i;
+        }
 
+        // Smooth scroll
+        m_edit_scroll += (cursor_vis - m_edit_scroll) * 0.30f;
+        if (std::abs(cursor_vis - m_edit_scroll) < 0.01f) m_edit_scroll = (float)cursor_vis;
+
+        const int center_y = 360, spacing = 48, span = 7;
+        for (int off = -span; off <= span; off++) {
+            const int vi = (int)lroundf(m_edit_scroll) + off;
+            if (vi < 0 || vi >= vis_n) continue;
+
+            const int i    = vis_ids[vi];
+            const float vdist = std::abs((float)vi - m_edit_scroll);
+            const bool big   = vdist < 0.5f;
+            const FontSize fs = big ? FontSize::Large : FontSize::Normal;
+            const Uint8 alpha = (Uint8)std::max(24.0f, 255.0f - vdist * 52.0f);
+            const int lh = m_gfx->LineHeight(fs);
+            const int y  = center_y + (int)((vi - m_edit_scroll) * spacing) - lh / 2;
+            if (y < 90 || y > kHintY - 30) continue;
+
+            const bool sel = (i == m_edit_cursor);
+            const SDL_Color rc = (i == EF_Delete) ? WithAlpha(SDL_Color{235, 90, 90, 255}, alpha)
+                                                  : WithAlpha(sel ? t.accent : t.fg, alpha);
+            m_gfx->Text(fs, kListX, y, rc, labels[i]);
+
+            // Value column
+            const int vx = 720;
             if (SDL_Color *col = EditorColor(c, i)) {
-                m_gfx->FillRect(vx, y, 60, 32, *col);
+                m_gfx->FillRect(vx, y + (lh - 32) / 2, 60, 32, *col);
                 char hex[16];
                 snprintf(hex, sizeof(hex), "#%02X%02X%02X", col->r, col->g, col->b);
-                m_gfx->Text(FontSize::Small, vx + 78, y + 4, t.dim, hex);
+                m_gfx->Text(FontSize::Small, vx + 78, y + 4, WithAlpha(t.dim, alpha), hex);
             } else if (i == EF_Background) {
-                const char *slash = c.wallpaper[0] ? strrchr(c.wallpaper, '/') : nullptr;
-                const char *bg = (c.wallpaper[0] == '\0') ? T("Gradient")
-                                : (slash ? slash + 1 : c.wallpaper);
-                m_gfx->Text(FontSize::Small, vx - 40, y + 4, t.dim, "<");
-                m_gfx->Text(FontSize::Normal, vx, y, t.fg, bg);
+                const char *bg = (c.background_style == BackgroundStyle_Ribbon) ? T("Ribbon") : T("Gradient");
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), bg);
+            } else if (i == EF_Wallpaper) {
+                const char *wp_label;
+                if (c.wallpaper[0]) {
+                    const char *slash = strrchr(c.wallpaper, '/');
+                    wp_label = slash ? slash + 1 : c.wallpaper;
+                } else {
+                    wp_label = T("(none)");
+                }
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), wp_label);
+            } else if (i == EF_WallpaperDim || i == EF_WallpaperBlur || i == EF_WallpaperSnow) {
+                // Show On/Off toggle.
+                int val = (i == EF_WallpaperDim) ? c.wallpaper_dim
+                       : (i == EF_WallpaperBlur) ? c.wallpaper_blur
+                       : c.wallpaper_snow;
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha),
+                            val ? T("On") : T("Off"));
+            } else if (i == EF_WallpaperBlurRadius) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.wallpaper_blur_radius);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_WallpaperFps) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.wallpaper_fps);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_RibbonLines) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.ribbon_line_count);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_RibbonThickness) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.ribbon_thickness);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_RibbonAmplitude) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.ribbon_amplitude);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_RibbonSeed) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.ribbon_seed);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_RibbonLayers) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.ribbon_layers);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_RibbonYCenter) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d", c.ribbon_y_center);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
             }
         }
 
         // Contextual hint for the current row.
         if (m_edit_cursor == EF_Background)
-            DrawHint("Up/Down: Row    Left/Right: Change background    B: Back");
+            DrawHint("Up/Down: Row    Left/Right: Change background type    B: Back");
+        else if (m_edit_cursor == EF_Wallpaper)
+            DrawHint("Up/Down: Row    Left/Right: Choose photo overlay    B: Back");
+        else if (IsEffectRow(m_edit_cursor))
+            DrawHint("Up/Down: Row    Left/Right/A: Toggle effect    Left/Right: Adjust value    B: Back");
+        else if (m_edit_cursor == EF_WallpaperFps)
+            DrawHint("Up/Down: Row    Left/Right: Adjust video fps    B: Back");
+        else if (IsRibbonRow(m_edit_cursor))
+            DrawHint("Up/Down: Row    Left/Right: Adjust value    B: Back");
         else if (m_edit_cursor == EF_Save)
             DrawHint("Up/Down: Row    A: Save & apply    B: Back");
         else if (m_edit_cursor == EF_Rename)
@@ -3138,7 +4786,14 @@ namespace sl::menu::ui {
         m_gfx->FillRect(bx, by, bw, bh, WithAlpha(t.bg_bottom, 245));
         m_gfx->FillRect(bx, by, bw, 4, t.accent);
 
-        m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title, T("Close running application?"));
+        // Power prompts set their own heading (and sometimes a warning line); the
+        // launch/close dialogs are always about the running game.
+        m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title,
+                            m_dialog_title.empty() ? T("Close running application?")
+                                                   : m_dialog_title.c_str());
+        if (!m_dialog_note.empty())
+            m_gfx->TextCentered(FontSize::Small, cx, by + 88, t.dim, m_dialog_note.c_str());
+
         const char *opts[2] = { T("Yes"), T("No") };
         for (int i = 0; i < 2; i++) {
             bool sel = (i == m_dialog_cursor);

@@ -7,6 +7,7 @@
 #include <sl/menu/audio/Music.hpp>
 #include <sl/menu/audio/Sound.hpp>
 #include <sl/menu/hb/Homebrew.hpp>
+#include <sl/menu/play/PlayStats.hpp>
 #include <sl/menu/widgets/Widgets.hpp>
 #include <vector>
 #include <string>
@@ -34,9 +35,10 @@ namespace sl::menu::ui {
     // Main-screen layout. List is the original text carousel; Line is a
     // horizontal cover carousel (EmulationStation style); Grid is a page of icon
     // tiles; Cover is a fullscreen single-cover pager; Shelf is an Xbox-360-style
-    // row of uniform covers with a highlighted selection card. Line, Grid, Cover
-    // and Shelf render the cached app icons.
-    enum class UiMode { List, Line, Grid, Cover, Shelf, Count };
+    // row of uniform covers with a highlighted selection card; XMB mimics the
+    // PSP/PS3 cross-media bar with category icons across the top and vertical
+    // sub-items below. Line, Grid, Cover, and Shelf render the cached app icons.
+    enum class UiMode { List, Line, Grid, Cover, Shelf, XMB, Count };
 
     struct MenuItem {
         ItemKind    kind;
@@ -50,7 +52,9 @@ namespace sl::menu::ui {
     };
 
     // Order games are listed in (favourites are always pinned above the rest).
-    enum class SortMode { Default, TitleAsc, TitleDesc, GamecardFirst, Count };
+    // New modes go on the end: the active one is persisted by number.
+    enum class SortMode { Default, TitleAsc, TitleDesc, GamecardFirst,
+                          RecentlyPlayed, MostPlayed, Count };
 
     struct AppEntry {
         u64         app_id;
@@ -64,13 +68,17 @@ namespace sl::menu::ui {
         enum class Action {
             None, LaunchApp, ResumeApp, TerminateApp,
             OpenAlbum, OpenUserPage, OpenNetConnect, OpenMiiEdit,
-            OpenWebBrowser, OpenControllers, OpenHomebrewMenu, OpenPower,
+            OpenWebBrowser, OpenControllers, OpenHomebrewMenu,
+            PowerSleep, PowerReboot, PowerShutdown, PowerPayload,
             LaunchHomebrew, LaunchHomebrewApp, FinishSetup, Quit,
         };
 
         // Path of the .nro to launch, valid when OnButton returns LaunchHomebrew[App].
         const std::string &HomebrewPath() const { return m_hb_launch_path; }
         u64 HomebrewDonor() const { return m_hb_donor; }
+
+        // Payload to chainload, valid when OnButton returns PowerPayload.
+        const std::string &PayloadPath() const { return m_payload_path; }
 
         ~Menu();
 
@@ -119,8 +127,8 @@ namespace sl::menu::ui {
     private:
         enum class Screen { Oobe, Welcome, Main, Theming, Themes, ThemeEditor, ColorPicker,
                             Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew, About,
-                            SysEntries };
-        enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame };
+                            SysEntries, Power, Payloads };
+        enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower };
 
         void RebuildItems();
 
@@ -130,6 +138,48 @@ namespace sl::menu::ui {
         Action OnButtonTheming(Btn b);
         Action OnButtonAbout(Btn b);
         void   DrawAbout();
+
+        // ---- power screen ---------------------------------------------------
+        // Replaces the old "+ sleeps immediately": sleep, restart, power off, and
+        // (when payloads are present on the SD) chainloading one of them.
+        Action OnButtonPower(Btn b);
+        void   DrawPower();
+        void   EnterPower();          // scan payloads, build the rows, show it
+        void   BuildPowerRows();      // which rows are offered right now
+        Action OnButtonPayloads(Btn b);
+        void   DrawPayloads();
+        void   ScanPayloads();        // .bin files under the usual payload folders
+        // Ask before anything that closes a running game / drops the console.
+        void   AskPower(Action act, const char *prompt);
+        void   ShowPowerError();      // one-shot reason left by a failed chainload
+        std::vector<int>         m_power_rows;      // row ids currently shown
+        int                      m_power_cursor  = 0;
+        std::vector<std::string> m_payloads;        // full paths of the .bin files
+        std::vector<std::string> m_payload_names;   // display names, same order
+        int                      m_payload_cursor  = 0;
+        bool                     m_payloads_scanned = false;
+        std::string              m_payload_path;    // set on Action::PowerPayload
+        Action      m_power_confirm = Action::None; // what ConfirmPower will run
+        std::string m_dialog_title;                 // dialog heading
+        std::string m_dialog_note;                  // optional line under it
+
+        // ---- play statistics (pdm) -----------------------------------------
+        // Total play time / last played per title, for the two play-based sorts
+        // and the info line on the main screen. Queried on a worker so the pdm
+        // round-trips never sit on a frame.
+        static void PlayStatsTrampoline(void *self);
+        void StartPlayStats();        // no-op while one is already running
+        void PollPlayStats();         // main thread: swap results in when it ends
+        void LoadPlayCache();         // last run's numbers, for the first frame
+        void SavePlayCache() const;
+        const play::PlayInfo *Play(u64 app_id) const;
+        Thread m_play_thread{};
+        std::vector<u64>            m_play_ids;      // worker input (ids snapshot)
+        std::vector<play::PlayInfo> m_play_result;   // worker output
+        std::unordered_map<u64, play::PlayInfo> m_play;  // live stats by title id
+        bool m_play_running = false;
+        bool m_play_dirty   = true;   // app list changed -> re-query
+        std::atomic<bool> m_play_done{false};
 
         // Post-setup welcome screen: greets the user by name over the opening
         // jingle, then hands off to the main menu (A skips).
@@ -204,8 +254,14 @@ namespace sl::menu::ui {
 
         // Theme editor helpers.
         void ScanWallpapers();      // list background images under slaunch/themes
+
+        // Icon packs
+        void ScanIconPacks();       // discover packs under slaunch/icon_packs
+        void LoadIconPackSetting(); // read saved icon pack selection
+        void SaveIconPackSetting(); // persist icon pack selection
         void OpenColorPicker(SDL_Color *target);
-        void CycleBackground(int dir);  // Gradient <-> available images
+        void CycleBackground(int dir);  // Gradient <-> Ribbon
+        void CycleWallpaper(int dir);    // cycle photo overlay independently
 
         // Favourites + sorting.
         bool IsFavourite(u64 app_id) const;
@@ -233,6 +289,13 @@ namespace sl::menu::ui {
 
         // Keyboard bridge (swkbd runs in the daemon; see Protocol.hpp).
 
+        // Fit text into a pixel width, appending "..." when it has to be cut.
+        // Cuts on a UTF-8 boundary (so a multi-byte glyph is never split in
+        // half) and finds the cut by bisection, which keeps a long name to a
+        // handful of width probes instead of one per dropped byte - each probe
+        // otherwise rasterises and caches a throwaway string.
+        std::string Ellipsize(const std::string &s, int maxw, gfx::FontSize fs) const;
+
         void DrawBackground();
         void DrawTopBar(const char *center_title);
         void DrawHint(const char *hint);
@@ -249,6 +312,7 @@ namespace sl::menu::ui {
         void DrawMainGrid();        // page of icon tiles
         void DrawMainCover();       // fullscreen single-cover pager
         void DrawMainShelf();       // Xbox-360-style uniform cover row
+        void DrawMainXmb();          // PSP/PS3 cross-media bar
         // Sort mode -> short label for the shelf header / options menu.
         const char *SortLabel() const;
         void DrawMainEmpty();       // "Loading..." / "No apps found" placeholder
@@ -263,6 +327,7 @@ namespace sl::menu::ui {
         int  ListItemAt(int x, int y) const;
         // Load (cached) the black/white icon for a non-game menu entry, or null.
         SDL_Texture *SystemIcon(ItemKind kind);
+        void InvalidateSysIcons(); // clear the cached system icon textures
         void DrawOptions();
         void DrawTheming();
         void DrawThemes();
@@ -290,7 +355,18 @@ namespace sl::menu::ui {
         ThemeManager m_theme;
 
         SDL_Texture *m_wallpaper       = nullptr;
+        SDL_Texture *m_wallpaper_blur  = nullptr;  // pre-baked low-res (blurred) copy
+        std::string  m_wallpaper_path;              // current wallpaper file path
         int          m_wallpaper_theme = -1;
+        // Video frame sequence: when wallpaper path is a directory, cycle through frames
+        std::vector<std::string> m_video_frames;   // sorted frame paths
+        int          m_video_frame_idx = 0;        // current frame index
+        u64          m_video_frame_tick = 0;       // tick when last frame was swapped
+
+        // Gaussian-blur an image file, baking the result into a new texture.
+        // Reads the file as an SDL_Surface (CPU memory), blurs on CPU, uploads.
+        // Caller owns the returned texture (free with m_gfx->FreeImage).
+        SDL_Texture *BlurImage(const char *path);
 
         Screen m_screen = Screen::Main;
         Dialog m_dialog = Dialog::None;
@@ -314,6 +390,11 @@ namespace sl::menu::ui {
         audio::Music   m_music;               // background menu music
         audio::Sound   m_sfx;                 // UI sound effects (nav, welcome)
         gfx::IconCache m_hb_icons;            // homebrew .nro icon cache
+
+        // Custom icon packs: users drop PNGs (same names as built-in) into
+        // sdmc:/slaunch/icon_packs/<pack_name>/.  Index 0 = "Built-in" (default).
+        std::vector<std::string> m_icon_packs;   // discovered pack names
+        int  m_icon_pack_idx = 0;                 // 0 = built-in
         std::vector<hb::HbEntry> m_hb;        // scanned homebrew (browser)
         std::vector<hb::HbEntry> m_hb_pins;   // homebrew pinned to the main menu (resolved)
         std::vector<std::string> m_hb_favs;   // pinned homebrew marked as favourites (paths)
@@ -368,8 +449,38 @@ namespace sl::menu::ui {
         float m_grid_scroll = 0.0f;
         float m_grid_hl_x   = -1.0f;
         float m_grid_hl_y   = 0.0f;
+
+        // ---- XMB (PSP cross-media bar) --------------------------------------
+        // The bar is a fixed set of columns in the PSP's own order; each holds
+        // the indices of the m_items that belong to it. Built once whenever the
+        // item list changes, so navigating and drawing never rescan m_items
+        // (they used to, per item per frame).
+        enum class XmbCat { Settings, Photo, User, Network, Game, Homebrew, Count };
+        struct XmbColumn {
+            XmbCat           cat;
+            std::vector<int> items;   // indices into m_items, in list order
+        };
+        std::vector<XmbColumn> m_xmb_cols;      // non-empty columns only, PSP order
+        int   m_xmb_col         = -1;   // index into m_xmb_cols (-1 = not placed yet)
+        int   m_xmb_item        = 0;    // index into m_xmb_cols[m_xmb_col].items
+        float m_xmb_col_scroll  = 0.0f; // animated bar position
+        float m_xmb_item_scroll = 0.0f; // animated column position
+
+        static XmbCat XmbCatOf(const MenuItem &it);
+        static const char *XmbCatName(XmbCat c);
+        static ItemKind    XmbCatIconKind(XmbCat c);
+        bool  m_xmb_placed = false; // the bar has been positioned by the user
+        void XmbRebuild();          // regroup m_items into m_xmb_cols
+        void XmbOpenDefaultColumn();// first show: start on Games
+        void XmbSyncFromCursor();   // point the bar at whatever m_cursor selects
+        void XmbApplyCursor();      // m_cursor = the item the bar has selected
+        int  XmbItemAt(int x, int y) const;   // item index under a touch, or -1
+        int  XmbColAt(int x, int y) const;    // column under a touch, or -1
+        // One bare icon on the bar: artwork for games, a tinted glyph otherwise.
+        void DrawXmbIcon(const MenuItem &it, int cx, int cy, int size, Uint8 alpha);
         int m_theme_cursor   = 0;
         int m_edit_cursor    = 0;
+        float m_edit_scroll  = 0.0f; // animated scroll position for the editor
         int m_editing_theme  = -1; // global index of the custom theme being edited
         int m_oobe_step      = 0;
 
@@ -391,6 +502,10 @@ namespace sl::menu::ui {
         bool m_touching      = false;
         int  m_touch_lx = 0, m_touch_ly = 0;   // last touch position
         int  m_touch_widget  = -1;             // widget under the touch, or -1
+        // touch scrolling on main menu and submenus
+        bool m_touch_scroll_active = false;
+        int  m_touch_start_x = 0, m_touch_start_y = 0;
+        float m_touch_scroll_start = 0.0f;      // scroll_pos at touch start
         int  m_kb_row    = 0;  // 0-3 char rows, 4 special
         int  m_kb_col    = 0;
         bool m_kb_upper  = false;

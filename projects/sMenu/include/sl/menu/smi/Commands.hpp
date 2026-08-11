@@ -72,8 +72,26 @@ namespace sl::menu::smi {
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenUserPage);
     }
 
-    inline Result OpenPowerMenu() {
-        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenPowerMenu);
+    // ---- power -------------------------------------------------------------
+    // Sleep happens right away and the menu stays up; the other three are
+    // carried out once the menu applet has exited (see the daemon's pending
+    // actions), so the menu must quit after sending them.
+    inline Result PowerSleep() {
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::PowerSleep);
+    }
+
+    inline Result PowerReboot() {
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::PowerReboot);
+    }
+
+    inline Result PowerShutdown() {
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::PowerShutdown);
+    }
+
+    inline Result RebootToPayload(const char *payload_path) {
+        sl::smi::PayloadReboot p {};
+        strncpy(p.payload_path, payload_path ? payload_path : "", sizeof(p.payload_path) - 1);
+        return sl::smi::SendMenuCommand(sl::smi::SystemMessage::RebootToPayload, p);
     }
 
     inline Result RestartMenu() {

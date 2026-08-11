@@ -21,9 +21,11 @@
 #   dkp-pacman -S devkitA64 libnx switch-tools switch-curl switch-mbedtls
 #---------------------------------------------------------------------------------
 
-.PHONY: all ssystem smenu sinstaller nxlink clean package assets
+.PHONY: all ssystem smenu sinstaller hbloader nxlink clean package assets
 
-all: ssystem smenu sinstaller assets
+# Order matters: sInstaller bundles SdOut/ into its romfs, so everything that
+# stages files there (including hbloader -> assets) must run before it.
+all: ssystem smenu hbloader assets sinstaller
 	@echo ""
 	@echo "=== sLaunch build complete ==="
 	@echo "SD card layout ready in SdOut/"
@@ -41,6 +43,8 @@ assets:
 	@mkdir -p SdOut/slaunch/fonts SdOut/slaunch/themes SdOut/slaunch/bin/hbloader SdOut/slaunch/bin/hbloader_app SdOut/slaunch/widgets SdOut/slaunch/lang
 	@cp -f assets/fonts/*.ttf SdOut/slaunch/fonts/ 2>/dev/null || true
 	@cp -f assets/fonts/*.otf SdOut/slaunch/fonts/ 2>/dev/null || true
+	@# .ttc: the bundled Noto Sans CJK collection (Japanese/Korean/Chinese).
+	@cp -f assets/fonts/*.ttc SdOut/slaunch/fonts/ 2>/dev/null || true
 	@cp -f assets/fonts/LICENSE-OFL.txt assets/fonts/ATTRIBUTION.md SdOut/slaunch/fonts/ 2>/dev/null || true
 	@# Default Lua widgets. example.lua is reference-only, so it is not shipped.
 	@# All ship disabled by default (Theming > Widgets turns them on).
@@ -55,6 +59,15 @@ assets:
 	@cp -f assets/theming.png assets/controllers.png assets/album.png assets/user.png \
 	       assets/browser.png assets/mii.png assets/settings.png assets/power.png \
 	       assets/homebrewmenu.png assets/random.png SdOut/slaunch/icons/ 2>/dev/null || true
+	@# Bundled icon packs (Theming > Appearance > Icon pack). Each subfolder of
+	@# assets/icon_packs is one pack; only the PNGs ship, the source vectors and
+	@# attribution stay in the repo. Users can drop their own packs alongside.
+	@for pack in assets/icon_packs/*/; do \
+	    [ -d "$$pack" ] || continue; \
+	    name=$$(basename "$$pack"); \
+	    mkdir -p "SdOut/slaunch/icon_packs/$$name"; \
+	    cp -f "$$pack"*.png "SdOut/slaunch/icon_packs/$$name/" 2>/dev/null || true; \
+	done
 	@# nx-hbloader exefs served via ECS for the Homebrew menu (loads hbmenu.nro).
 	@# Applet variant (application_type=2) runs homebrew as a library applet.
 	@cp -f assets/hbloader/main assets/hbloader/main.npdm SdOut/slaunch/bin/hbloader/ 2>/dev/null || true
@@ -79,6 +92,13 @@ sinstaller:
 	@echo "--- Building sInstaller ---"
 	@$(MAKE) -C projects/sInstaller
 
+# sLaunch's nx-hbloader fork (see projects/hbloader/README.md). The built NSO
+# replaces the prebuilt assets/hbloader/main; the npdms there stay as-is.
+hbloader:
+	@echo "--- Building hbloader fork ---"
+	@$(MAKE) -C projects/hbloader
+	@cp -f projects/hbloader/hbl.nso assets/hbloader/main
+
 # Send the installer NRO to a running Switch via nxlink.
 # The Switch must be on the same network, running the Homebrew Menu
 # (or any NRO that calls nxlinkInitialize / accepts nxlink connections).
@@ -93,6 +113,7 @@ clean:
 	@$(MAKE) -C projects/sSystem    clean
 	@$(MAKE) -C projects/sMenu      clean
 	@$(MAKE) -C projects/sInstaller clean
+	@$(MAKE) -C projects/hbloader   clean
 	@rm -rf SdOut/
 	@echo "Cleaned."
 

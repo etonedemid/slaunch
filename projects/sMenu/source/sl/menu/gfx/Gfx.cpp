@@ -2,6 +2,8 @@
 #include <SDL2/SDL_image.h>
 #include <switch.h>
 #include <cstdio>
+#include <cstring>
+#include <utility>
 
 namespace sl::menu::gfx {
 
@@ -36,9 +38,26 @@ namespace sl::menu::gfx {
         if (TTF_Init() != 0) fatalThrow(MAKERESULT(360, 34)); // TTF_Init
         IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
 
-        // Load the system shared font (Nintendo Standard) via the pl service.
+        // Load the system shared font via the pl service, picking the one that
+        // matches the console's language. Nintendo Standard covers Latin and
+        // Japanese but has no Hangul and no Simplified/Traditional-specific
+        // hanzi, so a Korean or Chinese console would otherwise draw the whole
+        // menu (and every game name) as tofu boxes. These fonts ship with the
+        // firmware, so this costs nothing and always matches the system look.
+        PlSharedFontType want = PlSharedFontType_Standard;
+        u64 lc = 0;
+        if (R_SUCCEEDED(setGetSystemLanguage(&lc))) {
+            char code[9] = {};
+            memcpy(code, &lc, 8);
+            if      (!strncmp(code, "ko",      2)) want = PlSharedFontType_KO;
+            else if (!strncmp(code, "zh-Hant", 7)) want = PlSharedFontType_ChineseTraditional;
+            else if (!strncmp(code, "zh-TW",   5)) want = PlSharedFontType_ChineseTraditional;
+            else if (!strncmp(code, "zh",      2)) want = PlSharedFontType_ChineseSimplified;
+        }
+
         PlFontData font = {};
-        if (R_FAILED(plGetSharedFontByType(&font, PlSharedFontType_Standard)))
+        if (R_FAILED(plGetSharedFontByType(&font, want)) &&
+            R_FAILED(plGetSharedFontByType(&font, PlSharedFontType_Standard)))
             fatalThrow(MAKERESULT(360, 35)); // pl shared font
 
         for (int i = 0; i < (int)FontSize::Count; i++) {
@@ -205,6 +224,87 @@ namespace sl::menu::gfx {
         SDL_SetRenderTarget(m_renderer, prev);
 
         SDL_DestroyTexture(src);
+        return dst;
+    }
+
+    // Scanline-filled triangle. SDL2 has no filled-primitive call before
+    // SDL_RenderGeometry, so the span between the two active edges is drawn as
+    // a 1px rect per row. Only used for small shapes (the XMB selection wedge),
+    // where a few dozen rows costs nothing.
+    void Gfx::FillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, SDL_Color c) {
+        // Sort vertices top to bottom; the triangle then splits at y1 into a
+        // flat-bottom half and a flat-top half sharing the long y0..y2 edge.
+        if (y0 > y1) { std::swap(x0, x1); std::swap(y0, y1); }
+        if (y0 > y2) { std::swap(x0, x2); std::swap(y0, y2); }
+        if (y1 > y2) { std::swap(x1, x2); std::swap(y1, y2); }
+        if (y2 == y0) return;                       // zero height, nothing to fill
+
+        SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a ? c.a : 255);
+        for (int y = y0; y <= y2; y++) {
+            // Long edge, spanning the whole triangle.
+            const int lx = x0 + (int)((long long)(x2 - x0) * (y - y0) / (y2 - y0));
+            // Short edge: the upper one until y1, the lower one after it.
+            const bool lower = (y > y1);
+            const int  ya = lower ? y1 : y0, yb = lower ? y2 : y1;
+            const int  xa = lower ? x1 : x0, xb = lower ? x2 : x1;
+            const int  sx = (yb == ya) ? xb
+                          : xa + (int)((long long)(xb - xa) * (y - ya) / (yb - ya));
+
+            const int left  = lx < sx ? lx : sx;
+            const int right = lx < sx ? sx : lx;
+            SDL_Rect r { left, y, right - left + 1, 1 };
+            SDL_RenderFillRect(m_renderer, &r);
+        }
+    }
+
+    SDL_Texture *Gfx::LoadGlyph(const char *path, int w, int h) {
+        SDL_Surface *raw = IMG_Load(path);
+        if (!raw) return nullptr;
+
+        SDL_Surface *s = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGBA32, 0);
+        SDL_FreeSurface(raw);
+        if (!s) return nullptr;
+
+        // A file that already varies its alpha is a real cut-out; leave it be.
+        // Otherwise the shape is encoded as brightness on a flat (black)
+        // background, so brightness becomes the alpha and the colour goes white.
+        bool has_alpha = false;
+        const int n = s->w * s->h;
+        Uint32 *px = (Uint32 *)s->pixels;
+        if (SDL_MUSTLOCK(s)) SDL_LockSurface(s);
+        for (int i = 0; i < n; i++) {
+            Uint8 r, g, b, a;
+            SDL_GetRGBA(px[i], s->format, &r, &g, &b, &a);
+            if (a != 255) { has_alpha = true; break; }
+        }
+        if (!has_alpha) {
+            for (int i = 0; i < n; i++) {
+                Uint8 r, g, b, a;
+                SDL_GetRGBA(px[i], s->format, &r, &g, &b, &a);
+                const Uint8 lum = (Uint8)((r * 77 + g * 151 + b * 28) >> 8);
+                px[i] = SDL_MapRGBA(s->format, 255, 255, 255, lum);
+            }
+        }
+        if (SDL_MUSTLOCK(s)) SDL_UnlockSurface(s);
+
+        SDL_Texture *full = SDL_CreateTextureFromSurface(m_renderer, s);
+        SDL_FreeSurface(s);
+        if (!full) return nullptr;
+        SDL_SetTextureBlendMode(full, SDL_BLENDMODE_BLEND);
+        if (w <= 0 || h <= 0) return full;
+
+        // Bake the downscale once so per-frame blits stay cheap.
+        SDL_Texture *dst = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_RGBA8888,
+                                             SDL_TEXTUREACCESS_TARGET, w, h);
+        if (!dst) return full;
+        SDL_SetTextureBlendMode(dst, SDL_BLENDMODE_BLEND);
+        SDL_Texture *prev = SDL_GetRenderTarget(m_renderer);
+        SDL_SetRenderTarget(m_renderer, dst);
+        SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 0);
+        SDL_RenderClear(m_renderer);
+        SDL_RenderCopy(m_renderer, full, nullptr, nullptr);
+        SDL_SetRenderTarget(m_renderer, prev);
+        SDL_DestroyTexture(full);
         return dst;
     }
 

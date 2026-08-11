@@ -392,7 +392,16 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
             menu::smi::LaunchHomebrewApp(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str());
             g_Running = false;
             break;
-        case Menu::Action::OpenPower:        menu::smi::OpenPowerMenu();    break; // sleep; menu stays
+        // Sleep is instant and the menu is still there when the console wakes.
+        // The other three tear the system down, so - like a game launch - the menu
+        // sends the request and quits, leaving the daemon to carry it out.
+        case Menu::Action::PowerSleep:       menu::smi::PowerSleep();       break;
+        case Menu::Action::PowerReboot:      menu::smi::PowerReboot();      g_Running = false; break;
+        case Menu::Action::PowerShutdown:    menu::smi::PowerShutdown();    g_Running = false; break;
+        case Menu::Action::PowerPayload:
+            menu::smi::RebootToPayload(g_UI->PayloadPath().c_str());
+            g_Running = false;
+            break;
         case Menu::Action::FinishSetup:
             MarkSetupDone();
             g_UI->SetStatus("Setup complete. Welcome!");

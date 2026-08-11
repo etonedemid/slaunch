@@ -17,6 +17,11 @@ namespace sl::menu::ui {
     // the menu runs on built-in defaults + the pl system font. Set by main.
     extern bool g_sd_ok;
 
+    enum BackgroundStyle {
+        BackgroundStyle_Gradient = 0,
+        BackgroundStyle_Ribbon   = 1,
+    };
+
     struct Theme {
         char      name[24];
         SDL_Color bg_top;      // gradient start
@@ -25,7 +30,27 @@ namespace sl::menu::ui {
         SDL_Color accent;      // selected / highlight
         SDL_Color dim;         // secondary text
         SDL_Color title;       // headings
-        char      wallpaper[96]; // optional SD path; "" for none
+        char      wallpaper[96]; // optional photo/video overlay; "" for none
+        // Plate drawn behind the system-entry icons (Theming, Album, Power...).
+        // Those icons are white artwork on a solid field, so the field is a
+        // theme choice rather than something baked into the PNG. Black matches
+        // how the shipped icons were originally drawn.
+        SDL_Color icon_bg { 0, 0, 0, 255 };
+        // Individual effect toggles -- any combination may be active.
+        int       wallpaper_dim  = 1;         // dark scrim overlay (0/1)
+        int       wallpaper_blur = 0;         // gaussian blur (0/1)
+        int       wallpaper_blur_radius = 8;  // blur radius in px (2-32)
+        int       wallpaper_snow = 0;         // snow overlay (0/1)
+        int       wallpaper_fps    = 10;      // frames-per-second for video frame sequences (1-30)
+        int       background_style = BackgroundStyle_Gradient;
+
+        // Ribbon-wave parameters (only used when background_style == Ribbon)
+        int       ribbon_line_count   = 18;   // number of wave lines (1-40)
+        int       ribbon_thickness    = 3;    // pixel thickness per line (1-20)
+        int       ribbon_amplitude    = 20;   // peak vertical deviation (5-60)
+        int       ribbon_seed         = 0;    // color/phase seed (0-99) -- re-roll look
+        int       ribbon_layers       = 1;    // overlapping ribbon passes (1-4)
+        int       ribbon_y_center     = 360;  // preferred vertical center (40-680)
     };
 
     constexpr int BuiltinThemeCount = 5;
