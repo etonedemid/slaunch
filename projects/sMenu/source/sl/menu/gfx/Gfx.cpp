@@ -105,6 +105,7 @@ namespace sl::menu::gfx {
     void Gfx::Exit() {
         ClearTextCache();
         if (m_gradTex) SDL_DestroyTexture(m_gradTex);
+        if (m_whiteTex) { SDL_DestroyTexture(m_whiteTex); m_whiteTex = nullptr; }
         FreeAltFonts();
         for (auto &f : m_sysFonts) { if (f) TTF_CloseFont(f); f = nullptr; }
         if (m_renderer) SDL_DestroyRenderer(m_renderer);
@@ -121,8 +122,17 @@ namespace sl::menu::gfx {
 
     void Gfx::Present() { SDL_RenderPresent(m_renderer); }
 
+    // Alpha 0 means invisible, not "unset".
+    //
+    // These three entry points used to read alpha as `c.a ? c.a : 255`, so a
+    // fully transparent colour came out fully opaque - the exact inverse of what
+    // was asked for. It was there to let a caller write an SDL_Color without an
+    // alpha field and still get something visible, but no caller does that (the
+    // struct is always built with all four components, or through WithAlpha),
+    // and it quietly broke every fade that reaches zero. The renderer is in
+    // SDL_BLENDMODE_BLEND, so 0 blends to nothing exactly as it should.
     void Gfx::FillRect(int x, int y, int w, int h, SDL_Color c) {
-        SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a ? c.a : 255);
+        SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a);
         SDL_Rect r { x, y, w, h };
         SDL_RenderFillRect(m_renderer, &r);
     }
@@ -193,7 +203,7 @@ namespace sl::menu::gfx {
         const CachedText &e = GetText(s, text);
         if (!e.tex) return;
         SDL_SetTextureColorMod(e.tex, c.r, c.g, c.b);
-        SDL_SetTextureAlphaMod(e.tex, c.a ? c.a : 255);
+        SDL_SetTextureAlphaMod(e.tex, c.a);   // see FillRect: 0 means invisible
         SDL_Rect dst { x, y, e.w, e.h };
         SDL_RenderCopy(m_renderer, e.tex, nullptr, &dst);
     }
@@ -201,6 +211,89 @@ namespace sl::menu::gfx {
     void Gfx::TextCentered(FontSize s, int cx, int y, SDL_Color c, const char *text) {
         int w = TextWidth(s, text);
         Text(s, cx - w / 2, y, c, text);
+    }
+
+    // ---- 3D quads ---------------------------------------------------------
+
+    SDL_Texture *Gfx::WhiteTexture() {
+        if (m_whiteTex) return m_whiteTex;
+        m_whiteTex = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_RGBA32,
+                                       SDL_TEXTUREACCESS_STATIC, 1, 1);
+        if (!m_whiteTex) return nullptr;
+        const Uint32 px = 0xFFFFFFFFu;
+        SDL_UpdateTexture(m_whiteTex, nullptr, &px, 4);
+        SDL_SetTextureBlendMode(m_whiteTex, SDL_BLENDMODE_BLEND);
+        return m_whiteTex;
+    }
+
+    void Gfx::Project3D(const float p[3], float &sx, float &sy) const {
+        // Guard the near plane: a corner swinging behind the camera would
+        // otherwise divide through zero and fling the quad across the screen.
+        const float z = (p[2] < 0.05f) ? 0.05f : p[2];
+        sx = Width  * 0.5f + p[0] * Focal / z;
+        sy = Height * 0.5f - p[1] * Focal / z;   // y is up in view space
+    }
+
+    void Gfx::DrawQuad3D(SDL_Texture *tex, const float c[4][3],
+                         SDL_Color tint, Uint8 alpha_top, Uint8 alpha_bottom,
+                         bool flip_v, int strips, const float uv[4]) {
+        // A null texture means "flat colour". SDL_RenderGeometry is documented
+        // to accept NULL for that, but those triangles do not actually appear on
+        // this backend - which silently dropped every untextured face, so a box
+        // with no cover art rendered as a hole rather than as a blank case.
+        // A 1x1 white pixel modulated by the vertex colour is the same thing and
+        // always draws.
+        if (!tex) tex = WhiteTexture();
+        if (strips < 1)  strips = 1;
+        if (strips > 32) strips = 32;
+
+        const float u0 = uv ? uv[0] : 0.0f, v0 = uv ? uv[1] : 0.0f;
+        const float u1 = uv ? uv[2] : 1.0f, v1 = uv ? uv[3] : 1.0f;
+
+        if (tex) {
+            SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureColorMod(tex, 255, 255, 255);
+            SDL_SetTextureAlphaMod(tex, 255);   // per-vertex colour carries alpha
+        }
+
+        // corners: 0 = TL, 1 = TR, 2 = BR, 3 = BL
+        SDL_Vertex v[32 * 6];
+        int n = 0;
+
+        // u/vtex arrive as 0..1 across the quad and are mapped into the sub-rect.
+        auto vert = [&](const float p[3], float u, float vtex, Uint8 a) {
+            SDL_Vertex out;
+            Project3D(p, out.position.x, out.position.y);
+            out.color = SDL_Color{ tint.r, tint.g, tint.b, a };
+            const float vv = flip_v ? 1.0f - vtex : vtex;
+            out.tex_coord = SDL_FPoint{ u0 + (u1 - u0) * u, v0 + (v1 - v0) * vv };
+            v[n++] = out;
+        };
+
+        float top0[3], bot0[3], top1[3], bot1[3];
+        for (int s = 0; s < strips; s++) {
+            const float t0 = (float)s / (float)strips;
+            const float t1 = (float)(s + 1) / (float)strips;
+
+            // Interpolate along the top and bottom edges in 3D, then project -
+            // this is the step that keeps the mapping honest.
+            for (int k = 0; k < 3; k++) {
+                top0[k] = c[0][k] + (c[1][k] - c[0][k]) * t0;
+                top1[k] = c[0][k] + (c[1][k] - c[0][k]) * t1;
+                bot0[k] = c[3][k] + (c[2][k] - c[3][k]) * t0;
+                bot1[k] = c[3][k] + (c[2][k] - c[3][k]) * t1;
+            }
+
+            vert(top0, t0, 0.0f, alpha_top);
+            vert(top1, t1, 0.0f, alpha_top);
+            vert(bot1, t1, 1.0f, alpha_bottom);
+
+            vert(top0, t0, 0.0f, alpha_top);
+            vert(bot1, t1, 1.0f, alpha_bottom);
+            vert(bot0, t0, 1.0f, alpha_bottom);
+        }
+
+        SDL_RenderGeometry(m_renderer, tex, v, n, nullptr, 0);
     }
 
     SDL_Texture *Gfx::LoadImage(const char *path) {
@@ -239,7 +332,7 @@ namespace sl::menu::gfx {
         if (y1 > y2) { std::swap(x1, x2); std::swap(y1, y2); }
         if (y2 == y0) return;                       // zero height, nothing to fill
 
-        SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a ? c.a : 255);
+        SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a);   // see FillRect
         for (int y = y0; y <= y2; y++) {
             // Long edge, spanning the whole triangle.
             const int lx = x0 + (int)((long long)(x2 - x0) * (y - y0) / (y2 - y0));

@@ -33,6 +33,9 @@ namespace sl::menu::gfx {
         void SetScale(int px);
         static constexpr int GridScale = 192;   // default downscale for grid/list
 
+        // Live textures held (misses excluded), for the debug overlay.
+        int Live() const;
+
     private:
         static constexpr int Capacity = 48;
 

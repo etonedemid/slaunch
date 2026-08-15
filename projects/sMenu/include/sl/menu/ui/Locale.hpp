@@ -8,9 +8,12 @@
 
 namespace sl::menu::ui {
 
-    // Detect the system language and load its locale file if one exists. Safe to
-    // call once at startup (after setInitialize()).
-    void LocaleInit();
+    // Load a locale. With no argument (or "auto") the console's own language is
+    // detected and used, which is the startup behaviour; pass a code such as
+    // "ru" to force that language instead. Safe to call again at any time - the
+    // table is rebuilt in place and every T() call site re-reads it on the next
+    // frame, so a change takes effect immediately.
+    void LocaleInit(const char *override_code = nullptr);
 
     // Translate an English UI string to the active language, or return it
     // unchanged when there is no entry for it. The returned pointer is stable.

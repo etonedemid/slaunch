@@ -110,6 +110,7 @@ namespace sl::smi {
         Kb_ThemeName,
         Kb_AuroraSend,    // legacy
         Kb_WidgetOption,  // editing a Lua widget's exposed string option
+        Kb_SteamGridKey,  // SteamGridDB API key, for coverflow art
     };
     constexpr const char *KbRequestPath = "sdmc:/slaunch/config/kb_req.txt";
     constexpr const char *KbResultPath  = "sdmc:/slaunch/config/kb_result.txt";

@@ -9,7 +9,7 @@ BUILD    := build
 
 SOURCES  := source source/sl/menu/ui source/sl/menu/gfx source/sl/menu/smi \
             source/sl/menu/net source/sl/menu/widgets source/sl/menu/audio \
-            source/sl/menu/hb source/sl/menu/play ../../libs/Lua
+            source/sl/menu/hb source/sl/menu/play source/sl/menu/dbg ../../libs/Lua
 
 INCLUDES := include ../../libs/sCommon/include \
             ../../libs/Lua ../../libs/sol2/include
@@ -37,7 +37,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 0.8.0
+APP_VERSION := 0.9.0
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE

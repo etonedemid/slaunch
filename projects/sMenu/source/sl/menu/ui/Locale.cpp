@@ -32,10 +32,22 @@ namespace sl::menu::ui {
         }
     }
 
-    void LocaleInit() {
+    void LocaleInit(const char *override_code) {
         g_map.clear();
         strcpy(g_code, "en");
         strcpy(g_full, "en");
+
+        // An explicit choice from the menu wins over the console's setting.
+        // "auto" (and an empty string) mean "ask the console", which is what the
+        // rest of this function does.
+        if (override_code && *override_code && strcmp(override_code, "auto") != 0) {
+            strncpy(g_code, override_code, sizeof(g_code) - 1);
+            g_code[sizeof(g_code) - 1] = '\0';
+            strncpy(g_full, override_code, sizeof(g_full) - 1);
+            g_full[sizeof(g_full) - 1] = '\0';
+            if (strcmp(g_code, "en") != 0) LoadFile(g_code);
+            return;
+        }
 
         // The system language code is an ASCII string ("en-US", "fr-FR", ...)
         // packed into a u64. Split off the two-letter language part.

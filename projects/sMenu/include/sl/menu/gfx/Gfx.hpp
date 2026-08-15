@@ -58,6 +58,40 @@ namespace sl::menu::gfx {
         // square so this preserves them). alpha modulates the whole image.
         void         DrawImage(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha = 255);
 
+        // ---- 3D quads (coverflow) -----------------------------------------
+        // Camera sits at the origin looking down +z with y up; a quad is given
+        // by its four corners in that space, in the order top-left, top-right,
+        // bottom-right, bottom-left, and is perspective projected here.
+        //
+        // Each quad is cut into vertical strips before being handed to
+        // SDL_RenderGeometry. That is not an optimisation, it is a correctness
+        // fix: RenderGeometry interpolates texture coordinates linearly in
+        // *screen* space, so a steeply rotated quad shears its texture the way
+        // PS1 games do. Interpolating the corners in 3D and projecting each
+        // strip separately keeps the error inside a strip small enough to
+        // vanish. All strips share one texture, so the whole quad still costs a
+        // single draw call.
+        //
+        // alpha_top/alpha_bottom fade down the quad via per-vertex colour,
+        // which is what makes the mirrored reflection under a cover free.
+        // flip_v mirrors the texture vertically, for that reflection.
+        // uv is {u0, v0, u1, v1} in 0..1 and selects a sub-rectangle of the
+        // texture. That is what lets one box wrap - back, spine, front in a
+        // single image - texture three faces of a 3D box without slicing it
+        // into separate textures or compositing a new one per title.
+        void DrawQuad3D(SDL_Texture *tex, const float corners[4][3],
+                        SDL_Color tint, Uint8 alpha_top, Uint8 alpha_bottom,
+                        bool flip_v = false, int strips = 12,
+                        const float uv[4] = nullptr);
+        // Project a view-space point to screen coordinates. Exposed so layout
+        // and touch hit-testing can agree with what was drawn.
+        void Project3D(const float p[3], float &sx, float &sy) const;
+
+        // Focal length in pixels. 900 over a 720-tall surface is about a 44
+        // degree vertical field of view - wide enough for the row to splay out,
+        // narrow enough that the centre cover is not distorted.
+        static constexpr float Focal = 900.0f;
+
         // Fonts
         // The system (pl) font is always loaded and used as the "default".
         // A content font can be loaded from a .ttf/.otf on the SD card; when
@@ -97,6 +131,13 @@ namespace sl::menu::gfx {
         // bake it into a 1xHeight texture and stretch-blit it, regenerating
         // only when the theme Colors change.
         SDL_Texture *m_gradTex = nullptr;
+        // 1x1 opaque white, created on demand. DrawQuad3D substitutes it for a
+        // null texture: SDL_RenderGeometry is documented to accept NULL and draw
+        // flat colour, but on this backend those triangles do not appear, which
+        // silently loses every untextured face. Modulating a white pixel by the
+        // vertex colour gives the same result and always draws.
+        SDL_Texture *m_whiteTex = nullptr;
+        SDL_Texture *WhiteTexture();
         SDL_Color    m_gradTop = {}, m_gradBottom = {};
         bool         m_gradValid = false;
     };

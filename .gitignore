@@ -10,6 +10,8 @@ projects/sInstaller/build/
 *.nro
 *.nacp
 slaunch.zip
+slaunch-v*-sd.zip
+RELEASE_v*.md
 
 # Local Claude Code config
 .claude/

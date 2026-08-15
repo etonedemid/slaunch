@@ -12,8 +12,15 @@ namespace sl::menu::net {
     void GlobalExit();
 
     // GET url into `out`. Returns true on HTTP 2xx. `timeout_s` bounds the whole
-    // transfer. `out` is cleared on entry.
-    bool Get(const char *url, std::string &out, long timeout_s = 8);
+    // transfer. `out` is cleared on entry. `authorization`, when given, is sent
+    // as the Authorization header - SteamGridDB wants a bearer token there.
+    bool Get(const char *url, std::string &out, long timeout_s = 8,
+             const char *authorization = nullptr,
+             // Optional diagnostics: the HTTP status and the raw CURLcode. A
+             // rejected API key and an unreachable host both just return false,
+             // and telling them apart matters when something is failing in the
+             // field where no debugger can reach.
+             long *out_http = nullptr, int *out_curl = nullptr);
 
     // POST `body` to url. `content_type` and `authorization` may be null. `out`
     // receives the response body; returns true on HTTP 2xx.

@@ -79,6 +79,10 @@ assets:
 	@mkdir -p SdOut/slaunch/music SdOut/slaunch/sounds
 	@cp -f assets/music/*.mp3 assets/music/*.ogg assets/music/*.flac SdOut/slaunch/music/ 2>/dev/null || true
 	@cp -f assets/UI/*.wav SdOut/slaunch/sounds/ 2>/dev/null || true
+	@# Box wrap for the coverflow. Fetched cover art lands in this directory too,
+	@# but that is written at runtime and never staged from here.
+	@mkdir -p SdOut/slaunch/covers
+	@cp -f assets/covers/*.png SdOut/slaunch/covers/ 2>/dev/null || true
 
 ssystem:
 	@echo "--- Building sSystem ---"

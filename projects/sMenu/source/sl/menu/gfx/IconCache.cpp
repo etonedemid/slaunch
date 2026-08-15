@@ -12,6 +12,13 @@ namespace sl::menu::gfx {
         m_scale = px;
     }
 
+    int IconCache::Live() const {
+        int n = 0;
+        for (const auto &kv : m_map)
+            if (kv.second.tex) n++;   // null entries are remembered misses
+        return n;
+    }
+
     void IconCache::Exit() {
         for (auto &kv : m_map) {
             if (kv.second.tex && m_gfx) m_gfx->FreeImage(kv.second.tex);

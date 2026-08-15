@@ -4,19 +4,38 @@
 namespace sl::menu::audio {
 
     namespace {
-        const char *kPaths[(int)Sfx::Count] = {
-            "sdmc:/slaunch/sounds/welcome.wav",
-            "sdmc:/slaunch/sounds/page_left.wav",
-            "sdmc:/slaunch/sounds/page_right.wav",
-            "sdmc:/slaunch/sounds/opening.wav",   // post-setup welcome screen
+        // Candidates per effect, tried in order and first hit wins.
+        //
+        // .wav is listed ahead of .mp3 because SDL_mixer decodes WAV as a chunk
+        // unconditionally, while MP3-as-a-chunk depends on which decoders this
+        // build of the library was compiled with - so the format that always
+        // works gets first refusal, and the mp3 is there for anyone who only has
+        // that.
+        //
+        // Startup keeps opening.wav as a last resort: it is what shipped under
+        // the old name, and an install that has not been given a startup sound
+        // yet should keep the one it already had rather than falling silent.
+        const char *kPaths[(int)Sfx::Count][3] = {
+            { "sdmc:/slaunch/sounds/welcome.wav",    "sdmc:/slaunch/sounds/welcome.mp3",    nullptr },
+            { "sdmc:/slaunch/sounds/page_left.wav",  "sdmc:/slaunch/sounds/page_left.mp3",  nullptr },
+            { "sdmc:/slaunch/sounds/page_right.wav", "sdmc:/slaunch/sounds/page_right.mp3", nullptr },
+            { "sdmc:/slaunch/sounds/startup.wav",    "sdmc:/slaunch/sounds/startup.mp3",
+              "sdmc:/slaunch/sounds/opening.wav" },
+            { "sdmc:/slaunch/sounds/confirm.wav",    "sdmc:/slaunch/sounds/confirm.mp3",    nullptr },
+            { "sdmc:/slaunch/sounds/click.wav",      "sdmc:/slaunch/sounds/click.mp3",      nullptr },
+            { "sdmc:/slaunch/sounds/back.wav",       "sdmc:/slaunch/sounds/back.mp3",       nullptr },
         };
     }
 
     void Sound::Init(bool audio_ok) {
         if (!audio_ok) return;
         Mix_AllocateChannels(8);          // a few voices so nav clicks can overlap
-        for (int i = 0; i < (int)Sfx::Count; i++)
-            m_chunks[i] = Mix_LoadWAV(kPaths[i]);   // nullptr if the file is missing
+        for (int i = 0; i < (int)Sfx::Count; i++) {
+            for (int k = 0; k < 3 && kPaths[i][k]; k++) {
+                if ((m_chunks[i] = Mix_LoadWAV(kPaths[i][k]))) break;
+            }
+            // Still null: that effect has no file and stays silent.
+        }
         m_ok = true;
         SetVolume(m_volume);
     }

@@ -36,6 +36,11 @@ namespace sl::menu::ui {
         // theme choice rather than something baked into the PNG. Black matches
         // how the shipped icons were originally drawn.
         SDL_Color icon_bg { 0, 0, 0, 255 };
+        // Opacity of the plate behind system icons, 0-255. Kept separate from
+        // icon_bg rather than living in its .a, because the shared colour
+        // serializer writes only r,g,b and reads alpha back as 255 - putting it
+        // in the colour would mean it silently reset on every theme load.
+        int icon_bg_alpha = 255;
         // Individual effect toggles -- any combination may be active.
         int       wallpaper_dim  = 1;         // dark scrim overlay (0/1)
         int       wallpaper_blur = 0;         // gaussian blur (0/1)

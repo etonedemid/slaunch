@@ -548,6 +548,15 @@ int main() {
             if (ev.type == SDL_QUIT) { g_Running = false; continue; }
             if (ev.type == SDL_JOYBUTTONDOWN) {
                 Btn b = TranslateButton(ev.jbutton.button);
+                // L + R + Minus toggles the developer overlay. Checked on the
+                // Minus press with L and R polled as held state, so the combo
+                // cannot be hit by mashing and Minus keeps its normal meaning
+                // on its own.
+                if (b == Btn::Minus && joy &&
+                    SDL_JoystickGetButton(joy, JOY_L) && SDL_JoystickGetButton(joy, JOY_R)) {
+                    ui.ToggleDebugOverlay();
+                    continue;
+                }
                 if (b == Btn::None || b == Btn::Up || b == Btn::Down ||
                     b == Btn::Left || b == Btn::Right)
                     continue;
@@ -598,6 +607,18 @@ int main() {
             bool right = (hat & SDL_HAT_RIGHT) || ax >  Deadzone || SDL_JoystickGetButton(joy, JOY_DRIGHT);
             dir_v = up ? -1 : down ? 1 : 0;
             dir_h = left ? -1 : right ? 1 : 0;
+
+            // Right stick, passed through as a continuous value rather than as
+            // button events: coverflow uses it to look around and to spin the
+            // selected box, both of which want to be analogue.
+            const Sint16 rx = SDL_JoystickGetAxis(joy, 2);
+            const Sint16 ry = SDL_JoystickGetAxis(joy, 3);
+            auto norm = [](Sint16 v) {
+                if (v > -Deadzone && v < Deadzone) return 0.0f;
+                const float f = (float)v / 32767.0f;
+                return (f < -1.0f) ? -1.0f : (f > 1.0f ? 1.0f : f);
+            };
+            ui.SetRightStick(norm(rx), norm(ry));
         }
         const u64 now = armGetSystemTick();
         auto step = [&](int dir, int &held, u64 &next, u64 &start, Btn neg, Btn pos) {

@@ -30,10 +30,18 @@ namespace sl::menu::net {
         g_inited = false;
     }
 
-    bool Get(const char *url, std::string &out, long timeout_s) {
+    bool Get(const char *url, std::string &out, long timeout_s,
+             const char *authorization, long *out_http, int *out_curl) {
         out.clear();
         CURL *curl = curl_easy_init();
         if (!curl) return false;
+
+        struct curl_slist *hdrs = nullptr;
+        if (authorization && *authorization) {
+            std::string h = std::string("Authorization: ") + authorization;
+            hdrs = curl_slist_append(hdrs, h.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+        }
 
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCb);
@@ -51,7 +59,10 @@ namespace sl::menu::net {
         long http = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
         curl_easy_cleanup(curl);
+        if (hdrs) curl_slist_free_all(hdrs);
 
+        if (out_http) *out_http = http;
+        if (out_curl) *out_curl = (int)rc;
         return rc == CURLE_OK && http >= 200 && http < 300;
     }
 

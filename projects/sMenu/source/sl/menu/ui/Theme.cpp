@@ -120,6 +120,10 @@ namespace sl::menu::ui {
                 else if (!strcmp(field, "dim"))    ParseColor(val, c.dim);
                 else if (!strcmp(field, "title"))  ParseColor(val, c.title);
                 else if (!strcmp(field, "icon_bg")) ParseColor(val, c.icon_bg);
+                else if (!strcmp(field, "icon_bg_alpha")) {
+                    int a = atoi(val);
+                    c.icon_bg_alpha = (a < 0) ? 0 : (a > 255 ? 255 : a);
+                }
                 else if (!strcmp(field, "wallpaper")) { strncpy(c.wallpaper, val, sizeof(c.wallpaper) - 1); c.wallpaper[sizeof(c.wallpaper) - 1] = '\0'; }
                 else if (!strcmp(field, "background_style")) c.background_style = atoi(val);
                 else if (!strcmp(field, "ribbon_lines"))     c.ribbon_line_count  = atoi(val);
@@ -167,6 +171,7 @@ namespace sl::menu::ui {
             snprintf(k, sizeof(k), "c%d_dim", i);    WriteColor(fp, k, c.dim);
             snprintf(k, sizeof(k), "c%d_title", i);  WriteColor(fp, k, c.title);
             snprintf(k, sizeof(k), "c%d_icon_bg", i); WriteColor(fp, k, c.icon_bg);
+            fprintf(fp, "c%d_icon_bg_alpha=%d\n", i, c.icon_bg_alpha);
             fprintf(fp, "c%d_wallpaper=%s\n", i, c.wallpaper);
             fprintf(fp, "c%d_background_style=%d\n", i, c.background_style);
             fprintf(fp, "c%d_ribbon_lines=%d\n",     i, c.ribbon_line_count);
