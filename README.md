@@ -2,52 +2,12 @@
 
 A fast, clean, **SDL2-based HOME Menu replacement** for the Nintendo Switch
 (Atmosphere CFW). Themes with wallpapers, custom fonts, Lua widgets, icon packs,
-translations, and six UI modes.
+translations, and lots of UI modes.
 
 [Discord](https://discord.gg/dv28MgtaNn)
 
-<img width="1280" height="720" alt="2026070921590300-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/9c3aa4d1-c9ff-41ca-945d-d5ce29a8a62e" />
-<img width="1280" height="720" alt="2026070921570800-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/26b3a5eb-b4ce-4b73-889d-3b2b4f53a4bf" />
-<img width="1280" height="720" alt="2026070918061000-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/62ee0f5f-bca9-490e-a31c-4c54e586b867" />
-<img width="1280" height="720" alt="2026070918054600-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/4b8bd1fa-57e0-4b81-996a-7c6dbc3a559c" />
 
-## UI modes
 
-Six layouts for the main screen, switchable at any time from
-**Theming > UI mode** (and during first-time setup):
-
-| Mode | What it looks like |
-|------|--------------------|
-| List  | A scrolling text carousel, the original layout |
-| Line  | A horizontal cover carousel, EmulationStation style |
-| Grid  | A page of app icons |
-| Cover | One fullscreen cover at a time |
-| Shelf | An Xbox-360 "My Games" style row of uniform covers |
-| XMB   | The PSP cross-media bar |
-
-Every mode is fully touch driven as well: drag to move the content, tap an entry
-to select it, tap it again to launch. In XMB, tapping a category icon on the bar
-opens that column.
-
-### XMB
-
-Categories ride a horizontal bar and the selected one's entries hang below it,
-crossing at a fixed point. The six columns mirror the handheld's own order,
-mapped onto what a Switch actually has:
-
-```
-Settings   Theming, Controllers, Settings, Power
-Album      the album applet
-User       profile, Mii editor
-Network    web browser
-Games      your library, plus Random game
-Homebrew   pinned .nro files, plus the homebrew menu
-```
-
-Empty columns are hidden, so the bar only shows what you have. Left/Right rides
-the bar and clamps at the ends like the handheld; Up/Down walks the column and
-wraps on a fresh press, because a library can be hundreds of entries long. L/R
-jumps five at a time.
 
 ## Architecture
 
@@ -90,42 +50,6 @@ slaunch/widgets/                                              Lua home-screen wi
 slaunch/themes/                                               user wallpapers (.jpg/.png)
 slaunch/config/                                               settings, saved at runtime
 ```
-
-## Customisation
-
-### Themes
-
-Five built-in themes plus any number of custom ones, edited on the console:
-**Theming > Themes > (custom theme) > Y**. A theme carries a gradient or ribbon
-background, an optional wallpaper with dim/blur/snow effects, and seven colours
-(text, accent, secondary, title, both gradient stops, and the icon background).
-Custom themes are stored in `slaunch/config/theme.cfg`.
-
-### Icon packs
-
-Replace the built-in system icons (Settings, Power, Theming, ...) with your own
-set. Create a folder under `slaunch/icon_packs/` and put PNGs inside using the
-same base names as the built-ins:
-
-```
-slaunch/icon_packs/MyPack/
-  theming.png    random.png     controllers.png  album.png
-  user.png       browser.png    mii.png          settings.png
-  power.png      homebrewmenu.png
-```
-
-Any source size works and icons are drawn at their own resolution, so a
-higher-resolution pack stays sharp on the XMB bar. Select a pack from
-**Theming > Icon pack** (cycle with Left/Right). A pack missing a particular icon
-falls back to the built-in one.
-
-Icons are treated as artwork on a coloured field: a PNG that is white-on-solid
-has its background separated out and replaced by the theme's icon-background
-colour (black by default), so the same pack suits a light or dark theme. A PNG
-that already has real transparency is used exactly as drawn.
-
-A bundled `Minimal` pack by [MeepCat55](https://github.com/meepcat55) ships in
-`assets/icon_packs/Minimal/`, source SVGs included.
 
 ### Translations
 
