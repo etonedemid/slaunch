@@ -31,6 +31,18 @@ namespace sl::menu::gfx {
         // (Grid/List, many small tiles). Changing it drops cached textures so
         // they reload at the new size.
         void SetScale(int px);
+
+        // Decoding budget for the current frame.
+        //
+        // Get() decodes synchronously, and the layouts call it once per visible
+        // entry while drawing, so the first frame after the menu opens used to
+        // decode an image for every entry on screen before anything appeared -
+        // most of the wait between pressing HOME and seeing the menu. With a
+        // budget, a frame decodes a few and returns nullptr for the rest; the
+        // layouts already draw a placeholder for a missing icon, so the art
+        // streams in over the next handful of frames instead of gating the
+        // first one.
+        void BeginFrame(int budget) { m_budget = budget; }
         static constexpr int GridScale = 192;   // default downscale for grid/list
 
         // Live textures held (misses excluded), for the debug overlay.
@@ -48,6 +60,7 @@ namespace sl::menu::gfx {
         const char *m_dir  = "cache/icons";
         uint64_t    m_clock = 0;
         int         m_scale = GridScale;   // current load size (0 = original)
+        int         m_budget = 9999;       // decodes left this frame
         std::unordered_map<u64, Entry> m_map;
 
         void EvictOldest();

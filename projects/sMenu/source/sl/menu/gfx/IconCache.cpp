@@ -49,6 +49,12 @@ namespace sl::menu::gfx {
             return it->second.tex; // may be nullptr (known miss)
         }
 
+        // Out of decoding budget for this frame: report a miss without
+        // recording one, so the next frame tries again rather than caching a
+        // permanent nullptr for a perfectly good icon.
+        if (m_budget <= 0) return nullptr;
+        m_budget--;
+
         // Count how many real textures are resident; evict before adding a new
         // one so we never exceed Capacity live textures.
         int live = 0;

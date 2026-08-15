@@ -458,6 +458,7 @@ int main() {
     Menu ui;
     g_UI = &ui;
     ui.Init(&gfx, status.selected_user, status.suspended_app_id, IsFirstRun());
+    BootLog("applet: ui.Init done");
 
     // Instant: show last run's cached game list on the very first frame. The
     // background loader then just verifies the ids and only re-resolves if the
@@ -472,6 +473,7 @@ int main() {
             ui.SetLoading(true);
         }
     }
+    BootLog("applet: cached app list in");
 
     bool has_suspended = status.has_suspended_app;
     u64  suspended_id  = status.suspended_app_id;
@@ -500,6 +502,7 @@ int main() {
     u64 start_v = 0, start_h = 0;                 // tick the hold began (for accel)
 
     u64 g_NextVerify = armGetSystemTick();   // periodic app-list re-verify
+    bool first_frame_logged = false;
 
     while (g_Running && appletMainLoop()) {
         // Re-verify the installed set every ~2s: the daemon doesn't push gamecard
@@ -644,6 +647,7 @@ int main() {
         step(dir_v, held_v, next_v, start_v, Btn::Up,   Btn::Down);
         step(dir_h, held_h, next_h, start_h, Btn::Left, Btn::Right);
         ui.Render();
+        if (!first_frame_logged) { first_frame_logged = true; BootLog("applet: first frame drawn"); }
         // First frame is up; now do the heavier init (widgets) off the hot path.
         ui.InitDeferred();
     }

@@ -23,7 +23,7 @@ namespace sl::menu::ui {
     // untappable.
     namespace {
         enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-               TH_IconPack, TH_SgdbKey, TH_FlowSet, TH_Fonts, TH_Language, TH_Music,
+               TH_IconPack, TH_ShelfVert, TH_SgdbKey, TH_FlowSet, TH_Fonts, TH_Language, TH_Music,
                TH_Widgets, TH_Entries,
                TH_Welcome, TH_Updates,
                TH_About, TH_Back, TH_Count };
@@ -118,9 +118,11 @@ namespace sl::menu::ui {
     // Shelf mode geometry (Xbox-360 "My Games" style): uniform covers in a row,
     // the selected one anchored near the left. Shared by draw, hit-test and
     // touch scrolling (OnTouch).
-    static constexpr int kShelfTile    = 208;   // cover edge
+    // Tile size and pitch now depend on whether the shelf is drawing square or
+    // portrait tiles, so they live in Menu::ShelfTileW/H/Pitch rather than here -
+    // the renderer, the drag handler and the touch hit-test all read them from
+    // there, which is what keeps the three agreeing about where a tile is.
     static constexpr int kShelfGap     = 20;
-    static constexpr int kShelfPitch   = kShelfTile + kShelfGap;
     static constexpr int kShelfAnchorX = 88;    // left edge of the selected cover
     static constexpr int kShelfTop     = 150;   // top edge of the cover row
 
@@ -800,6 +802,8 @@ namespace sl::menu::ui {
                 m_ui_mode = (UiMode)v;
             else if (sscanf(line, "list_icons=%d", &v) == 1)
                 m_list_icons = (v != 0);
+            else if (sscanf(line, "shelf_vertical=%d", &v) == 1)
+                m_shelf_vertical = (v != 0);
             else if (sscanf(line, "check_updates=%d", &v) == 1)
                 m_check_updates = (v != 0);
             else if (sscanf(line, "welcome=%d", &v) == 1)
@@ -835,6 +839,7 @@ namespace sl::menu::ui {
         fprintf(fp, "align=%d\n", (int)m_align);
         fprintf(fp, "ui_mode=%d\n", (int)m_ui_mode);
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
+        fprintf(fp, "shelf_vertical=%d\n", m_shelf_vertical ? 1 : 0);
         fprintf(fp, "check_updates=%d\n", m_check_updates ? 1 : 0);
         fprintf(fp, "welcome=%d\n", m_welcome_enabled ? 1 : 0);
         fprintf(fp, "lang=%s\n", m_lang);
@@ -1182,7 +1187,7 @@ namespace sl::menu::ui {
                         m_cursor = (int)lroundf(m_scroll_pos);
                         break;
                     case UiMode::Shelf:     // horizontal cover row
-                        m_scroll_pos = clamped(dragged(dx, kShelfPitch), last);
+                        m_scroll_pos = clamped(dragged(dx, ShelfPitch()), last);
                         m_cursor = (int)lroundf(m_scroll_pos);
                         break;
                     case UiMode::Flow:      // 3D coverflow
@@ -2236,6 +2241,10 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         const LogLine kChangelog[] = {
+            { true,  "v0.9.1" },
+            { false, "Menu opens much faster - art loads after it appears" },
+            { false, "Flow scrolls smoothly; covers load ahead of the row" },
+            { false, "Shelf can show vertical box art (Theming > Vertical covers)" },
             { true,  "v0.9.0" },
             { false, "Flow mode - a 3D shelf of game boxes you can turn around" },
             { false, "Box art fetched automatically (Theming > SteamGridDB key)" },
@@ -2393,6 +2402,10 @@ namespace sl::menu::ui {
             LocaleInit(m_lang);
             SaveSettings();
         };
+        auto toggleShelfVert = [&]() {
+            m_shelf_vertical = !m_shelf_vertical;
+            SaveSettings();
+        };
         auto toggleUpdates = [&]() { m_check_updates = !m_check_updates; SaveSettings(); };
         if (m_theming_cursor == TH_Updates && (b == Btn::Left || b == Btn::Right))
             toggleUpdates();
@@ -2407,6 +2420,8 @@ namespace sl::menu::ui {
             toggleListIcons();
         if (m_theming_cursor == TH_IconPack && (b == Btn::Left || b == Btn::Right))
             cycleIconPack(b == Btn::Right ? +1 : -1);
+        if (m_theming_cursor == TH_ShelfVert && (b == Btn::Left || b == Btn::Right))
+            toggleShelfVert();
         if (m_theming_cursor == TH_Language && (b == Btn::Left || b == Btn::Right))
             cycleLanguage(b == Btn::Right ? +1 : -1);
         if (b == Btn::A) {
@@ -2418,6 +2433,7 @@ namespace sl::menu::ui {
                 case TH_Entries:     m_screen = Screen::SysEntries;   m_sys_cursor = 0; m_sub_scroll = 0; break;
                 case TH_IconPack:    cycleIconPack(+1); break;
                 case TH_Language:    cycleLanguage(+1); break;
+                case TH_ShelfVert:   toggleShelfVert(); break;
                 case TH_FlowSet:
                     m_screen = Screen::FlowSettings;
                     m_flowset_cursor = 0;
@@ -2969,6 +2985,35 @@ namespace sl::menu::ui {
         SDL_Surface *surface = IMG_Load(path);
         if (!surface) return nullptr;
 
+        // Blur at a quarter of each axis and let the GPU scale the result back
+        // up when it is drawn.
+        //
+        // This is the single most expensive thing between a HOME press and the
+        // menu appearing. At full size and radius 32 it is a 99-tap kernel over
+        // 921,600 pixels twice, about 180 million multiply-adds on one ARM core.
+        // A sixteenth of the pixels with a quarter of the taps is roughly 64
+        // times less work, and the output is indistinguishable: it is a blurred
+        // image, so the detail being thrown away was about to be destroyed
+        // anyway.
+        {
+            const int dw = (surface->w + 3) / 4, dh = (surface->h + 3) / 4;
+            if (dw > 0 && dh > 0) {
+                SDL_Surface *small_s = SDL_CreateRGBSurfaceWithFormat(
+                        0, dw, dh, 32, SDL_PIXELFORMAT_RGBA8888);
+                if (small_s) {
+                    // SDL2 has no surface-level filter hint, so this is a plain
+                    // decimating blit. It does not matter: the Gaussian that
+                    // follows removes any aliasing the shrink introduces.
+                    if (SDL_BlitScaled(surface, nullptr, small_s, nullptr) == 0) {
+                        SDL_FreeSurface(surface);
+                        surface = small_s;
+                    } else {
+                        SDL_FreeSurface(small_s);
+                    }
+                }
+            }
+        }
+
         int sw = surface->w;
         int sh = surface->h;
 
@@ -2976,7 +3021,9 @@ namespace sl::menu::ui {
         int radius = t.wallpaper_blur_radius;
         if (radius < 2)  radius = 2;
         if (radius > 32) radius = 32;
-        float sigma = radius / 2.0f;  // 1 .. 16
+        // Sigma follows the image down, so the blur looks the same on screen.
+        float sigma = radius / 2.0f / 4.0f;
+        if (sigma < 0.5f) sigma = 0.5f;
 
         // ---- Build Gaussian kernel (fixed-point, Q16) ----
         // Normalise in floating point FIRST, then convert to Q16. Converting
@@ -3670,6 +3717,13 @@ namespace sl::menu::ui {
             return;
         }
 
+        // Cap how much image decoding a single frame may do. The menu appearing
+        // promptly matters more than every icon being present on the very first
+        // frame - they fill in over the next few, which reads as instant.
+        m_icons.BeginFrame(3);
+        m_hb_icons.BeginFrame(2);
+        m_cover_budget = 3;
+
         // Fold in the deferred worker the moment it lands, before anything below
         // reads what it built.
         PollDeferred();
@@ -4173,7 +4227,7 @@ namespace sl::menu::ui {
             return (idx >= 0 && idx <= last) ? idx : -1;
         }
         if (m_ui_mode == UiMode::Shelf) {   // left-anchored uniform row (see DrawMainShelf)
-            const int idx = (int)lroundf(m_scroll_pos + (float)(x - kShelfAnchorX) / kShelfPitch);
+            const int idx = (int)lroundf(m_scroll_pos + (float)(x - kShelfAnchorX) / ShelfPitch());
             return (idx >= 0 && idx <= last) ? idx : -1;
         }
         if (m_ui_mode == UiMode::Cover) {          // left/right thirds browse
@@ -4424,9 +4478,10 @@ namespace sl::menu::ui {
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
 
         const int total = (int)m_items.size();
-        const int tile  = kShelfTile;
-        const int top   = kShelfTop;
-        const int pitch = kShelfPitch;
+        const int tile  = ShelfTileW();      // tile width
+        const int tileH = ShelfTileH();      // ...and height, which differ in
+        const int top   = kShelfTop;         // vertical mode
+        const int pitch = ShelfPitch();
 
         auto ellipsize = [&](const std::string &s, int maxw, gfx::FontSize fs) {
             return Ellipsize(s, maxw, fs);
@@ -4446,7 +4501,7 @@ namespace sl::menu::ui {
         const int pad   = 14;
         const int infoH = 104;
         m_gfx->FillRect(kShelfAnchorX - pad, top - pad,
-                        tile + pad * 2, tile + pad + infoH, WithAlpha(t.fg, 20));
+                        tile + pad * 2, tileH + pad + infoH, WithAlpha(t.fg, 20));
 
         // Covers, painted right-to-left so the selected one lands on top of its
         // neighbours during a slide.
@@ -4458,29 +4513,60 @@ namespace sl::menu::ui {
             const int x = kShelfAnchorX + (int)((idx - m_scroll_pos) * pitch);
             if (x + tile < 0 || x > gfx::Gfx::Width) continue;
             const bool selg = (idx == m_cursor);
-            DrawAppTile(m_items[idx], x, top, tile, selg, selg ? 255 : 225);
+            // Vertical mode prefers real box art and falls back to the square
+            // icon, drawn on a plate so a 1:1 image is letterboxed rather than
+            // stretched onto a 2:3 tile.
+            SDL_Texture *cov = m_shelf_vertical ? FlowCover(m_items[idx]) : nullptr;
+            if (cov) {
+                const Uint8 a = selg ? 255 : 225;
+                m_gfx->FillRect(x, top, tile, tileH, WithAlpha(t.bg_bottom, a));
+                m_gfx->DrawImage(cov, x, top, tile, tileH, a);
+            } else if (m_shelf_vertical) {
+                m_gfx->FillRect(x, top, tile, tileH, WithAlpha(t.bg_bottom, selg ? 255 : 225));
+                const int s2 = (tile < tileH ? tile : tileH) - 16;
+                DrawAppTile(m_items[idx], x + (tile - s2) / 2, top + (tileH - s2) / 2,
+                            s2, selg, selg ? 255 : 225);
+            } else {
+                DrawAppTile(m_items[idx], x, top, tile, selg, selg ? 255 : 225);
+            }
             if (!selg)
-                m_gfx->Text(FontSize::Small, x, top + tile + 12, t.dim,
+                m_gfx->Text(FontSize::Small, x, top + tileH + 12, t.dim,
                             ellipsize(m_items[idx].name, tile, FontSize::Small).c_str());
+        }
+
+        // Release covers well outside the visible run. The shelf shares Flow's
+        // cover cache, and leaving it unbounded is what previously starved the
+        // rest of the menu of memory.
+        if (m_shelf_vertical) {
+            const int keep_lo = std::max(0, firstv - 4);
+            const int keep_hi = std::min(total - 1, lastv + 4);
+            for (auto it2 = m_covers.begin(); it2 != m_covers.end(); ) {
+                bool keep = false;
+                for (int i = keep_lo; i <= keep_hi && !keep; i++)
+                    keep = (m_items[i].app_id == it2->first);
+                if (keep) { ++it2; continue; }
+                if (it2->second) m_gfx->FreeImage(it2->second);
+                it2 = m_covers.erase(it2);
+            }
         }
 
         // Selected item's info block inside the card.
         const MenuItem &sel = m_items[m_cursor];
-        m_gfx->Text(FontSize::Normal, kShelfAnchorX, top + tile + 12, t.title,
+        m_gfx->Text(FontSize::Normal, kShelfAnchorX, top + tileH + 12, t.title,
                     ellipsize(sel.name, tile, FontSize::Normal).c_str());
         const char *sub = sel.is_gamecard ? T("Game card")
                         : (sel.kind == ItemKind::Game ? T("Nintendo Switch") : "");
         if (sub[0])
-            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 54, t.dim, sub);
+            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tileH + 54, t.dim, sub);
         // Last line of the card: the running badge, or how much this game has been
         // played (blank until the pdm worker lands, and for never-played titles).
         if (sel.app_id == m_suspended && m_suspended != 0) {
-            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 76, t.accent, T("Running"));
+            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tileH + 76, t.accent, T("Running"));
         } else if (const play::PlayInfo *pi = Play(sel.app_id)) {
             if (pi->seconds > 0) {
                 const std::string line = play::FormatPlaytime(pi->seconds) + "   " +
                                          play::FormatLastPlayed(pi->last_played);
-                m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tile + 76, t.dim, line.c_str());
+                m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tileH + 76, t.dim, line.c_str());
             }
         }
 
@@ -4871,6 +4957,10 @@ namespace sl::menu::ui {
         float gFlowY        = 0.12f;  // row lifted a little off centre
         float gFlowDepth    = 0.030f; // half-thickness of the case
         constexpr int   kFlowVisible  = 6;      // items drawn either side
+        // Covers held either side of the drawn range, and how many may be
+        // decoded per frame while filling that margin.
+        constexpr int   kFlowPreload  = 20;
+        constexpr int   kFlowPrefetchPerFrame = 3;
 
         // Everything above is a judgement call about how a shelf should look,
         // and the person looking at it is better placed to make it than a
@@ -5018,12 +5108,18 @@ namespace sl::menu::ui {
         char path[96];
         snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX.jpg",
                  (unsigned long long)it.app_id);
+        // Same budget as the icon caches, and for the same reason: a row of
+        // thirteen boxes would otherwise decode thirteen covers on the frame it
+        // first appears. A miss here is not recorded, so the next frame retries.
+        if (m_cover_budget <= 0) return nullptr;
+        m_cover_budget--;
+
         // Downscaled on load. A box is 185-260 px wide on screen and a
         // SteamGridDB grid is 600x900, so the full image is four times the
         // resolution anyone can see and four times the memory - 2.1 MB each,
         // against 0.8 at this size. The tuning screen can grow the boxes, hence
         // the headroom rather than matching the drawn size exactly.
-        SDL_Texture *tex = m_gfx->LoadImageScaled(path, 384, 576);
+        SDL_Texture *tex = m_gfx->LoadImageScaled(path, 480, 720);
         m_covers[it.app_id] = tex;
         return tex;
     }
@@ -5499,6 +5595,26 @@ namespace sl::menu::ui {
             return std::abs((float)a - m_flow_scroll) > std::abs((float)b - m_flow_scroll);
         });
 
+        // Load everything this frame needs *before* drawing any of it.
+        //
+        // Gfx::LoadImageScaled downscales by switching the render target, which
+        // flushes whatever render pass is in flight. Called from inside the draw
+        // loop that meant a flush between boxes, several times a frame, which is
+        // what made scrolling crawl. Doing the loads up front costs the same
+        // decode but leaves the draw pass unbroken.
+        {
+            const bool settled = (m_flow_scroll == (float)sel);
+            for (int row : order) {
+                if (m_cover_budget <= 0) break;
+                FlowCover(m_items[m_flow_items[row]]);
+            }
+            // Back panels are far more expensive - a hero is 1920x620 - and are
+            // only wanted once you have stopped somewhere. Loading them as the
+            // selection swept past during a scroll was two full decodes every
+            // few frames.
+            if (settled) FlowBackShots(m_items[m_flow_items[sel]]);
+        }
+
         for (int row : order) {
             const MenuItem &it = m_items[m_flow_items[row]];
             const float p = (float)row - m_flow_scroll;
@@ -5585,7 +5701,15 @@ namespace sl::menu::ui {
                 // it for every visible box held ~118 MB of textures for images
                 // nobody could see, which is what starved the wallpaper of
                 // memory and left other screens on a bare gradient.
-                const FlowShots &sh = showing_back ? FlowBackShots(it) : FlowShots{};
+                // Loaded for the selected box whether or not it is turned
+                // round: this is the only box that can be rotated, and decoding
+                // on the frame it passes ninety degrees is precisely the hitch
+                // you see when turning one over.
+                // Read-only here: anything not already cached by the load pass
+                // above simply is not drawn this frame.
+                static const FlowShots kNoShots;
+                auto shit = m_shots.find(it.app_id);
+                const FlowShots &sh = (shit != m_shots.end()) ? shit->second : kNoShots;
                 if (sh.a || sh.b) {
                     // Two 16:9 panels stacked flush: the full width of the case,
                     // starting at its top edge, with nothing between them. The
@@ -5696,12 +5820,26 @@ namespace sl::menu::ui {
             }
         }
 
-        // Release art for boxes far outside the visible row. Without this the
-        // caches only ever grew: scrolling a big library eventually held a
-        // texture for every game in it.
+        // Keep a wide margin of covers either side of what is on screen, and
+        // fill it a few at a time.
+        //
+        // The window used to be four boxes and did nothing but evict - art was
+        // only ever decoded for a box being drawn, so scrolling quickly meant
+        // decoding on the frame each new box appeared, which is the stutter.
+        // Loading ahead moves that work to frames with nothing else to do, and
+        // the per-frame cap stops the filling itself becoming a hitch.
         {
-            const int keep_lo = std::max(0, first - 4);
-            const int keep_hi = std::min(n - 1, last + 4);
+            const int keep_lo = std::max(0, first - kFlowPreload);
+            const int keep_hi = std::min(n - 1, last + kFlowPreload);
+
+            int budget = m_cover_budget;
+            for (int i = keep_lo; i <= keep_hi && budget > 0; i++) {
+                const MenuItem &pit = m_items[m_flow_items[i]];
+                if (pit.kind != ItemKind::Game || pit.app_id == 0) continue;
+                if (m_covers.count(pit.app_id)) continue;   // cached, hit or miss
+                FlowCover(pit);
+                budget--;
+            }
             for (auto it2 = m_covers.begin(); it2 != m_covers.end(); ) {
                 bool keep = false;
                 for (int i = keep_lo; i <= keep_hi && !keep; i++)
@@ -5710,8 +5848,16 @@ namespace sl::menu::ui {
                 if (it2->second) m_gfx->FreeImage(it2->second);
                 it2 = m_covers.erase(it2);
             }
+            // Back panels are held a couple either side of the selection rather
+            // than for the selected box alone. Only the selected box loads them,
+            // but dropping them the instant the cursor moves meant stepping one
+            // across and back re-decoded a megabyte each time.
+            const int shot_lo = std::max(0, sel - 2);
+            const int shot_hi = std::min(n - 1, sel + 2);
             for (auto it2 = m_shots.begin(); it2 != m_shots.end(); ) {
-                const bool keep = (it2->first == m_items[m_flow_items[sel]].app_id);
+                bool keep = false;
+                for (int i = shot_lo; i <= shot_hi && !keep; i++)
+                    keep = (m_items[m_flow_items[i]].app_id == it2->first);
                 if (keep) { ++it2; continue; }
                 if (it2->second.a) m_gfx->FreeImage(it2->second.a);
                 if (it2->second.b) m_gfx->FreeImage(it2->second.b);
@@ -5751,6 +5897,7 @@ namespace sl::menu::ui {
         for (int i = 0; i < TH_Count; i++) {
             // Both of these only mean anything to the coverflow.
             if ((i == TH_SgdbKey || i == TH_FlowSet) && m_ui_mode != UiMode::Flow) continue;
+            if (i == TH_ShelfVert && m_ui_mode != UiMode::Shelf) continue;
             v.push_back(i);
         }
         return v;
@@ -5781,7 +5928,7 @@ namespace sl::menu::ui {
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("SteamGridDB key"), T("Flow layout"),
+            T("Icon pack"), T("Vertical covers"), T("SteamGridDB key"), T("Flow layout"),
             T("Fonts"), T("Language"),
             T("Music"), T("Widgets"),
             T("Menu entries"),
@@ -5795,6 +5942,7 @@ namespace sl::menu::ui {
         values[TH_IconPack]    = (m_icon_pack_idx > 0 &&
                                   m_icon_pack_idx <= (int)m_icon_packs.size())
                                ? m_icon_packs[m_icon_pack_idx - 1] : T("Built-in");
+        values[TH_ShelfVert]   = m_shelf_vertical ? T("On") : T("Off");
         values[TH_SgdbKey]     = SgdbKeyPresent() ? T("Set") : T("Not set");
         values[TH_Language]    = kLangs[m_lang_idx].name
                                ? kLangs[m_lang_idx].name : T("Automatic");

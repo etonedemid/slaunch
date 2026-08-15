@@ -413,6 +413,7 @@ namespace sl::menu::ui {
         // title with no cover costs one failed open rather than one per frame.
         std::unordered_map<u64, SDL_Texture *> m_covers;
         SDL_Texture *FlowCover(const MenuItem &it);
+        int m_cover_budget = 3;   // cover decodes left this frame
         // The two panels printed across the top of a case's back. Cached the
         // same way as covers, with a null entry remembered so a title without
         // them costs one failed open rather than one per frame.
@@ -529,6 +530,13 @@ namespace sl::menu::ui {
         // Appearance: main-list text alignment + user-renamed games.
         TextAlign m_align = TextAlign::Left;
         bool      m_list_icons = true;         // show the icon column in List mode
+        // Shelf draws portrait 2:3 tiles instead of square ones, using the
+        // fetched box art when a game has it. Shares the cover cache with Flow.
+        bool      m_shelf_vertical = false;
+        int  ShelfTileW() const { return m_shelf_vertical ? 152 : 208; }
+        int  ShelfTileH() const { return m_shelf_vertical ? 228 : 208; }
+        int  ShelfPitch() const { return ShelfTileW() + kShelfGapPx; }
+        static constexpr int kShelfGapPx = 20;
         UiMode    m_ui_mode = UiMode::XMB;    // main-screen layout (default)
         // Language override; "auto" follows the console. Applied through
         // LocaleInit, which rebuilds the string table in place.
