@@ -4961,6 +4961,10 @@ namespace sl::menu::ui {
         // decoded per frame while filling that margin.
         constexpr int   kFlowPreload  = 20;
         constexpr int   kFlowPrefetchPerFrame = 3;
+        // Radians per second for the running game's idle turn. A shade under one
+        // revolution every ten seconds: enough to catch the eye, slow enough not
+        // to be a distraction while you read the row.
+        constexpr float kFlowRunSpin  = 0.62f;
 
         // Everything above is a judgement call about how a shelf should look,
         // and the person looking at it is better placed to make it than a
@@ -5583,6 +5587,10 @@ namespace sl::menu::ui {
         m_flow_spin  += ((rx * 3.14159f) - m_flow_spin)  * 0.12f;
         m_flow_dolly += ((ry * 0.80f)    - m_flow_dolly) * 0.10f;
 
+        // Wall clock for the running game's idle rotation, read once so every
+        // box in the row is placed against the same instant.
+        const float flow_now = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
+
         const int first = std::max(0, (int)m_flow_scroll - kFlowVisible);
         const int last  = std::min(n - 1, (int)m_flow_scroll + kFlowVisible);
 
@@ -5628,6 +5636,13 @@ namespace sl::menu::ui {
             // The selected box carries the extra spin, so only it turns around.
             const bool is_sel = (row == sel);
             if (is_sel) angle += m_flow_spin;
+
+            // The game currently running turns slowly on its own, so you can
+            // pick it out of the row at a glance without reading anything. It
+            // is added on top of any other rotation, so the running game still
+            // responds to the stick if it happens to be the selected one.
+            if (it.app_id != 0 && it.app_id == m_suspended)
+                angle += flow_now * kFlowRunSpin;
 
             // Past a quarter turn we are looking at the back of the case.
             const float ca_face = cosf(angle);

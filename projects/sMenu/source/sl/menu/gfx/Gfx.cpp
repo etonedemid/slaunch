@@ -300,24 +300,49 @@ namespace sl::menu::gfx {
         return IMG_LoadTexture(m_renderer, path);
     }
 
+    // Downscale on the CPU, through surfaces, and only touch the renderer to
+    // upload the finished result.
+    //
+    // This used to downscale on the GPU by creating a render-target texture and
+    // pointing the renderer at it. That works, but switching render target
+    // flushes whatever render pass is in flight - and every caller of this runs
+    // while the menu is drawing, so each load tore the frame in half. With a
+    // handful of loads a frame that is most of a frame's budget spent on
+    // pipeline flushes rather than on drawing, which is what made the menu
+    // stutter for a second after it appeared and while scrolling.
+    //
+    // SDL_BlitScaled is a cheaper filter than the GPU's bilinear sample, but
+    // these images are drawn far smaller than they are stored and sampled
+    // bilinearly again at draw time, so it does not show.
     SDL_Texture *Gfx::LoadImageScaled(const char *path, int w, int h) {
-        SDL_Texture *src = IMG_LoadTexture(m_renderer, path);
+        SDL_Surface *raw = IMG_Load(path);
+        if (!raw) return nullptr;
+
+        SDL_Surface *src = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGBA8888, 0);
+        SDL_FreeSurface(raw);
         if (!src) return nullptr;
 
-        SDL_Texture *dst = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_RGBA8888,
-                                             SDL_TEXTUREACCESS_TARGET, w, h);
-        if (!dst) return src;   // no render-target support: keep the full-size one
+        // Already the requested size: upload as-is.
+        if (src->w == w && src->h == h) {
+            SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, src);
+            SDL_FreeSurface(src);
+            return tex;
+        }
 
-        SDL_SetTextureBlendMode(dst, SDL_BLENDMODE_BLEND);
-        SDL_Texture *prev = SDL_GetRenderTarget(m_renderer);
-        SDL_SetRenderTarget(m_renderer, dst);
-        SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 0);
-        SDL_RenderClear(m_renderer);
-        SDL_RenderCopy(m_renderer, src, nullptr, nullptr); // downscale once
-        SDL_SetRenderTarget(m_renderer, prev);
+        SDL_Surface *dst = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
+                                                          SDL_PIXELFORMAT_RGBA8888);
+        if (!dst) {   // out of memory: the full-size image still beats nothing
+            SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, src);
+            SDL_FreeSurface(src);
+            return tex;
+        }
 
-        SDL_DestroyTexture(src);
-        return dst;
+        SDL_BlitScaled(src, nullptr, dst, nullptr);
+        SDL_FreeSurface(src);
+
+        SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, dst);
+        SDL_FreeSurface(dst);
+        return tex;
     }
 
     // Scanline-filled triangle. SDL2 has no filled-primitive call before
