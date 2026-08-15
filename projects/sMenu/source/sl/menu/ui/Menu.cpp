@@ -2236,9 +2236,6 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         const LogLine kChangelog[] = {
-            { true,  "v0.9.1" },
-            { false, "Fixed Flow eating all the memory - other screens lost" },
-            { false, "their wallpaper and went black" },
             { true,  "v0.9.0" },
             { false, "Flow mode - a 3D shelf of game boxes you can turn around" },
             { false, "Box art fetched automatically (Theming > SteamGridDB key)" },

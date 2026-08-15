@@ -18,7 +18,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sLaunch Installer
 APP_AUTHOR  := sLaunch
-APP_VERSION := 0.9.1
+APP_VERSION := 0.9.0
 APP_ICON    := ../../assets/icon.jpg
 
 PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
