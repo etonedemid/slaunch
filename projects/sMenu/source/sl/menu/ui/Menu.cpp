@@ -2236,6 +2236,9 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         const LogLine kChangelog[] = {
+            { true,  "v0.9.1" },
+            { false, "Fixed Flow eating all the memory - other screens lost" },
+            { false, "their wallpaper and went black" },
             { true,  "v0.9.0" },
             { false, "Flow mode - a 3D shelf of game boxes you can turn around" },
             { false, "Box art fetched automatically (Theming > SteamGridDB key)" },
@@ -5018,7 +5021,12 @@ namespace sl::menu::ui {
         char path[96];
         snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX.jpg",
                  (unsigned long long)it.app_id);
-        SDL_Texture *tex = m_gfx->LoadImage(path);
+        // Downscaled on load. A box is 185-260 px wide on screen and a
+        // SteamGridDB grid is 600x900, so the full image is four times the
+        // resolution anyone can see and four times the memory - 2.1 MB each,
+        // against 0.8 at this size. The tuning screen can grow the boxes, hence
+        // the headroom rather than matching the drawn size exactly.
+        SDL_Texture *tex = m_gfx->LoadImageScaled(path, 384, 576);
         m_covers[it.app_id] = tex;
         return tex;
     }
@@ -5211,10 +5219,12 @@ namespace sl::menu::ui {
         char path[96];
         snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_s0.jpg",
                  (unsigned long long)it.app_id);
-        s.a = m_gfx->LoadImage(path);
+        // Same again: a hero is 1920x620 and lands on a panel a couple of
+        // hundred pixels wide, so full size costs 4.5 MB apiece for nothing.
+        s.a = m_gfx->LoadImageScaled(path, 640, 207);
         snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_s1.jpg",
                  (unsigned long long)it.app_id);
-        s.b = m_gfx->LoadImage(path);
+        s.b = m_gfx->LoadImageScaled(path, 640, 207);
         m_shots[it.app_id] = s;
         return m_shots[it.app_id];
     }
@@ -5574,7 +5584,11 @@ namespace sl::menu::ui {
                 // The back face runs from +halfW on the left to -halfW on the
                 // right so its texture is not mirrored; these follow the same
                 // sense, hence the descending x.
-                const FlowShots &sh = FlowBackShots(it);
+                // Only decode these for a box actually showing its back. Doing
+                // it for every visible box held ~118 MB of textures for images
+                // nobody could see, which is what starved the wallpaper of
+                // memory and left other screens on a bare gradient.
+                const FlowShots &sh = showing_back ? FlowBackShots(it) : FlowShots{};
                 if (sh.a || sh.b) {
                     // Two 16:9 panels stacked flush: the full width of the case,
                     // starting at its top edge, with nothing between them. The
@@ -5682,6 +5696,29 @@ namespace sl::menu::ui {
                     m_gfx->DrawQuad3D(cover ? cover : nullptr, m,
                                       cover ? tint : blank, 90, 0, true);
                 }
+            }
+        }
+
+        // Release art for boxes far outside the visible row. Without this the
+        // caches only ever grew: scrolling a big library eventually held a
+        // texture for every game in it.
+        {
+            const int keep_lo = std::max(0, first - 4);
+            const int keep_hi = std::min(n - 1, last + 4);
+            for (auto it2 = m_covers.begin(); it2 != m_covers.end(); ) {
+                bool keep = false;
+                for (int i = keep_lo; i <= keep_hi && !keep; i++)
+                    keep = (m_items[m_flow_items[i]].app_id == it2->first);
+                if (keep) { ++it2; continue; }
+                if (it2->second) m_gfx->FreeImage(it2->second);
+                it2 = m_covers.erase(it2);
+            }
+            for (auto it2 = m_shots.begin(); it2 != m_shots.end(); ) {
+                const bool keep = (it2->first == m_items[m_flow_items[sel]].app_id);
+                if (keep) { ++it2; continue; }
+                if (it2->second.a) m_gfx->FreeImage(it2->second.a);
+                if (it2->second.b) m_gfx->FreeImage(it2->second.b);
+                it2 = m_shots.erase(it2);
             }
         }
 
