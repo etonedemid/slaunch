@@ -1,4 +1,5 @@
 #include <sl/menu/ui/Menu.hpp>
+#include <unordered_set>
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
@@ -23,7 +24,10 @@ namespace sl::menu::ui {
     // untappable.
     namespace {
         enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-               TH_IconPack, TH_ShelfVert, TH_SgdbKey, TH_FlowSet, TH_Fonts, TH_Language, TH_Music,
+               TH_IconPack, TH_ShelfVert, TH_TileCols, TH_TileRows,
+               TH_SgdbKey, TH_FlowSet, TH_Wrap,
+               TH_Hints, TH_Counter, TH_Fonts,
+               TH_Language, TH_Music,
                TH_Widgets, TH_Entries,
                TH_Welcome, TH_Updates,
                TH_About, TH_Back, TH_Count };
@@ -68,10 +72,17 @@ namespace sl::menu::ui {
             { ItemKind::WebBrowser,   "Web Browser"   },
             { ItemKind::MiiEdit,      "Mii Edit"      },
             { ItemKind::Settings,     "Settings"      },
+            { ItemKind::Wifi,         "Network"       },
             { ItemKind::Power,        "Power"         },
             { ItemKind::HomebrewMenu, "Homebrew menu" },
         };
         constexpr int kSysEntryN = (int)(sizeof(kSysEntries) / sizeof(kSysEntries[0]));
+
+        // Rows of the Network screen. Declared here rather than beside the screen
+        // itself because the touch router needs the row count, and that runs
+        // above where the screen is implemented.
+        enum { NET_Status = 0, NET_Name, NET_Signal, NET_Ip, NET_Wifi, NET_Open,
+               NET_Count };
 
         // Languages offered under Theming. "auto" follows the console's own
         // setting, which is what the menu did before this was selectable; the
@@ -110,10 +121,30 @@ namespace sl::menu::ui {
     static constexpr int kListSpacing = 48;    // List/Cover: row to row
     static constexpr int kListCenterY = 360;   // vertical centre of the carousel
     static constexpr int kLinePitch   = 210;   // Line: cover centre to cover centre
-    static constexpr int kGridTile    = 120;   // Grid: tile edge
-    static constexpr int kGridGap     = 18;    // Grid: gap between tiles
-    static constexpr int kGridPitch   = kGridTile + kGridGap;   // Grid: row to row
-    static constexpr int kGridTopBase = 80;    // Grid: y of row 0 at scroll 0
+    // Tiles, on the unit grid a Windows 8 / Windows Phone start screen uses: one
+    // square unit, a fixed gap, and wider tiles built from whole units so every
+    // edge lines up however they are mixed.
+    static constexpr int kGridGap     = 8;     // Metro's gap is tight
+    // The band the wall is laid out inside. The side margin matches the one the
+    // top bar clock already uses, and the bottom stops clear of the hint line;
+    // nine columns at a fixed 130px unit would have reached within 23px of the
+    // screen edge, which is inside where a TV can overscan.
+    static constexpr int kWallTop     = 104;
+    static constexpr int kWallBot     = 652;
+    static constexpr int kWallMargin  = 40;
+    // The unit is derived from the counts rather than fixed, so the wall always
+    // fills the band whatever shape the user asks for. The limits are where the
+    // unit stops being usable: past 12 across a tile is under 90px, and past 6
+    // down it is under 85.
+    static constexpr int kTileColsMin = 4,  kTileColsMax = 12;
+    static constexpr int kTileRowsMin = 2,  kTileRowsMax = 6;
+    // The width home widgets are authored against (Widgets.cpp uses the same
+    // number for the floating layout). Keeping the two equal also means a
+    // widget that is on the wall and on another layout's home screen renders at
+    // one width, so its own cached texture is never reallocated between them.
+    static constexpr int kTileWidgetW = 340;
+    static constexpr int kTilePicMs   = 4000;  // picture tile: hold per image
+    static constexpr int kTileFadeMs  = 600;   // ...and cross-fade over this
 
     // Shelf mode geometry (Xbox-360 "My Games" style): uniform covers in a row,
     // the selected one anchored near the left. Shared by draw, hit-test and
@@ -173,7 +204,6 @@ namespace sl::menu::ui {
     static constexpr float kXmbAlphaPassive = 0.75f;  // items_passive_alpha
 
     static constexpr int kXmbItemPitch  = (int)kXmbSpacingV;  // passive row spacing
-    static constexpr int kXmbItemBottom = 690;  // last row drawn before the screen edge
     static constexpr int kXmbAbove      = 4;    // rows kept above the selection
     static constexpr int kXmbBelow      = 8;    // ...and below it
 
@@ -185,6 +215,16 @@ namespace sl::menu::ui {
     // would hide every one of them.
     static constexpr int kXmbFadeEnd   = 60;             // fully gone at/above
     static constexpr int kXmbFadeStart = kXmbMarginTop;  // fully lit at/below
+
+    // The bottom of the column does the same thing in reverse. It used to stop
+    // at a fixed line a little short of the screen edge, so the last row did not
+    // leave - it was there on one frame and gone on the next, in clear space
+    // well inside the panel, which is far more noticeable than a row sliding off
+    // an edge. The band is the same depth as the one at the top and is anchored
+    // to the screen edge, so a row reaches zero exactly as it runs out of room.
+    static constexpr int kXmbFadeBotEnd   = gfx::Gfx::Height;   // fully gone at/below
+    static constexpr int kXmbFadeBotStart =                     // fully lit at/above
+        kXmbFadeBotEnd - (kXmbFadeStart - kXmbFadeEnd);
 
     // Fractional row offset for a cursor sitting between two entries. The three
     // branches of xmb_item_y() are exact only at whole positions, so the gaps are
@@ -208,6 +248,17 @@ namespace sl::menu::ui {
     // being re-derived in either.
     static constexpr int kFlowPitchPx = 228;
 
+    // Momentum, in items per second.
+    //
+    // Drag is how quickly a thrown row loses speed: it keeps exp(-drag * t) of
+    // its velocity, so 1.1 leaves about a third of it after a second - a long,
+    // slow glide rather than a short skid. Min is the speed below which a
+    // release counts as placing the row rather than throwing it, and Stop is
+    // where a glide is slow enough to hand over to the settle.
+    static constexpr float kFlowFlingDrag = 1.1f;
+    static constexpr float kFlowFlingMin  = 0.8f;
+    static constexpr float kFlowFlingStop = 0.15f;
+
     static SDL_Color WithAlpha(SDL_Color c, Uint8 a) { return SDL_Color{ c.r, c.g, c.b, a }; }
 
     // The plate behind a system icon. Its opacity is the theme's setting scaled
@@ -229,13 +280,86 @@ namespace sl::menu::ui {
     static constexpr int kPaletteCount = (int)(sizeof(kPalette) / sizeof(kPalette[0]));
 
     // =========================================================================
+    // ---- start-up profiling -------------------------------------------------
+    //
+    // main.cpp already stamps the coarse milestones into boot.log; these are the
+    // phases inside them, which is where the remaining time to first frame
+    // actually goes. Marks are buffered and written once, after the first frame
+    // is on screen: an fopen per mark costs several milliseconds on the SD card
+    // and would have measured itself as much as the work.
+    namespace {
+        struct PhaseMark { const char *what; unsigned ms; };
+        PhaseMark g_phases[24];
+        int       g_phase_n    = 0;
+        u64       g_phase_tick = 0;
+        bool      g_phase_done = false;
+
+        // Cold loads during start-up, counted separately: these are PNG decodes
+        // plus a per-pixel alpha pass, and unlike the entry icons they are not
+        // budgeted, so a whole XMB category row can land on frame one.
+        int g_sysicon_n  = 0;
+        unsigned g_sysicon_ms = 0;
+
+        // Cover loads, split by whether the decoded-pixel cache had them. This
+        // is the number that says how long the shelf takes to fill, and it is
+        // written a few seconds in rather than with the phases, because covers
+        // load from frame two onward.
+        int      g_cover_hits = 0, g_cover_miss = 0;
+        unsigned g_cover_ms   = 0;
+        u64      g_frame1_tick = 0;
+        bool     g_cover_logged = false;
+
+        void CoverStatsFlush() {
+            if (g_cover_logged) return;
+            g_cover_logged = true;
+            FILE *fp = fopen("sdmc:/slaunch/boot.log", "a");
+            if (!fp) return;
+            fprintf(fp, "    covers: %d from cache, %d decoded, %ums total\n",
+                    g_cover_hits, g_cover_miss, g_cover_ms);
+            fclose(fp);
+        }
+
+        void PhaseReset() { g_phase_tick = armGetSystemTick(); g_phase_n = 0; }
+
+        void Phase(const char *what) {
+            if (g_phase_done || g_phase_n >= (int)(sizeof(g_phases) / sizeof(g_phases[0])))
+                return;
+            const u64 now = armGetSystemTick();
+            const u64 ms  = g_phase_tick
+                          ? (now - g_phase_tick) * 1000 / armGetSystemTickFreq() : 0;
+            g_phase_tick = now;
+            g_phases[g_phase_n++] = { what, (unsigned)ms };
+        }
+
+        void PhaseFlush() {
+            if (g_phase_done) return;
+            g_phase_done = true;
+            FILE *fp = fopen("sdmc:/slaunch/boot.log", "a");
+            if (!fp) return;
+            unsigned total = 0;
+            for (int i = 0; i < g_phase_n; i++) {
+                fprintf(fp, "    phase %-20s %4ums\n", g_phases[i].what, g_phases[i].ms);
+                total += g_phases[i].ms;
+            }
+            fprintf(fp, "    phase %-20s %4ums\n", "TOTAL", total);
+            fprintf(fp, "    sys icons cold-loaded %3d  (%ums)\n",
+                    g_sysicon_n, g_sysicon_ms);
+            fclose(fp);
+            // Covers load from frame two onward, so their tally is written a few
+            // seconds after this point rather than alongside the phases.
+            g_frame1_tick = armGetSystemTick();
+        }
+    }
+
     void Menu::Init(gfx::Gfx *gfx, AccountUid user, u64 suspended_app_id, bool start_oobe) {
+        PhaseReset();
         m_gfx       = gfx;
         m_user      = user;
         m_suspended = suspended_app_id;
         m_icons.Init(gfx);
         m_hb_icons.Init(gfx, hb::IconDir);
         LocaleInit();   // load the system-language locale (English is the fallback)
+        Phase("locale");
 
         // Resolve the user's nickname; if the launcher handed us an invalid uid,
         // fall back to the first account so the top bar isn't stuck on "Player".
@@ -256,25 +380,34 @@ namespace sl::menu::ui {
             }
         }
 
+        Phase("account");
+
         m_theme.Load();
         m_theme_cursor = m_theme.CurrentIndex();
+        Phase("theme.Load");
 
         ScanFonts();
+        Phase("ScanFonts");
         LoadFontConfig();   // applies the saved font (or default)
+        Phase("LoadFontConfig");
 
         LoadFavourites();
         LoadSort();
         LoadOrder();
+        LoadTileCfg();
         LoadHbPins();
         LoadHbFavourites();
         LoadHbDonor();
         LoadSettings();
         LoadSysEntries();
         LoadNames();
+        Phase("config files");
         ScanIconPacks();
+        Phase("ScanIconPacks");
         LoadIconPackSetting();
         LoadFlowConfig();
         LoadPlayCache();    // last run's play times, refreshed from pdm after frame 1
+        Phase("play cache");
         ShowPowerError();   // a chainload the daemon could not carry out
         // Widget loading (Lua parse + curl init) is deferred to InitDeferred so it
         // doesn't sit on the suspend->first-frame critical path.
@@ -358,6 +491,15 @@ namespace sl::menu::ui {
         threadClose(&m_deferred_thread);
         m_deferred_joined = true;
 
+        // Widget tiles cannot be built until the widgets themselves exist, so
+        // the entry list is rebuilt now that they do.
+        {
+            const std::string keep = m_items.empty() ? std::string()
+                                                     : ItemKey(m_items[m_cursor]);
+            RebuildItems();
+            if (!keep.empty()) SelectByKey(keep);
+        }
+
         // Welcome chime only on a fresh open (no game suspended behind us), so it
         // isn't heard every single time you HOME out of a game. On the boot
         // welcome screen the opening jingle takes its place (audio only comes up
@@ -409,6 +551,15 @@ namespace sl::menu::ui {
             threadClose(&m_cover_thread);
             m_cover_running = false;
         }
+        // The hero decoder holds surfaces of its own, and outliving the renderer
+        // would leak them at best.
+        if (m_shot_running) {
+            threadWaitForExit(&m_shot_thread);
+            threadClose(&m_shot_thread);
+            m_shot_running = false;
+            if (m_shot_surf_a) { SDL_FreeSurface(m_shot_surf_a); m_shot_surf_a = nullptr; }
+            if (m_shot_surf_b) { SDL_FreeSurface(m_shot_surf_b); m_shot_surf_b = nullptr; }
+        }
         if (m_deferred_started && !m_deferred_joined) {
             threadWaitForExit(&m_deferred_thread);
             threadClose(&m_deferred_thread);
@@ -427,6 +578,9 @@ namespace sl::menu::ui {
         if (m_wallpaper_blur) { m_gfx->FreeImage(m_wallpaper_blur); m_wallpaper_blur = nullptr; }
         FreeAlbumTexture();   // a capture is resident whenever the viewer is open
         if (m_flow_wrap) { m_gfx->FreeImage(m_flow_wrap); m_flow_wrap = nullptr; }
+        FreeWidgetTileTextures();
+        if (m_tile_pic)      { m_gfx->FreeImage(m_tile_pic);      m_tile_pic = nullptr; }
+        if (m_tile_pic_next) { m_gfx->FreeImage(m_tile_pic_next); m_tile_pic_next = nullptr; }
         for (auto &kv : m_covers)
             if (kv.second) m_gfx->FreeImage(kv.second);
         m_covers.clear();
@@ -562,8 +716,31 @@ namespace sl::menu::ui {
         add(ItemKind::WebBrowser,   T("Web Browser"));
         add(ItemKind::MiiEdit,      T("Mii Edit"));
         add(ItemKind::Settings,     T("Settings"));
+        add(ItemKind::Wifi,         T("Network"));
         add(ItemKind::Power,        T("Power"));
         add(ItemKind::HomebrewMenu, T("Homebrew menu"));
+
+        // Widget tiles, sitting with the system shortcuts. They only exist once
+        // the deferred worker has built the widgets, which is why RebuildItems
+        // runs again when it lands.
+        //
+        // The tiled flag comes from the config whatever the layout, so a placed
+        // widget keeps ticking and its tile is current the moment you switch
+        // back. The ENTRY only exists on the wall: everywhere else it would be a
+        // row you can land on that does nothing when you press A.
+        if (m_deferred_joined) {
+            for (int i = 0; i < m_widgets.Count(); i++) {
+                widgets::IWidget *w = m_widgets.At(i);
+                if (!w) continue;
+                const bool placed = m_tilecfg.count("w" + w->Name()) != 0;
+                m_widgets.SetTiled(i, placed);
+                if (!placed || m_ui_mode != UiMode::Grid) continue;
+                MenuItem it;
+                it.kind = ItemKind::WidgetTile;
+                it.name = w->Name();
+                m_items.push_back(std::move(it));
+            }
+        }
 
         // The remaining (non-favourite) games.
         for (auto &it : rest) m_items.push_back(std::move(it));
@@ -699,6 +876,8 @@ namespace sl::menu::ui {
                 return b;
             case ItemKind::Homebrew:
                 return "h" + it.hb_path;
+            case ItemKind::WidgetTile:
+                return "w" + it.name;
             default:
                 snprintf(b, sizeof(b), "s%d", (int)it.kind);
                 return b;
@@ -710,7 +889,8 @@ namespace sl::menu::ui {
             if (ItemKey(m_items[i]) == key) {
                 m_cursor = i;
                 m_scroll_pos = (float)i;
-                m_grid_scroll = (float)(i / GridColumns());
+                m_grid_scroll = (float)std::min(std::max(0, TileRowOf(i) - 1),
+                                                TileMaxScroll());
                 XmbSyncFromCursor();
                 return;
             }
@@ -766,7 +946,8 @@ namespace sl::menu::ui {
             if (m_items[i].kind == ItemKind::Game && m_items[i].app_id == app_id) {
                 m_cursor = i;
                 m_scroll_pos = (float)i;
-                m_grid_scroll = (float)(i / GridColumns());
+                m_grid_scroll = (float)std::min(std::max(0, TileRowOf(i) - 1),
+                                                TileMaxScroll());
                 XmbSyncFromCursor();
                 return true;
             }
@@ -800,10 +981,20 @@ namespace sl::menu::ui {
             else if (sscanf(line, "ui_mode=%d", &v) == 1 &&
                      v >= 0 && v < (int)UiMode::Count)
                 m_ui_mode = (UiMode)v;
+            else if (sscanf(line, "tile_cols=%d", &v) == 1)
+                m_tile_cols = std::min(std::max(kTileColsMin, v), kTileColsMax);
+            else if (sscanf(line, "tile_rows=%d", &v) == 1)
+                m_tile_rows = std::min(std::max(kTileRowsMin, v), kTileRowsMax);
             else if (sscanf(line, "list_icons=%d", &v) == 1)
                 m_list_icons = (v != 0);
             else if (sscanf(line, "shelf_vertical=%d", &v) == 1)
                 m_shelf_vertical = (v != 0);
+            else if (sscanf(line, "wrap_nav=%d", &v) == 1)
+                m_wrap_nav = (v != 0);
+            else if (sscanf(line, "show_hints=%d", &v) == 1)
+                m_show_hints = (v != 0);
+            else if (sscanf(line, "show_counter=%d", &v) == 1)
+                m_show_counter = (v != 0);
             else if (sscanf(line, "check_updates=%d", &v) == 1)
                 m_check_updates = (v != 0);
             else if (sscanf(line, "welcome=%d", &v) == 1)
@@ -838,8 +1029,13 @@ namespace sl::menu::ui {
         if (!fp) return;
         fprintf(fp, "align=%d\n", (int)m_align);
         fprintf(fp, "ui_mode=%d\n", (int)m_ui_mode);
+        fprintf(fp, "tile_cols=%d\n", m_tile_cols);
+        fprintf(fp, "tile_rows=%d\n", m_tile_rows);
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
         fprintf(fp, "shelf_vertical=%d\n", m_shelf_vertical ? 1 : 0);
+        fprintf(fp, "wrap_nav=%d\n", m_wrap_nav ? 1 : 0);
+        fprintf(fp, "show_hints=%d\n", m_show_hints ? 1 : 0);
+        fprintf(fp, "show_counter=%d\n", m_show_counter ? 1 : 0);
         fprintf(fp, "check_updates=%d\n", m_check_updates ? 1 : 0);
         fprintf(fp, "welcome=%d\n", m_welcome_enabled ? 1 : 0);
         fprintf(fp, "lang=%s\n", m_lang);
@@ -942,6 +1138,25 @@ namespace sl::menu::ui {
                     SetStatus("Theme renamed");
                     m_screen = Screen::ThemeEditor;
                     break;
+                // This fell through to the rename case, so typing the API key
+                // into Theming renamed whatever game the cursor happened to be
+                // on and never saved the key at all.
+                case sl::smi::Kb_SteamGridKey: {
+                    constexpr const char *path = "sdmc:/slaunch/config/steamgriddb.txt";
+                    mkdir("sdmc:/slaunch", 0777);
+                    mkdir("sdmc:/slaunch/config", 0777);
+                    if (m_kb_text.empty()) {
+                        remove(path);
+                    } else if (FILE *fp = fopen(path, "w")) {
+                        fprintf(fp, "%s\n", m_kb_text.c_str());
+                        fclose(fp);
+                    }
+                    m_sgdb_key = m_kb_text;
+                    m_sgdb_key_loaded = true;
+                    SetStatus(m_kb_text.empty() ? T("Key cleared") : T("Key saved"));
+                    m_screen = Screen::Theming;
+                    break;
+                }
                 default: // Kb_RenameGame
                     SetCustomName(m_kb_app, m_kb_text.c_str());
                     RebuildItems();
@@ -1053,7 +1268,12 @@ namespace sl::menu::ui {
                     m_pick_channel = i;
                     int v = (x - tx) * 255 / tw;
                     *ch[i] = (Uint8)(v < 0 ? 0 : v > 255 ? 255 : v);
-                    m_theme.Select(m_editing_theme); // live preview
+                    // Only when the colour being edited IS a theme colour. The
+                    // picker also edits tile colours now, and re-selecting the
+                    // theme there switched the user's active theme to whichever
+                    // one the editor last had open - the button path was gated
+                    // for this and the touch path was not.
+                    if (m_pick_preview) m_theme.Select(m_editing_theme);
                     break;
                 }
             }
@@ -1094,6 +1314,8 @@ namespace sl::menu::ui {
                         cursor = &m_hb_cursor;        rows = (int)m_hb.size(); break;
                     case Screen::SysEntries:
                         cursor = &m_sys_cursor;       rows = kSysEntryN; break;
+                    case Screen::Network:
+                        cursor = &m_net_cursor;       rows = NET_Count; break;
                     case Screen::Power:
                         cursor = &m_power_cursor;     rows = (int)m_power_rows.size(); break;
                     case Screen::Payloads:
@@ -1181,6 +1403,15 @@ namespace sl::menu::ui {
                     return p;
                 };
 
+                // Speed is measured on whichever axis this layout scrolls, so
+                // letting go can throw it. Blended rather than taken raw: the
+                // last sample before a finger leaves the screen is often a
+                // stutter or a tiny jitter, and handing that straight to the
+                // fling either kills a genuine throw or launches the row off a
+                // twitch.
+                ScrollAxis ax = ActiveAxis();
+                const float before = ax.pos ? *ax.pos : 0.0f;
+
                 switch (m_ui_mode) {
                     case UiMode::Line:      // horizontal cover carousel
                         m_scroll_pos = clamped(dragged(dx, kLinePitch), last);
@@ -1190,15 +1421,21 @@ namespace sl::menu::ui {
                         m_scroll_pos = clamped(dragged(dx, ShelfPitch()), last);
                         m_cursor = (int)lroundf(m_scroll_pos);
                         break;
-                    case UiMode::Flow:      // 3D coverflow
+                    case UiMode::Flow: {    // 3D coverflow
                         // Pitch is the on-screen distance between the centre
                         // cover and its neighbour. The row is perspective
                         // projected so that spacing shrinks toward the edges,
                         // but the finger is almost always over the middle, and
                         // matching it there is what makes the drag track.
-                        m_flow_scroll = clamped(dragged(dx, kFlowPitchPx), last);
-                        m_cursor = (int)lroundf(m_flow_scroll);
+                        // No clamp when the row is endless - dragging past the
+                        // last game simply carries on into the first.
+                        m_flow_scroll = m_wrap_nav
+                                ? dragged(dx, kFlowPitchPx)
+                                : clamped(dragged(dx, kFlowPitchPx),
+                                          (int)m_flow_items.size() - 1);
+                        SyncCursorFromScroll();
                         break;
+                    }
                     case UiMode::XMB:
                         // The open column only. Categories are changed by tapping
                         // the bar, so a diagonal drag can never fight the column.
@@ -1210,13 +1447,26 @@ namespace sl::menu::ui {
                         }
                         break;
                     case UiMode::Grid:      // scrolls by whole rows
-                        m_grid_scroll = clamped(dragged(dy, kGridPitch),
-                                                (int)m_items.size() / GridColumns() - 1);
+                        m_grid_scroll = clamped(dragged(dy, TilePitch()),
+                                                TileMaxScroll());
                         break;
                     default:                // List and Cover
                         m_scroll_pos = clamped(dragged(dy, kListSpacing), last);
                         m_cursor = (int)lroundf(m_scroll_pos);
                         break;
+                }
+
+                if (ax.pos) {
+                    const u64 t = armGetSystemTick();
+                    if (m_drag_tick) {
+                        const float sdt = (float)(t - m_drag_tick) /
+                                          (float)armGetSystemTickFreq();
+                        if (sdt > 0.001f) {
+                            const float v = (*ax.pos - before) / sdt;
+                            m_fling_vel = m_fling_vel * 0.65f + v * 0.35f;
+                        }
+                    }
+                    m_drag_tick = t;
                 }
             }
 
@@ -1236,6 +1486,11 @@ namespace sl::menu::ui {
             // If we were scrolling, commit the cursor position.
             bool was_scroll = m_touch_scroll_active;
             m_touch_scroll_active = false;
+            m_drag_tick = 0;
+
+            // Below this the finger was placing the row, not throwing it, and it
+            // should settle where it was left instead of creeping on.
+            if (std::abs(m_fling_vel) < kFlowFlingMin) m_fling_vel = 0.0f;
 
             if (!was_widget_drag && !was_scroll) {
                 // XMB: a tap on the bar opens that category outright.
@@ -1264,11 +1519,23 @@ namespace sl::menu::ui {
         }
 
         // down: start widget drag or prepare for touch scroll / tap
+        //
+        // Catching a coasting row stops it where it is, the way a finger on a
+        // spinning wheel does.
+        m_fling_vel = 0.0f;
+        m_drag_tick = 0;
+
         m_touching = true;
         m_touch_lx = x; m_touch_ly = y;
         m_touch_start_x = x; m_touch_start_y = y;
+        // Each layout keeps its scroll position in its own member, and the drag
+        // has to start from the one actually on screen. Flow was missing here
+        // and fell through to m_scroll_pos, which belongs to the flat layouts -
+        // so touching the shelf yanked it to wherever List or Shelf had last
+        // been left, almost always the first cover.
         m_touch_scroll_start = (m_ui_mode == UiMode::Grid) ? m_grid_scroll
                              : (m_ui_mode == UiMode::XMB)  ? m_xmb_item_scroll
+                             : (m_ui_mode == UiMode::Flow) ? m_flow_scroll
                                                            : m_scroll_pos;
 
         // Check for widget hit first.
@@ -1362,6 +1629,8 @@ namespace sl::menu::ui {
             case Screen::About:         a = OnButtonAbout(b);         break;
             case Screen::Welcome:       a = OnButtonWelcome(b);       break;
             case Screen::SysEntries:    a = OnButtonSysEntries(b);    break;
+            case Screen::Network:       a = OnButtonNetwork(b);       break;
+            case Screen::CoverPicker:   a = OnButtonCoverPicker(b);   break;
             case Screen::Power:         a = OnButtonPower(b);         break;
             case Screen::Payloads:      a = OnButtonPayloads(b);      break;
         }
@@ -1413,12 +1682,35 @@ namespace sl::menu::ui {
     }
 
     Menu::Action Menu::OnButtonMain(Btn b, u64 &out_app_id) {
+        // The bounce is playing and the launch is already committed; scrolling
+        // away underneath it would animate the wrong case.
+        if (m_launch_tick != 0) return Action::None;
         if (m_items.empty()) {
             if (b == Btn::Plus) EnterPower();
             return Action::None;
         }
         // Move mode: the D-pad reorders the held entry instead of navigating.
         if (m_move_mode) {
+            // On the tile wall a row is a real row, so up and down have to cross
+            // one. Stepping the entry a single slot along the flat list - which
+            // is all a 1-D layout needs - just nudged the tile sideways, so an
+            // entry could never be moved vertically at all.
+            //
+            // The distance is whatever the packed layout says (it varies: rows
+            // hold different numbers of entries once wide tiles are mixed in),
+            // and it is walked one adjacent swap at a time, so everything in
+            // between shifts by one exactly as a single press does.
+            if (m_ui_mode == UiMode::Grid && (b == Btn::Up || b == Btn::Down)) {
+                int cur = -1;
+                for (int i = 0; i < (int)m_items.size(); i++)
+                    if (ItemKey(m_items[i]) == m_move_key) { cur = i; break; }
+                if (cur >= 0) {
+                    const int tgt  = TileNeighbour(b == Btn::Up ? 2 : 3);
+                    const int step = (tgt > cur) ? +1 : -1;
+                    for (int i = cur; i != tgt; i += step) MoveSelected(step);
+                }
+                return Action::None;
+            }
             if (b == Btn::Left  || b == Btn::Up)   { MoveSelected(-1); return Action::None; }
             if (b == Btn::Right || b == Btn::Down) { MoveSelected(+1); return Action::None; }
             if (b == Btn::A) { m_move_mode = false; SaveOrder(); SetStatus("Order saved"); }
@@ -1433,25 +1725,44 @@ namespace sl::menu::ui {
         // the list endlessly.
         const int last = (int)m_items.size() - 1;
         auto step     = [&](int d) { m_cursor = std::min(std::max(0, m_cursor + d), last); };
+        // Wrapping only ever happens on a fresh press, so holding a direction
+        // stops at the end instead of looping forever - and it can be turned off
+        // entirely under Theming.
         auto wrapNext = [&]() {
             if (m_cursor < last)    m_cursor++;
-            else if (m_nav_fresh) { m_cursor = 0;    m_scroll_pos = 0.0f; }
+            else if (m_nav_fresh && m_wrap_nav) { m_cursor = 0;    m_scroll_pos = 0.0f; }
         };
         auto wrapPrev = [&]() {
             if (m_cursor > 0)       m_cursor--;
-            else if (m_nav_fresh) { m_cursor = last; m_scroll_pos = (float)last; }
+            else if (m_nav_fresh && m_wrap_nav) { m_cursor = last; m_scroll_pos = (float)last; }
         };
 
         // Navigation depends on the layout: the text List and the Line cover
         // carousel are 1-D; the Grid moves in two dimensions by whole rows.
         if (m_ui_mode == UiMode::Grid) {
-            const int cols = GridColumns();
-            if (b == Btn::Right) { wrapNext(); return Action::None; }
-            if (b == Btn::Left)  { wrapPrev(); return Action::None; }
-            if (b == Btn::Down)  { m_cursor = std::min(m_cursor + cols, last); return Action::None; }
-            if (b == Btn::Up)    { if (m_cursor - cols >= 0) m_cursor -= cols; return Action::None; }
-            if (b == Btn::R) { step(cols * 3);  return Action::None; }
-            if (b == Btn::L) { step(-cols * 3); return Action::None; }
+            // Every direction is resolved against the packed tile layout rather
+            // than against index arithmetic: with mixed tile widths a row is no
+            // longer a fixed number of entries, so "the one above" is a question
+            // only the geometry can answer.
+            if (b == Btn::Right) { m_cursor = TileNeighbour(1); return Action::None; }
+            if (b == Btn::Left)  { m_cursor = TileNeighbour(0); return Action::None; }
+            if (b == Btn::Up)    { m_cursor = TileNeighbour(2); return Action::None; }
+            if (b == Btn::Down)  { m_cursor = TileNeighbour(3); return Action::None; }
+            // Shoulders page by a screenful of rows.
+            if (b == Btn::R || b == Btn::L) {
+                const int row = TileRowOf(m_cursor)
+                              + (b == Btn::R ? TileRowsVis() : -TileRowsVis());
+                m_cursor = TileFirstInRow(std::min(std::max(0, row),
+                                                   std::max(0, TileRowCount() - 1)));
+                return Action::None;
+            }
+            // Y works the music tile without leaving the wall - the point of a
+            // live tile is that you do not have to open it.
+            if (b == Btn::Y && m_items[m_cursor].kind == ItemKind::MusicPlayer
+                    && m_deferred_joined) {
+                m_music.SetEnabled(!m_music.Enabled());
+                return Action::None;
+            }
         } else if (m_ui_mode == UiMode::XMB) {
             // Cross-media bar: left/right rides the category bar, up/down walks
             // the selected category's column. Both keep m_cursor pointing at the
@@ -1513,7 +1824,18 @@ namespace sl::menu::ui {
                 if (b == Btn::R) delta = +5;
                 if (b == Btn::L) delta = -5;
                 if (delta) {
-                    at = (at + delta % fn + fn) % fn;
+                    // Taking hold of the row with a button stops it coasting,
+                    // the same as putting a finger on it. Without this the fling
+                    // kept overwriting the cursor and the press did nothing.
+                    m_fling_vel = 0.0f;
+
+                    if (m_wrap_nav) {
+                        at = (at + delta % fn + fn) % fn;
+                    } else {
+                        at += delta;
+                        if (at < 0) at = 0;
+                        if (at > fn - 1) at = fn - 1;
+                    }
                     m_cursor = m_flow_items[at];
                     return Action::None;
                 }
@@ -1541,14 +1863,27 @@ namespace sl::menu::ui {
 
         if (b == Btn::A) {
             switch (it.kind) {
+                // A live tile is something to look at, not somewhere to go.
+                case ItemKind::WidgetTile:
+                    return Action::None;
                 case ItemKind::Game:
-                    if (m_suspended != 0 && it.app_id == m_suspended) return Action::ResumeApp;
+                    if (m_suspended != 0 && it.app_id == m_suspended) {
+                        if (m_ui_mode == UiMode::Flow) {
+                            StartLaunchAnim(Action::ResumeApp, it.app_id);
+                            return Action::None;
+                        }
+                        return Action::ResumeApp;
+                    }
                     if (m_suspended != 0) {
                         m_pending_launch = it.app_id;
                         m_dialog_cursor  = 1;
                         m_dialog_title.clear();   // default "Close running application?"
                         m_dialog_note.clear();
                         m_dialog = Dialog::ConfirmCloseForLaunch;
+                        return Action::None;
+                    }
+                    if (m_ui_mode == UiMode::Flow) {
+                        StartLaunchAnim(Action::LaunchApp, it.app_id);
                         return Action::None;
                     }
                     out_app_id = it.app_id;
@@ -1595,10 +1930,15 @@ namespace sl::menu::ui {
                     // Run as an application if a donor is set, else as an applet.
                     return m_hb_donor ? Action::LaunchHomebrewApp : Action::LaunchHomebrew;
                 case ItemKind::Settings:     return Action::OpenNetConnect;
+                case ItemKind::Wifi:
+                    m_screen = Screen::Network; m_net_cursor = 0; m_sub_scroll = 0;
+                    RefreshNetwork(true);
+                    return Action::None;
                 case ItemKind::Power:        EnterPower(); return Action::None;
             }
         }
         if (b == Btn::X) {
+            m_options_sub = Sub_None;
             BuildOptions();
             m_options_cursor = 0;
             if (!m_options.empty()) m_options_open = true;
@@ -1610,16 +1950,44 @@ namespace sl::menu::ui {
 
     // ---- X "Options" overlay ------------------------------------------------
     namespace { enum { OptFav = 0, OptRename, OptMove, OptUnpinHb, OptSetDonor,
-                       OptSort, OptCloseGame, OptDismiss }; }
+                       OptSort, OptCloseGame, OptPickCover, OptDismiss,
+                       OptTileSize, OptTileColor, OptTileReset,
+                       OptAddWidget, OptAddWidgetMenu, OptSubBack,
+                       OptRemoveWidget }; }
+
+    // Widgets that are not already on the wall.
+    int Menu::UnplacedWidgets() {
+        if (!m_deferred_joined) return 0;
+        int n = 0;
+        for (int i = 0; i < m_widgets.Count(); i++) {
+            widgets::IWidget *w = m_widgets.At(i);
+            if (w && !m_tilecfg.count("w" + w->Name())) n++;
+        }
+        return n;
+    }
 
     void Menu::BuildOptions() {
         m_options.clear();
         if (m_items.empty()) return;
+
+        // A submenu replaces the list rather than nesting a second overlay:
+        // same box, same input handling, one flag.
+        if (m_options_sub == Sub_Widgets) {
+            for (int i = 0; i < m_widgets.Count(); i++) {
+                widgets::IWidget *w = m_widgets.At(i);
+                if (!w || m_tilecfg.count("w" + w->Name())) continue;
+                m_options.push_back({ w->Name(), OptAddWidget, i });
+            }
+            m_options.push_back({ T("Back"), OptSubBack });
+            return;
+        }
+
         const MenuItem &it = m_items[m_cursor];
         if (it.kind == ItemKind::Game) {
             m_options.push_back({ IsFavourite(it.app_id) ? T("Remove from Favourites")
                                                          : T("Add to Favourites"), OptFav });
             m_options.push_back({ T("Rename"), OptRename });
+            m_options.push_back({ T("Choose cover"), OptPickCover });
             m_options.push_back({ m_hb_donor == it.app_id ? T("Homebrew donor (set)")
                                                           : T("Use as homebrew donor"), OptSetDonor });
         }
@@ -1630,6 +1998,26 @@ namespace sl::menu::ui {
         }
         // Any entry can be reordered.
         m_options.push_back({ T("Move"), OptMove });
+
+        // Tile options only mean anything on the wall, so they are not offered
+        // in the layouts that have no tiles.
+        if (m_ui_mode == UiMode::Grid) {
+            const std::string key = ItemKey(it);
+            m_options.push_back({ std::string(T("Tile size: ")) + T(TileSizeLabel(key)),
+                                  OptTileSize });
+            m_options.push_back({ T("Tile colour"), OptTileColor });
+            const auto tc = m_tilecfg.find(key);
+            if (tc != m_tilecfg.end() && tc->second.has_color)
+                m_options.push_back({ T("Default colour"), OptTileReset });
+            if (it.kind == ItemKind::WidgetTile)
+                m_options.push_back({ T("Remove tile"), OptRemoveWidget });
+
+            // Behind a submenu: one line per widget would push everything else
+            // off the bottom of the overlay as soon as a couple of scripts are
+            // on the card.
+            if (m_deferred_joined && UnplacedWidgets() > 0)
+                m_options.push_back({ T("Add widget"), OptAddWidgetMenu });
+        }
         if (it.kind == ItemKind::Game && m_suspended != 0 && it.app_id == m_suspended)
             m_options.push_back({ T("Close game"), OptCloseGame });
         m_options.push_back({ std::string(T("Sort: ")) + SortLabel(), OptSort });
@@ -1653,7 +2041,16 @@ namespace sl::menu::ui {
         if (n == 0) { m_options_open = false; return Action::None; }
         if (b == Btn::Down) { m_options_cursor = (m_options_cursor + 1) % n; return Action::None; }
         if (b == Btn::Up)   { m_options_cursor = (m_options_cursor + n - 1) % n; return Action::None; }
-        if (b == Btn::B || b == Btn::X) { m_options_open = false; return Action::None; }
+        if (b == Btn::B || b == Btn::X) {
+            if (m_options_sub != Sub_None) {   // back to the entry's own options
+                m_options_sub = Sub_None;
+                BuildOptions();
+                m_options_cursor = 0;
+                return Action::None;
+            }
+            m_options_open = false;
+            return Action::None;
+        }
         if (b != Btn::A) return Action::None;
 
         // Capture the selection before RebuildItems can invalidate references.
@@ -1708,9 +2105,65 @@ namespace sl::menu::ui {
                 if (m_options_cursor >= (int)m_options.size())
                     m_options_cursor = (int)m_options.size() - 1;
                 return Action::None;
+            case OptPickCover:
+                m_options_open = false;
+                // Opened from Flow's own menu, B should return there, not to the
+                // shelf - the same rule every screen reached that way follows.
+                m_from_flow_menu = (m_screen != Screen::Main);
+                EnterCoverPicker();
+                return Action::None;
             case OptCloseGame:
                 m_options_open = false;
                 return Action::TerminateApp;
+            case OptTileSize:
+                CycleTileSize(sel_key);
+                SetStatus(TileSizeLabel(sel_key));
+                m_options_open = false;
+                return Action::None;
+            case OptTileColor: {
+                TileCfg &c = TileCfgFor(sel_key);
+                // Start from whatever the tile shows now, so the picker opens on
+                // the current colour instead of black.
+                if (!c.has_color) { c.color = TileColor(m_cursor); c.has_color = true; }
+                m_pick_tile = true;
+                // No theme preview: this colour is not part of the theme, and
+                // re-selecting the theme would only throw away the blur cache.
+                OpenColorPicker(&c.color, Screen::Main, false);
+                m_options_open = false;
+                return Action::None;
+            }
+            case OptTileReset: {
+                auto c = m_tilecfg.find(sel_key);
+                if (c != m_tilecfg.end()) {
+                    c->second.has_color = false;
+                    // Drop only the entry that carries nothing else, so a widget
+                    // tile is not deleted just by resetting its colour.
+                    if (c->second.w == 0) m_tilecfg.erase(c);
+                    SaveTileCfg();
+                }
+                m_options_open = false;
+                return Action::None;
+            }
+            case OptAddWidgetMenu:
+                m_options_sub = Sub_Widgets;
+                BuildOptions();
+                m_options_cursor = 0;
+                return Action::None;
+            case OptSubBack:
+                m_options_sub = Sub_None;
+                BuildOptions();
+                m_options_cursor = 0;
+                return Action::None;
+            case OptAddWidget:
+                AddWidgetTile(m_options[m_options_cursor].arg);
+                SetStatus("Widget added");
+                m_options_sub  = Sub_None;
+                m_options_open = false;
+                return Action::None;
+            case OptRemoveWidget:
+                RemoveWidgetTile(sel.name);
+                m_options_open = false;
+                return Action::None;
             case OptDismiss:
             default:
                 m_options_open = false;
@@ -1731,29 +2184,53 @@ namespace sl::menu::ui {
         // hands back "https:\/\/cdn2.steamgriddb.com\/grid\/x.png" and passing
         // that to curl verbatim fails every time. It also truncated on any value
         // containing an escaped quote.
-        std::string JsonStr(const std::string &j, const char *key) {
-            std::string pat = std::string("\"") + key + "\"";
-            size_t p = j.find(pat); if (p == std::string::npos) return "";
-            p = j.find(':', p + pat.size()); if (p == std::string::npos) return "";
-            size_t s = j.find('"', p); if (s == std::string::npos) return "";
+        // Every string value for `key`, in document order, up to `max`.
+        //
+        // The grids endpoint returns an array and the cover picker wants all of
+        // it, so this is the general form and JsonStr below is the first-match
+        // case of it. One decoder rather than two: the escape handling here is
+        // what a plain find() got wrong before (SteamGridDB escapes its forward
+        // slashes, so an undecoded url was a 404).
+        std::vector<std::string> JsonStrAll(const std::string &j, const char *key,
+                                            size_t max) {
+            std::vector<std::string> out;
+            const std::string pat = std::string("\"") + key + "\"";
+            size_t p = 0;
+            while (out.size() < max) {
+                p = j.find(pat, p);
+                if (p == std::string::npos) break;
+                p += pat.size();
+                const size_t colon = j.find(':', p);
+                if (colon == std::string::npos) break;
+                const size_t s = j.find('"', colon);
+                if (s == std::string::npos) break;
 
-            std::string out;
-            for (size_t i = s + 1; i < j.size(); i++) {
-                const char c = j[i];
-                if (c == '"') break;                  // unescaped quote ends it
-                if (c != '\\') { out += c; continue; }
-                if (++i >= j.size()) break;
-                switch (j[i]) {
-                    case 'n': out += '\n'; break;
-                    case 't': out += '\t'; break;
-                    case 'r': out += '\r'; break;
-                    case 'b': out += '\b'; break;
-                    case 'f': out += '\f'; break;
-                    case 'u': i += 4; break;          // \uXXXX: skipped, not needed here
-                    default:  out += j[i]; break;     // \/ \\ \" and anything else
+                std::string v;
+                size_t i = s + 1;
+                for (; i < j.size(); i++) {
+                    const char c = j[i];
+                    if (c == '"') break;              // unescaped quote ends it
+                    if (c != '\\') { v += c; continue; }
+                    if (++i >= j.size()) break;
+                    switch (j[i]) {
+                        case 'n': v += '\n'; break;
+                        case 't': v += '\t'; break;
+                        case 'r': v += '\r'; break;
+                        case 'b': v += '\b'; break;
+                        case 'f': v += '\f'; break;
+                        case 'u': i += 4; break;      // \uXXXX: not needed here
+                        default:  v += j[i]; break;   // \/ \\ \" and anything else
+                    }
                 }
+                out.push_back(std::move(v));
+                p = i;
             }
             return out;
+        }
+
+        std::string JsonStr(const std::string &j, const char *key) {
+            const std::vector<std::string> v = JsonStrAll(j, key, 1);
+            return v.empty() ? std::string() : v[0];
         }
         int CmpVer(const char *a, const char *b) {   // >0 if a newer than b; skips a 'v'
             auto parse = [](const char *s, int v[3]) {
@@ -1872,6 +2349,555 @@ namespace sl::menu::ui {
         }
         DrawCarousel(labels, values, m_sys_cursor, m_sub_scroll);
         DrawHint("Up/Down: Select   B: Back");
+    }
+
+    // ---- launch animation ---------------------------------------------------
+    //
+    // Dispatching a launch exits the applet, so an animation cannot simply be
+    // played "on the way out" - there are no frames after the action is
+    // returned. The action is therefore held here, the menu keeps rendering,
+    // and the host collects it through TakePendingAction once the bounce is
+    // done. Flow only: it is the one layout with a single object big enough on
+    // screen for the movement to read.
+    namespace {
+        constexpr u64 kLaunchMs = 380;      // whole bounce
+        constexpr float kLaunchDip  = 0.88f;  // anticipation, before the spring
+        constexpr float kLaunchPeak = 1.34f;  // how far it comes toward you
+        constexpr float kLaunchDipEnd = 0.28f; // fraction spent dipping
+        constexpr float kLaunchFadeAt = 0.45f; // fade to black starts here
+
+        // Dip, then spring. The dip is a quarter sine so it eases into the low
+        // point; the spring is an ease-out cubic so it leaves fast and settles.
+        float LaunchScale(float t) {
+            if (t < kLaunchDipEnd) {
+                const float u = t / kLaunchDipEnd;
+                return 1.0f - (1.0f - kLaunchDip) * sinf(u * 1.5707963f);
+            }
+            const float u = (t - kLaunchDipEnd) / (1.0f - kLaunchDipEnd);
+            const float e = 1.0f - powf(1.0f - u, 3.0f);
+            return kLaunchDip + (kLaunchPeak - kLaunchDip) * e;
+        }
+    }
+
+    void Menu::StartLaunchAnim(Action a, u64 app_id) {
+        m_launch_tick   = armGetSystemTick();
+        m_launch_fired  = false;
+        m_launch_action = a;
+        m_launch_id     = app_id;
+    }
+
+    float Menu::LaunchAnimT() const {
+        if (m_launch_tick == 0) return -1.0f;
+        const u64 ms = (armGetSystemTick() - m_launch_tick) * 1000 / armGetSystemTickFreq();
+        const float t = (float)ms / (float)kLaunchMs;
+        return (t > 1.0f) ? 1.0f : t;
+    }
+
+    Menu::Action Menu::TakePendingAction(u64 &out_app_id) {
+        const Action a = m_pending_action;
+        if (a == Action::None) return a;
+        out_app_id      = m_pending_id;
+        m_pending_action = Action::None;
+        m_pending_id     = 0;
+
+        // Cleared here rather than when the animation ended. The black frame has
+        // already been drawn and presented by the time the host asks for the
+        // action, so on the console - where this is immediately followed by the
+        // applet exiting - black is the last thing left on screen. Anywhere the
+        // host does not exit (the simulator), the menu simply carries on rather
+        // than sitting black forever.
+        m_launch_tick   = 0;
+        m_launch_fired  = false;
+        m_launch_action = Action::None;
+        return a;
+    }
+
+    // ---- cover picker -------------------------------------------------------
+    //
+    // The automatic fetch takes the top-ranked grid for whatever the name search
+    // matched, which is right often enough to be worth doing and wrong often
+    // enough to be worth overriding. This lists everything SteamGridDB has at
+    // case-front proportions and lets you take the one you want.
+    //
+    // Thumbnails go to a scratch directory rather than into covers/, so nothing
+    // here can disturb the art already on the card until a choice is confirmed.
+    namespace {
+        constexpr const char *kPickDir = "sdmc:/slaunch/cache/covertmp";
+        constexpr int kPickMax  = 24;   // grids listed; two full screens
+        constexpr int kPickCols = 6;
+        constexpr int kPickRows = 2;    // visible at once
+        constexpr int kPickCellW = 170;
+        constexpr int kPickCellH = 255;
+        constexpr int kPickGapX  = 20;
+        constexpr int kPickGapY  = 22;
+        constexpr int kPickTop   = 138;
+
+        int PickCellX(int col) {
+            const int total = kPickCols * kPickCellW + (kPickCols - 1) * kPickGapX;
+            return (gfx::Gfx::Width - total) / 2 + col * (kPickCellW + kPickGapX);
+        }
+    }
+
+    void Menu::CoverPickTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        net::GlobalInit();
+
+        // Second phase: the chosen grid is downloaded over the real cover.
+        if (m->m_pick_apply) {
+            m->m_pick_state.store((int)PickState::Applying, std::memory_order_release);
+            bool ok = false;
+            const int idx = m->m_pick_choice;
+            if (idx >= 0 && idx < (int)m->m_pick_urls.size()) {
+                mkdir("sdmc:/slaunch/covers", 0777);
+                char dst[96];
+                snprintf(dst, sizeof(dst), "sdmc:/slaunch/covers/%016llX.jpg",
+                         (unsigned long long)m->m_pick_id);
+                ok = net::Download(m->m_pick_urls[idx].c_str(), dst, 25);
+            }
+            m->m_pick_state.store((int)(ok ? PickState::Applied : PickState::Failed),
+                                  std::memory_order_release);
+            m->m_pick_done.store(true, std::memory_order_release);
+            return;
+        }
+
+        const std::string auth = "Bearer " + m->m_sgdb_key;
+        PickState end = PickState::Failed;
+
+        do {
+            std::string q;
+            for (unsigned char c : m->m_pick_name) {
+                if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
+                else if (c == ' ') q += "%20";
+                else { char b[4]; snprintf(b, sizeof(b), "%%%02X", c); q += b; }
+            }
+            if (q.empty()) break;
+
+            m->m_pick_state.store((int)PickState::Searching, std::memory_order_release);
+            std::string body;
+            long http = 0; int rc = 0;
+            const std::string url =
+                "https://www.steamgriddb.com/api/v2/search/autocomplete/" + q;
+            if (!net::Get(url.c_str(), body, 12, auth.c_str(), &http, &rc)) {
+                end = (http == 401 || http == 403) ? PickState::BadKey : PickState::Failed;
+                break;
+            }
+
+            end = PickState::NoMatch;
+            const size_t d = body.find("\"data\"");
+            if (d == std::string::npos) break;
+            const size_t idp = body.find("\"id\"", d);
+            if (idp == std::string::npos) break;
+            const size_t colon = body.find(':', idp);
+            if (colon == std::string::npos) break;
+            const long long gid = strtoll(body.c_str() + colon + 1, nullptr, 10);
+            if (gid <= 0) break;
+
+            m->m_pick_state.store((int)PickState::Listing, std::memory_order_release);
+            char grid[176];
+            snprintf(grid, sizeof(grid),
+                     "https://www.steamgriddb.com/api/v2/grids/game/%lld"
+                     "?dimensions=600x900&types=static&limit=%d", gid, kPickMax);
+            body.clear();
+            end = PickState::NoArt;
+            if (!net::Get(grid, body, 15, auth.c_str(), &http, &rc)) break;
+
+            // "url" is the full-size grid, "thumb" the preview beside it; one of
+            // each per entry, in the same order, so the two lists stay aligned.
+            m->m_pick_urls   = JsonStrAll(body, "url",   kPickMax);
+            m->m_pick_thumbs = JsonStrAll(body, "thumb", kPickMax);
+            if (m->m_pick_urls.empty()) break;
+            if (m->m_pick_thumbs.size() < m->m_pick_urls.size())
+                m->m_pick_urls.resize(m->m_pick_thumbs.size());
+            if (m->m_pick_urls.empty()) break;
+
+            // Both vectors are complete from here on and never resized again,
+            // which is what makes them safe to read on the main thread behind
+            // the m_pick_have counter.
+            m->m_pick_total.store((int)m->m_pick_urls.size(), std::memory_order_release);
+
+            mkdir("sdmc:/slaunch/cache", 0777);
+            mkdir(kPickDir, 0777);
+            for (size_t i = 0; i < m->m_pick_urls.size(); i++) {
+                // A choice has been made; whatever is already on screen is
+                // enough and the rest of the downloads are wasted work.
+                if (m->m_pick_abort.load(std::memory_order_acquire)) break;
+                char dst[96];
+                snprintf(dst, sizeof(dst), "%s/%02u.jpg", kPickDir, (unsigned)i);
+                remove(dst);
+                if (!net::Download(m->m_pick_thumbs[i].c_str(), dst, 15)) continue;
+                // Released one at a time so the grid fills in as they land
+                // rather than sitting empty until the last one arrives.
+                m->m_pick_have.store((int)i + 1, std::memory_order_release);
+            }
+            end = (m->m_pick_have.load(std::memory_order_acquire) > 0)
+                      ? PickState::Ready : PickState::Failed;
+        } while (false);
+
+        m->m_pick_state.store((int)end, std::memory_order_release);
+        m->m_pick_done.store(true, std::memory_order_release);
+    }
+
+    void Menu::EnterCoverPicker() {
+        if (m_pick_running) return;                 // a fetch is already in flight
+        const MenuItem &it = m_items[m_cursor];
+        if (it.kind != ItemKind::Game || it.app_id == 0) return;
+
+        LeaveCoverPicker();                          // free any previous session
+        m_pick_id     = it.app_id;
+        m_pick_name   = it.name;
+        m_pick_cursor = 0;
+        m_pick_scroll = 0.0f;
+        m_pick_apply  = false;
+        m_pick_want_apply = false;
+        m_pick_abort.store(false, std::memory_order_release);
+        m_pick_have.store(0, std::memory_order_release);
+        m_pick_total.store(0, std::memory_order_release);
+        m_pick_done.store(false, std::memory_order_release);
+        m_screen = Screen::CoverPicker;
+
+        if (!SgdbKeyPresent()) {
+            m_pick_state.store((int)PickState::NoKey, std::memory_order_release);
+            return;
+        }
+        m_pick_state.store((int)PickState::Searching, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_pick_thread, &Menu::CoverPickTrampoline,
+                                     this, nullptr, 0x20000, 0x3B, -2))) {
+            threadStart(&m_pick_thread);
+            m_pick_running = true;
+        } else {
+            m_pick_state.store((int)PickState::Failed, std::memory_order_release);
+        }
+    }
+
+    // Frees the textures and forgets the listing. The worker is joined first:
+    // it writes the url vectors, so tearing them down under it would be a race.
+    void Menu::LeaveCoverPicker() {
+        // Cancelling should be immediate too: without this, backing out waited
+        // for every remaining thumbnail before the screen would close.
+        m_pick_abort.store(true, std::memory_order_release);
+        if (m_pick_running) {
+            threadWaitForExit(&m_pick_thread);
+            threadClose(&m_pick_thread);
+            m_pick_running = false;
+        }
+        for (SDL_Texture *t : m_pick_tex) if (t) m_gfx->FreeImage(t);
+        m_pick_tex.clear();
+        m_pick_urls.clear();
+        m_pick_thumbs.clear();
+        m_pick_have.store(0, std::memory_order_release);
+        m_pick_total.store(0, std::memory_order_release);
+        m_pick_abort.store(false, std::memory_order_release);
+        m_pick_want_apply = false;
+        m_pick_state.store((int)PickState::Idle, std::memory_order_release);
+    }
+
+    void Menu::StartPickApply() {
+        m_pick_apply = true;
+        m_pick_done.store(false, std::memory_order_release);
+        m_pick_state.store((int)PickState::Applying, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_pick_thread, &Menu::CoverPickTrampoline,
+                                     this, nullptr, 0x20000, 0x3B, -2))) {
+            threadStart(&m_pick_thread);
+            m_pick_running = true;
+        } else {
+            m_pick_apply = false;
+            m_pick_state.store((int)PickState::Failed, std::memory_order_release);
+            SetStatus(T("Could not download that cover"));
+        }
+    }
+
+    void Menu::PollCoverPicker() {
+        if (!m_pick_running || !m_pick_done.load(std::memory_order_acquire)) return;
+        threadWaitForExit(&m_pick_thread);
+        threadClose(&m_pick_thread);
+        m_pick_running = false;
+
+        // A was pressed while the listing was still running.
+        if (m_pick_want_apply && !m_pick_apply) {
+            m_pick_want_apply = false;
+            m_pick_abort.store(false, std::memory_order_release);
+            StartPickApply();
+            return;
+        }
+        if (!m_pick_apply) return;
+        m_pick_apply = false;
+
+        const PickState st = (PickState)m_pick_state.load(std::memory_order_acquire);
+        if (st != PickState::Applied) { SetStatus(T("Could not download that cover")); return; }
+
+        // Drop what Flow and the shelf have cached for this title so the new
+        // file is picked up on the next frame, exactly as a fetch does.
+        auto f = m_covers.find(m_pick_id);
+        if (f != m_covers.end()) {
+            if (f->second) m_gfx->FreeImage(f->second);
+            m_covers.erase(f);
+        }
+        auto g = m_shots.find(m_pick_id);
+        if (g != m_shots.end()) {
+            if (g->second.a) m_gfx->FreeImage(g->second.a);
+            if (g->second.b) m_gfx->FreeImage(g->second.b);
+            m_shots.erase(g);
+        }
+        m_cover_tried[m_pick_id] = true;   // do not let the auto-fetch undo this
+
+        SetStatus(T("Cover updated"));
+        m_screen = BackTarget();
+        LeaveCoverPicker();
+    }
+
+    int Menu::CoverPickAt(int x, int y) const {
+        const int have = m_pick_have.load(std::memory_order_acquire);
+        if (have <= 0) return -1;
+        const int top = kPickTop - (int)(m_pick_scroll * (kPickCellH + kPickGapY));
+        for (int i = 0; i < have; i++) {
+            const int cx = PickCellX(i % kPickCols);
+            const int cy = top + (i / kPickCols) * (kPickCellH + kPickGapY);
+            if (x >= cx && x < cx + kPickCellW && y >= cy && y < cy + kPickCellH)
+                return i;
+        }
+        return -1;
+    }
+
+    Menu::Action Menu::OnButtonCoverPicker(Btn b) {
+        if (b == Btn::B) {
+            m_screen = BackTarget();
+            LeaveCoverPicker();
+            return Action::None;
+        }
+
+        const int have = m_pick_have.load(std::memory_order_acquire);
+        if (have <= 0) return Action::None;          // nothing to move around yet
+
+        const int rows = (have + kPickCols - 1) / kPickCols;
+        if (b == Btn::Left)  m_pick_cursor = (m_pick_cursor + have - 1) % have;
+        if (b == Btn::Right) m_pick_cursor = (m_pick_cursor + 1) % have;
+        if (b == Btn::Up) {
+            if (m_pick_cursor >= kPickCols) m_pick_cursor -= kPickCols;
+        }
+        if (b == Btn::Down) {
+            if (m_pick_cursor + kPickCols < have) m_pick_cursor += kPickCols;
+        }
+
+        // Keep the cursor's row on screen.
+        const int row = m_pick_cursor / kPickCols;
+        const float first = m_pick_scroll;
+        if ((float)row < first)                    m_pick_scroll = (float)row;
+        else if (row > (int)first + kPickRows - 1) m_pick_scroll = (float)(row - kPickRows + 1);
+        if (m_pick_scroll > (float)(rows - kPickRows))
+            m_pick_scroll = (float)((rows > kPickRows) ? rows - kPickRows : 0);
+        if (m_pick_scroll < 0.0f) m_pick_scroll = 0.0f;
+
+        if (b == Btn::A) {
+            m_pick_choice = m_pick_cursor;
+            m_sfx_confirm = true;
+            if (m_pick_running) {
+                // Still listing: cut the remaining thumbnail downloads short and
+                // let PollCoverPicker start the real download once it has joined.
+                m_pick_want_apply = true;
+                m_pick_abort.store(true, std::memory_order_release);
+                m_pick_state.store((int)PickState::Applying, std::memory_order_release);
+            } else {
+                StartPickApply();
+            }
+        }
+        return Action::None;
+    }
+
+    void Menu::DrawCoverPicker() {
+        const Theme &t = m_theme.Current();
+        const int    W = gfx::Gfx::Width;
+        DrawTopBar(T("Choose cover"));
+
+        const PickState st = (PickState)m_pick_state.load(std::memory_order_acquire);
+        const int have  = m_pick_have.load(std::memory_order_acquire);
+        const int total = m_pick_total.load(std::memory_order_acquire);
+
+        m_gfx->TextCentered(FontSize::Small, W / 2, 96, t.dim,
+                            Ellipsize(m_pick_name, W - 120, FontSize::Small).c_str());
+
+        const char *msg = nullptr;
+        switch (st) {
+            case PickState::NoKey:    msg = T("No SteamGridDB key set"); break;
+            case PickState::BadKey:   msg = T("SteamGridDB rejected the key"); break;
+            case PickState::Searching:msg = T("Searching..."); break;
+            case PickState::Listing:  msg = T("Loading covers..."); break;
+            case PickState::NoMatch:  msg = T("No match on SteamGridDB"); break;
+            case PickState::NoArt:    msg = T("No covers available"); break;
+            case PickState::Failed:   msg = T("Fetch failed"); break;
+            case PickState::Applying: msg = T("Downloading..."); break;
+            default: break;
+        }
+        if (have <= 0 && msg) {
+            m_gfx->TextCentered(FontSize::Normal, W / 2, 330, t.fg, msg);
+            DrawHint("B: Back");
+            return;
+        }
+
+        // Thumbnails are decoded a couple per frame, like every other image in
+        // the menu, so a screen filling up never costs a frame.
+        int budget = 2;
+        if ((int)m_pick_tex.size() < have) m_pick_tex.resize(have, nullptr);
+
+        const int top = kPickTop - (int)(m_pick_scroll * (kPickCellH + kPickGapY));
+
+        for (int i = 0; i < have; i++) {
+            const int cx = PickCellX(i % kPickCols);
+            const int cy = top + (i / kPickCols) * (kPickCellH + kPickGapY);
+            if (cy + kPickCellH < 110 || cy > gfx::Gfx::Height - 40) continue;
+
+            if (!m_pick_tex[i] && budget > 0) {
+                char path[96];
+                snprintf(path, sizeof(path), "%s/%02d.jpg", kPickDir, i);
+                m_pick_tex[i] = m_gfx->LoadImageScaled(path, kPickCellW, kPickCellH);
+                budget--;
+            }
+
+            const bool sel = (i == m_pick_cursor);
+            if (m_pick_tex[i]) m_gfx->DrawImage(m_pick_tex[i], cx, cy, kPickCellW, kPickCellH);
+            else               m_gfx->FillRect(cx, cy, kPickCellW, kPickCellH,
+                                               WithAlpha(t.fg, 26));
+            if (sel) {
+                const SDL_Color a = t.accent;
+                m_gfx->FillRect(cx - 4, cy - 4, kPickCellW + 8, 4, a);
+                m_gfx->FillRect(cx - 4, cy + kPickCellH, kPickCellW + 8, 4, a);
+                m_gfx->FillRect(cx - 4, cy - 4, 4, kPickCellH + 8, a);
+                m_gfx->FillRect(cx + kPickCellW, cy - 4, 4, kPickCellH + 8, a);
+            }
+        }
+
+        char count[48];
+        snprintf(count, sizeof(count), "%d / %d", m_pick_cursor + 1,
+                 total > 0 ? total : have);
+        m_gfx->TextCentered(FontSize::Small, W / 2, gfx::Gfx::Height - 64, t.dim, count);
+
+        if (st == PickState::Applying) DrawHint("Downloading...");
+        else                           DrawHint("D-pad: Choose    A: Use this    B: Cancel");
+    }
+
+    // ---- Network screen -----------------------------------------------------
+    // The status the console already knows, plus the one setting that can be
+    // changed without leaving the menu. Full configuration - scanning for a
+    // network, entering a passphrase - stays with the system NetConnect applet,
+    // which the last row hands off to. That applet owns the keyboard and the
+    // scan UI, and there is no reason to reimplement either.
+    // nifm answers over IPC, so this is polled on a timer rather than per frame.
+    // Four service calls every frame would show up in the frame time, for numbers
+    // that change every few seconds at most.
+    void Menu::RefreshNetwork(bool force) {
+        const u64 now = armGetSystemTick();
+        if (!force && m_net_tick && (now - m_net_tick) < armGetSystemTickFreq())
+            return;
+        m_net_tick = now;
+
+        NetStatus s;
+
+        bool wl = true;
+        if (R_SUCCEEDED(nifmIsWirelessCommunicationEnabled(&wl))) s.wifi_on = wl;
+
+        NifmInternetConnectionType   type = (NifmInternetConnectionType)0;
+        NifmInternetConnectionStatus st   = (NifmInternetConnectionStatus)0;
+        u32 strength = 0;
+        if (R_SUCCEEDED(nifmGetInternetConnectionStatus(&type, &strength, &st))) {
+            s.connected = (st == NifmInternetConnectionStatus_Connected);
+            s.ethernet  = (type == NifmInternetConnectionType_Ethernet);
+            s.strength  = (int)strength;
+        }
+
+        u32 ip = 0;
+        if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0) {
+            // nifm returns the address low byte first.
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                     (unsigned)( ip        & 0xFF), (unsigned)((ip >>  8) & 0xFF),
+                     (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF));
+            s.ip = buf;
+        }
+
+        NifmNetworkProfileData prof = {};
+        if (R_SUCCEEDED(nifmGetCurrentNetworkProfile(&prof))) {
+            // The SSID when there is one, otherwise the profile name: a wired
+            // profile has no SSID at all, and an empty row for it reads as a bug
+            // rather than as "not applicable".
+            char nm[0x41] = {};
+            memcpy(nm, prof.wireless_setting_data.ssid,
+                   sizeof(prof.wireless_setting_data.ssid) - 1);
+            if (nm[0] == 0)
+                memcpy(nm, prof.network_name, sizeof(prof.network_name));
+            nm[sizeof(nm) - 1] = 0;
+            s.name = nm;
+        }
+
+        m_net = s;
+    }
+
+    void Menu::DrawNetwork() {
+        RefreshNetwork(false);
+        DrawTopBar(T("Network"));
+
+        const std::string dash = "-";
+        std::vector<std::string> labels, values;
+
+        labels.push_back(T("Status"));
+        values.push_back(!m_net.connected ? T("Not connected")
+                         : m_net.ethernet ? T("Connected (wired)")
+                                          : T("Connected"));
+
+        labels.push_back(T("Network name"));
+        values.push_back(m_net.name.empty() ? dash : m_net.name);
+
+        labels.push_back(T("Signal"));
+        if (!m_net.connected || m_net.ethernet) {
+            values.push_back(dash);
+        } else {
+            char b[16];
+            snprintf(b, sizeof(b), "%d/3", m_net.strength);
+            values.push_back(b);
+        }
+
+        labels.push_back(T("IP address"));
+        values.push_back(m_net.ip.empty() ? dash : m_net.ip);
+
+        labels.push_back(T("Wi-Fi"));
+        values.push_back(m_net.wifi_on ? T("On") : T("Off"));
+
+        labels.push_back(T("Open network settings"));
+        values.emplace_back();
+
+        DrawCarousel(labels, values, m_net_cursor, m_sub_scroll);
+        DrawHint("Up/Down: Select    A: Change    B: Back");
+    }
+
+    Menu::Action Menu::OnButtonNetwork(Btn b) {
+        if (b == Btn::B) { m_screen = BackTarget(); m_sub_scroll = 0; return Action::None; }
+        if (b == Btn::Down) m_net_cursor = (m_net_cursor + 1) % NET_Count;
+        if (b == Btn::Up)   m_net_cursor = (m_net_cursor + NET_Count - 1) % NET_Count;
+
+        const bool a = (b == Btn::A);
+        if (!a && b != Btn::Left && b != Btn::Right) return Action::None;
+
+        if (m_net_cursor == NET_Wifi) {
+            const bool want = !m_net.wifi_on;
+            if (R_SUCCEEDED(nifmSetWirelessCommunicationEnabled(want))) {
+                m_net.wifi_on = want;
+                SetStatus(want ? T("Wi-Fi on") : T("Wi-Fi off"));
+                // The radio takes a moment to associate or drop. Clearing the
+                // timer re-reads on the next frame instead of leaving a stale
+                // status sitting there for the rest of the poll interval.
+                m_net_tick = 0;
+                m_sfx_confirm = true;
+            } else {
+                SetStatus(T("Could not change Wi-Fi"));
+            }
+            return Action::None;
+        }
+        if (m_net_cursor == NET_Open && a) {
+            m_sfx_confirm = true;
+            return Action::OpenNetConnect;
+        }
+        // A on a read-only row re-reads instead of doing nothing, so there is an
+        // obvious way to refresh the screen by hand.
+        if (a) RefreshNetwork(true);
+        return Action::None;
     }
 
     // ---- Power screen -------------------------------------------------------
@@ -2241,6 +3267,12 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         const LogLine kChangelog[] = {
+            { true,  "v1.0.0" },
+            { false, "Grid is now a wall of tiles, in three sizes" },
+            { false, "Any tile can be given a colour of its own" },
+            { false, "Home widgets can be placed on the wall as live tiles" },
+            { false, "Wall columns and rows are adjustable (Theming)" },
+            { false, "Every screen is now fully translated" },
             { true,  "v0.9.1" },
             { false, "Menu opens much faster - art loads after it appears" },
             { false, "Flow scrolls smoothly; covers load ahead of the row" },
@@ -2406,6 +3438,9 @@ namespace sl::menu::ui {
             m_shelf_vertical = !m_shelf_vertical;
             SaveSettings();
         };
+        auto toggleWrap    = [&]() { m_wrap_nav     = !m_wrap_nav;     SaveSettings(); };
+        auto toggleHints   = [&]() { m_show_hints   = !m_show_hints;   SaveSettings(); };
+        auto toggleCounter = [&]() { m_show_counter = !m_show_counter; SaveSettings(); };
         auto toggleUpdates = [&]() { m_check_updates = !m_check_updates; SaveSettings(); };
         if (m_theming_cursor == TH_Updates && (b == Btn::Left || b == Btn::Right))
             toggleUpdates();
@@ -2422,6 +3457,30 @@ namespace sl::menu::ui {
             cycleIconPack(b == Btn::Right ? +1 : -1);
         if (m_theming_cursor == TH_ShelfVert && (b == Btn::Left || b == Btn::Right))
             toggleShelfVert();
+        // Left/Right step the wall shape, which is what every other numeric row
+        // here does; A wraps forward like the cycling rows do.
+        auto stepWall = [&](int dir) {
+            if (m_theming_cursor == TH_TileCols) {
+                int n = TileCols() + dir;
+                if (n > kTileColsMax) n = kTileColsMin;
+                if (n < kTileColsMin) n = kTileColsMax;
+                SetTileCols(n);
+            } else {
+                int n = TileRowsVis() + dir;
+                if (n > kTileRowsMax) n = kTileRowsMin;
+                if (n < kTileRowsMin) n = kTileRowsMax;
+                SetTileRows(n);
+            }
+        };
+        if ((m_theming_cursor == TH_TileCols || m_theming_cursor == TH_TileRows) &&
+            (b == Btn::Left || b == Btn::Right))
+            stepWall(b == Btn::Right ? +1 : -1);
+        if (m_theming_cursor == TH_Wrap && (b == Btn::Left || b == Btn::Right))
+            toggleWrap();
+        if (m_theming_cursor == TH_Hints && (b == Btn::Left || b == Btn::Right))
+            toggleHints();
+        if (m_theming_cursor == TH_Counter && (b == Btn::Left || b == Btn::Right))
+            toggleCounter();
         if (m_theming_cursor == TH_Language && (b == Btn::Left || b == Btn::Right))
             cycleLanguage(b == Btn::Right ? +1 : -1);
         if (b == Btn::A) {
@@ -2434,17 +3493,24 @@ namespace sl::menu::ui {
                 case TH_IconPack:    cycleIconPack(+1); break;
                 case TH_Language:    cycleLanguage(+1); break;
                 case TH_ShelfVert:   toggleShelfVert(); break;
+                case TH_TileCols:
+                case TH_TileRows:    stepWall(+1); break;
+                case TH_Wrap:        toggleWrap(); break;
+                case TH_Hints:       toggleHints(); break;
+                case TH_Counter:     toggleCounter(); break;
                 case TH_FlowSet:
                     m_screen = Screen::FlowSettings;
                     m_flowset_cursor = 0;
                     break;
                 case TH_SgdbKey:
+                    SgdbKeyPresent();          // make sure it is loaded to edit
                     m_kb_purpose = sl::smi::Kb_SteamGridKey;
                     m_kb_text    = m_sgdb_key;
                     m_kb_row = m_kb_col = 0;
                     m_kb_upper = false;
                     m_screen = Screen::Keyboard;
                     break;
+
                 case TH_Welcome:     toggleWelcome(); break;
                 case TH_Updates:     toggleUpdates(); break;
                 case TH_About:       m_screen = Screen::About;        m_about_scroll = 0; break;
@@ -2682,10 +3748,12 @@ namespace sl::menu::ui {
         m_wallpaper_theme = -1;
     }
 
-    void Menu::OpenColorPicker(SDL_Color *target) {
+    void Menu::OpenColorPicker(SDL_Color *target, Screen back, bool preview) {
         m_pick_target   = target;
         m_pick_original = *target;
         m_pick_channel  = 0;
+        m_pick_return   = back;
+        m_pick_preview  = preview;
         m_screen        = Screen::ColorPicker;
     }
 
@@ -2819,7 +3887,7 @@ namespace sl::menu::ui {
     }
 
     Menu::Action Menu::OnButtonColorPicker(Btn b) {
-        if (!m_pick_target) { m_screen = Screen::ThemeEditor; return Action::None; }
+        if (!m_pick_target) { m_screen = m_pick_return; return Action::None; }
         Uint8 *ch[3] = { &m_pick_target->r, &m_pick_target->g, &m_pick_target->b };
 
         if (b == Btn::Down) m_pick_channel = (m_pick_channel + 1) % 3;
@@ -2828,15 +3896,19 @@ namespace sl::menu::ui {
         auto adjust = [&](int d) {
             int v = (int)*ch[m_pick_channel] + d;
             *ch[m_pick_channel] = (Uint8)(v < 0 ? 0 : v > 255 ? 255 : v);
-            m_theme.Select(m_editing_theme); // live preview
+            if (m_pick_preview) m_theme.Select(m_editing_theme); // live preview
         };
         if (b == Btn::Right) adjust(+1);
         if (b == Btn::Left)  adjust(-1);
         if (b == Btn::R)     adjust(+16); // shoulder buttons = coarse steps
         if (b == Btn::L)     adjust(-16);
 
-        if (b == Btn::A) { m_pick_target = nullptr; m_screen = Screen::ThemeEditor; }
-        if (b == Btn::B) { *m_pick_target = m_pick_original; m_pick_target = nullptr; m_screen = Screen::ThemeEditor; }
+        if (b == Btn::A || b == Btn::B) {
+            if (b == Btn::B) *m_pick_target = m_pick_original;
+            m_pick_target = nullptr;
+            if (m_pick_tile) { SaveTileCfg(); m_pick_tile = false; }
+            m_screen = m_pick_return;
+        }
         return Action::None;
     }
 
@@ -2969,6 +4041,121 @@ namespace sl::menu::ui {
     }
 
     // =========================================================================
+    // Blurred wallpapers are cached on the card as finished pixels.
+    //
+    // The blur is the single most expensive thing between a HOME press and the
+    // menu appearing, and it was being redone from scratch on every launch to
+    // produce a result that only changes when the wallpaper or the radius does.
+    //
+    // The blob is raw RGBA at the reduced size - about 225 KB for a 720p
+    // wallpaper - rather than a PNG. It is written once and read many times, so
+    // trading a little space for a read that needs no decoding is the right way
+    // round: re-encoding as PNG would put an image decode back on the path this
+    // is meant to clear, which is most of what we are trying to avoid.
+    //
+    // One file per wallpaper, named from its path. The source's size and mtime
+    // and the radius all live in the header and are checked on load, so editing
+    // the image or changing the radius rebuilds that entry in place instead of
+    // leaving a stale copy behind. The cache cannot grow past one file per
+    // wallpaper actually used.
+    namespace {
+        constexpr const char *kBlurCacheDir = "sdmc:/slaunch/cache/blur";
+        constexpr u32 kBlurMagic   = 0x314C4253;  // 'SBL1'
+        constexpr u32 kBlurVersion = 1;
+
+        struct BlurHeader {
+            u32 magic, version, w, h, radius, reserved;
+            u64 src_size, src_mtime;
+        };
+
+        // FNV-1a over the wallpaper path. This only names the file - the header
+        // decides whether an entry is usable - so a collision costs a rebuild,
+        // never a wrong image.
+        u64 BlurKey(const char *path) {
+            u64 h = 1469598103934665603ULL;
+            for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+                h ^= (u64)*p;
+                h *= 1099511628211ULL;
+            }
+            return h;
+        }
+
+        std::string BlurCachePath(const char *path) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "%s/%016llx.blur",
+                     kBlurCacheDir, (unsigned long long)BlurKey(path));
+            return std::string(buf);
+        }
+
+        // Any mismatch at all is reported as a miss, and a miss just means the
+        // blur runs as it always did.
+        SDL_Texture *ReadBlurCache(SDL_Renderer *rend, const char *cache_path,
+                                   int radius, const struct stat &src) {
+            FILE *f = fopen(cache_path, "rb");
+            if (!f) return nullptr;
+
+            BlurHeader h{};
+            if (fread(&h, sizeof(h), 1, f) != 1) { fclose(f); return nullptr; }
+            if (h.magic != kBlurMagic || h.version != kBlurVersion ||
+                h.radius != (u32)radius ||
+                h.src_size  != (u64)src.st_size ||
+                h.src_mtime != (u64)src.st_mtime ||
+                h.w == 0 || h.h == 0 || h.w > 4096 || h.h > 4096) {
+                fclose(f);
+                return nullptr;
+            }
+
+            const size_t bytes = (size_t)h.w * (size_t)h.h * 4;
+            std::vector<uint8_t> rgba(bytes);
+            const bool ok = fread(rgba.data(), 1, bytes, f) == bytes;
+            fclose(f);
+            if (!ok) return nullptr;   // truncated; rebuild over the top of it
+
+            SDL_Texture *tex = SDL_CreateTexture(rend, SDL_PIXELFORMAT_RGBA8888,
+                                                 SDL_TEXTUREACCESS_STATIC,
+                                                 (int)h.w, (int)h.h);
+            if (!tex) return nullptr;
+            SDL_UpdateTexture(tex, nullptr, rgba.data(), (int)h.w * 4);
+            SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+            return tex;
+        }
+
+        void WriteBlurCache(const char *cache_path, int radius,
+                            const struct stat &src,
+                            int w, int h, const uint8_t *rgba) {
+            mkdir("sdmc:/slaunch", 0777);
+            mkdir("sdmc:/slaunch/cache", 0777);
+            mkdir(kBlurCacheDir, 0777);
+
+            // Written alongside and renamed into place. Writing over the real
+            // file would leave a half-written blob if the console sleeps or
+            // loses power mid-write, and the size check above would not catch
+            // it - a short read is detected, but a full-length file with stale
+            // tail bytes is not.
+            const std::string tmp = std::string(cache_path) + ".tmp";
+            FILE *f = fopen(tmp.c_str(), "wb");
+            if (!f) return;
+
+            BlurHeader hdr{};
+            hdr.magic     = kBlurMagic;
+            hdr.version   = kBlurVersion;
+            hdr.w         = (u32)w;
+            hdr.h         = (u32)h;
+            hdr.radius    = (u32)radius;
+            hdr.src_size  = (u64)src.st_size;
+            hdr.src_mtime = (u64)src.st_mtime;
+
+            const size_t bytes = (size_t)w * (size_t)h * 4;
+            const bool ok = fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
+                            fwrite(rgba, 1, bytes, f) == bytes;
+            fclose(f);
+            if (!ok) { remove(tmp.c_str()); return; }
+
+            remove(cache_path);   // FAT rename will not overwrite
+            rename(tmp.c_str(), cache_path);
+        }
+    }
+
     // CPU Gaussian blur -- reads an image file as SDL_Surface (CPU memory),
     // applies a separable Gaussian convolution, uploads the result as a
     // new texture.
@@ -2980,6 +4167,25 @@ namespace sl::menu::ui {
     // math needed in the inner loop.
     SDL_Texture *Menu::BlurImage(const char *path) {
         if (!path) return nullptr;
+
+        const Theme &t = m_theme.Current();
+        int radius = t.wallpaper_blur_radius;
+        if (radius < 2)  radius = 2;
+        if (radius > 32) radius = 32;
+
+        // Stat the source before anything else: the cache is keyed on the file
+        // as it is right now, and this has to be answered before deciding
+        // whether to decode it. A hit returns without ever touching IMG_Load,
+        // which is most of the win - the JPEG decode was never free either.
+        struct stat src {};
+        const bool have_src = g_sd_ok && stat(path, &src) == 0;
+        const std::string cache_path = have_src ? BlurCachePath(path)
+                                                : std::string();
+        if (have_src) {
+            if (SDL_Texture *hit = ReadBlurCache(m_gfx->Renderer(),
+                                                 cache_path.c_str(), radius, src))
+                return hit;
+        }
 
         // Load as SDL_Surface -- always CPU-accessible, unlike SDL_Texture.
         SDL_Surface *surface = IMG_Load(path);
@@ -3017,10 +4223,6 @@ namespace sl::menu::ui {
         int sw = surface->w;
         int sh = surface->h;
 
-        const Theme &t = m_theme.Current();
-        int radius = t.wallpaper_blur_radius;
-        if (radius < 2)  radius = 2;
-        if (radius > 32) radius = 32;
         // Sigma follows the image down, so the blur looks the same on screen.
         float sigma = radius / 2.0f / 4.0f;
         if (sigma < 0.5f) sigma = 0.5f;
@@ -3128,7 +4330,10 @@ namespace sl::menu::ui {
             }
         }
 
-        // ---- Upload result ----
+        // ---- Cache and upload result ----
+        if (have_src)
+            WriteBlurCache(cache_path.c_str(), radius, src, sw, sh, rgba.data());
+
         SDL_Renderer *rend = m_gfx->Renderer();
         SDL_Texture *dst = SDL_CreateTexture(rend, SDL_PIXELFORMAT_RGBA8888,
                                              SDL_TEXTUREACCESS_STATIC, sw, sh);
@@ -3203,13 +4408,17 @@ namespace sl::menu::ui {
                         std::sort(m_video_frames.begin(), m_video_frames.end());
                     }
                 }
-                // If not a directory or directory was empty, load as single image
+                // With blur on, the sharp wallpaper is never drawn - DrawBackground
+                // uses the blurred texture instead - so decoding it is a whole
+                // 1280x720 JPEG of pure waste on every single launch. The blur
+                // comes from the file on its own path, so nothing needs it.
+                const bool need_sharp = !t.wallpaper_blur;
                 if (m_video_frames.empty()) {
                     m_wallpaper_path = t.wallpaper;
-                    m_wallpaper = m_gfx->LoadImage(t.wallpaper);
+                    if (need_sharp) m_wallpaper = m_gfx->LoadImage(t.wallpaper);
                 } else {
                     m_wallpaper_path = m_video_frames[0];
-                    m_wallpaper = m_gfx->LoadImage(m_video_frames[0].c_str());
+                    if (need_sharp) m_wallpaper = m_gfx->LoadImage(m_video_frames[0].c_str());
                 }
                 reloadBlur();
             }
@@ -3224,7 +4433,8 @@ namespace sl::menu::ui {
                     m_video_frame_idx = (m_video_frame_idx + 1) % (int)m_video_frames.size();
                     m_wallpaper_path = m_video_frames[m_video_frame_idx];
                     if (m_wallpaper) { m_gfx->FreeImage(m_wallpaper); m_wallpaper = nullptr; }
-                    m_wallpaper = m_gfx->LoadImage(m_video_frames[m_video_frame_idx].c_str());
+                    if (!t.wallpaper_blur)
+                        m_wallpaper = m_gfx->LoadImage(m_video_frames[m_video_frame_idx].c_str());
                     reloadBlur();
                 }
             }
@@ -3458,7 +4668,8 @@ namespace sl::menu::ui {
 
         // Wallpaper first (when set), so ribbons draw on top.
         EnsureWallpaper();
-        if (m_wallpaper) {
+        Phase("wallpaper");
+        if (m_wallpaper || m_wallpaper_blur) {
             const int W = gfx::Gfx::Width;
             const int H = gfx::Gfx::Height;
 
@@ -3582,6 +4793,7 @@ namespace sl::menu::ui {
     }
 
     void Menu::DrawHint(const char *hint) {
+        if (!m_show_hints) return;
         const Theme &t = m_theme.Current();
         m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, kHintY, t.dim, T(hint));
     }
@@ -3595,7 +4807,7 @@ namespace sl::menu::ui {
     // the cursor is marked by an arrow on the left margin instead.
     void Menu::DrawCarouselXmb(const std::vector<std::string> &labels,
                                const std::vector<std::string> &values,
-                               int cursor, float &scroll_pos) {
+                               int cursor, float &scroll_pos, Uint8 alpha) {
         const Theme &t = m_theme.Current();
         const int     W = gfx::Gfx::Width;
         if (labels.empty()) return;
@@ -3614,17 +4826,20 @@ namespace sl::menu::ui {
         for (int i = first; i <= last; i++) {
             const float d  = (float)i - scroll_pos;
             const int   cy = kXmbMarginTop + kXmbIcon / 2 + (int)XmbRowOffset(d);
-            if (cy > kXmbItemBottom) break;
-            if (cy < kXmbFadeEnd)    continue;
+            if (cy >= kXmbFadeBotEnd) break;
+            if (cy < kXmbFadeEnd)     continue;
 
             float fade = 1.0f;
             if (cy < kXmbFadeStart)
                 fade = (float)(cy - kXmbFadeEnd) / (float)(kXmbFadeStart - kXmbFadeEnd);
+            else if (cy > kXmbFadeBotStart)
+                fade = (float)(kXmbFadeBotEnd - cy)
+                     / (float)(kXmbFadeBotEnd - kXmbFadeBotStart);
 
             const bool  sel  = (i == cursor);
             const float prox = std::max(0.0f, 1.0f - std::abs(d));
             const float al   = kXmbAlphaPassive + (kXmbAlphaActive - kXmbAlphaPassive) * prox;
-            const Uint8 a    = (Uint8)(255.0f * fade * al);
+            const Uint8 a    = (Uint8)((float)alpha * fade * al);
 
             const FontSize fs = sel ? FontSize::Normal : FontSize::Small;
             const int      lh = m_gfx->LineHeight(fs);
@@ -3702,6 +4917,128 @@ namespace sl::menu::ui {
         }
     }
 
+    // ---- Momentum, shared by every layout -----------------------------------
+
+    // Whichever scroll value the current layout actually moves, and how far it
+    // may travel. Each layout keeps its own, which is why this exists: without
+    // it the fling would have to be written out once per mode.
+    Menu::ScrollAxis Menu::ActiveAxis() {
+        ScrollAxis a;
+        const int last = (int)m_items.size() - 1;
+        switch (m_ui_mode) {
+            case UiMode::Flow:
+                a.pos  = &m_flow_scroll;
+                a.max  = (int)m_flow_items.size() - 1;
+                a.wrap = m_wrap_nav;
+                break;
+            case UiMode::Grid:
+                a.pos = &m_grid_scroll;
+                a.max = TileMaxScroll();
+                break;
+            case UiMode::XMB:
+                if (m_xmb_col >= 0 && m_xmb_col < (int)m_xmb_cols.size()) {
+                    a.pos = &m_xmb_item_scroll;
+                    a.max = (int)m_xmb_cols[m_xmb_col].items.size() - 1;
+                }
+                break;
+            default:
+                a.pos = &m_scroll_pos;
+                a.max = last;
+                break;
+        }
+        if (a.max < 0) a.max = 0;
+        return a;
+    }
+
+    // Put the cursor where the scroll now points. The layouts differ in what
+    // "where" means - a row for the grid, an entry in the open column for XMB,
+    // an index into the filtered row for Flow - so it cannot be shared.
+    void Menu::SyncCursorFromScroll() {
+        switch (m_ui_mode) {
+            case UiMode::Flow: {
+                const int fn = (int)m_flow_items.size();
+                if (fn <= 0) break;
+                int at = (int)lroundf(m_flow_scroll);
+                if (m_wrap_nav) {
+                    at %= fn;
+                    if (at < 0) at += fn;
+                } else {
+                    if (at < 0) at = 0;
+                    if (at > fn - 1) at = fn - 1;
+                }
+                m_cursor = m_flow_items[at];
+                break;
+            }
+            case UiMode::Grid: {
+                // The grid scrolls by rows and its cursor follows the row, so
+                // that letting go does not spring the view back to wherever the
+                // selection happened to be.
+                const int row = std::min(std::max(0, (int)lroundf(m_grid_scroll)),
+                                         std::max(0, TileRowCount() - 1));
+                m_cursor = TileFirstInRow(row);
+                break;
+            }
+            case UiMode::XMB:
+                m_xmb_item = (int)lroundf(m_xmb_item_scroll);
+                XmbApplyCursor();
+                break;
+            default: {
+                int idx = (int)lroundf(m_scroll_pos);
+                if (idx < 0) idx = 0;
+                if (idx > (int)m_items.size() - 1) idx = (int)m_items.size() - 1;
+                m_cursor = idx;
+                break;
+            }
+        }
+    }
+
+    // True while something other than the settle animation owns the scroll: a
+    // finger on the screen, or a throw still coasting. Every layout checks this
+    // before easing toward its selection, because that ease is what would
+    // otherwise drag the list back the moment you let go.
+    bool Menu::ScrollBusy() const {
+        return m_touch_scroll_active || std::abs(m_fling_vel) > kFlowFlingStop;
+    }
+
+    void Menu::StepFling() {
+        const u64 now = armGetSystemTick();
+        float dt = m_fling_tick ? (float)(now - m_fling_tick) / (float)armGetSystemTickFreq()
+                                : 0.0f;
+        m_fling_tick = now;
+        // A frame that took a whole second - a load, a suspend - would otherwise
+        // teleport the list across the library.
+        if (dt > 0.10f) dt = 0.10f;
+
+        if (m_touch_scroll_active) return;              // the finger owns it
+        if (std::abs(m_fling_vel) <= kFlowFlingStop) { m_fling_vel = 0.0f; return; }
+
+        ScrollAxis a = ActiveAxis();
+        if (!a.pos) { m_fling_vel = 0.0f; return; }
+
+        *a.pos += m_fling_vel * dt;
+        // Exponential decay, so a hard throw travels far and a gentle one barely
+        // coasts, and neither depends on the frame rate.
+        m_fling_vel *= expf(-kFlowFlingDrag * dt);
+
+        if (a.wrap) {
+            // Endless: fold the position back into the list instead of stopping,
+            // and keep it near zero so a long coast cannot drift into the range
+            // where a float stops resolving single items.
+            const float span = (float)(a.max + 1);
+            if (span > 0.0f) {
+                while (*a.pos >= span) *a.pos -= span;
+                while (*a.pos <  0.0f) *a.pos += span;
+            }
+        } else {
+            // Finite: running into either end stops it dead rather than
+            // straining against the clamp.
+            if (*a.pos < 0.0f)          { *a.pos = 0.0f;          m_fling_vel = 0.0f; }
+            if (*a.pos > (float)a.max)  { *a.pos = (float)a.max;  m_fling_vel = 0.0f; }
+        }
+
+        SyncCursorFromScroll();
+    }
+
     void Menu::Render() {
         PollHbScan();       // swap in the homebrew browser list when its worker finishes
         PollResolvePins();  // fold in pinned-homebrew names/icons when its worker finishes
@@ -3720,14 +5057,49 @@ namespace sl::menu::ui {
         // Cap how much image decoding a single frame may do. The menu appearing
         // promptly matters more than every icon being present on the very first
         // frame - they fill in over the next few, which reads as instant.
-        m_icons.BeginFrame(3);
-        m_hb_icons.BeginFrame(2);
-        m_cover_budget = 3;
+        StepFling();   // momentum, before any layout reads its scroll
+
+        // Frame one gets no image budget at all. Decoding three covers - each a
+        // 600x900 JPEG rescaled to 480x720 - before the first present is most of
+        // the wait after a HOME press, and none of it is needed to put the menu
+        // on screen. From frame two the normal budget applies and the art fills
+        // in over the next handful of frames, exactly as it already does while
+        // scrolling.
+        const bool first_frame = !g_phase_done;
+        m_icons.BeginFrame(first_frame ? 0 : 3);
+        m_hb_icons.BeginFrame(first_frame ? 0 : 2);
+        // Six cached covers a frame, because a hit is only a read and an upload.
+        // Decodes are capped far lower, and DrawMainFlow drops them to zero
+        // while the row is moving: scrolling must never pay for cache building.
+        m_cover_budget  = first_frame ? 0 : 6;
+        m_decode_budget = first_frame ? 0 : 1;
 
         // Fold in the deferred worker the moment it lands, before anything below
         // reads what it built.
         PollDeferred();
+        // Cover statistics, once the shelf has had time to fill.
+        if (g_phase_done && !g_cover_logged && g_frame1_tick != 0 &&
+            (armGetSystemTick() - g_frame1_tick) > armGetSystemTickFreq() * 3)
+            CoverStatsFlush();
+
+        PollShotDecode();   // background hero panels, uploaded when they land
         PollCoverFetch();   // a fetched cover becomes visible on the next frame
+        PollCoverPicker();  // ...and so does one chosen by hand
+
+        // Bounce finished: hand the launch to the host, which dispatches it just
+        // as it would an OnButton result.
+        //
+        // The animation state is NOT cleared here. Clearing it made LaunchAnimT
+        // report "not running" for the very frame that was about to be drawn, so
+        // the fade was skipped and the last thing presented was an unfaded menu
+        // - which then sat on screen for as long as the daemon took to start the
+        // game. Leaving it set holds the overlay at full black, which is what
+        // stays up until the applet goes away.
+        if (m_launch_tick != 0 && !m_launch_fired && LaunchAnimT() >= 1.0f) {
+            m_launch_fired   = true;
+            m_pending_action = m_launch_action;
+            m_pending_id     = m_launch_id;
+        }
 
         // Both of these are built by that worker, so they stay untouched until it
         // has been joined - reading a half-constructed mixer or widget list is
@@ -3746,7 +5118,9 @@ namespace sl::menu::ui {
         m_gfx->UseDefaultFont(m_screen == Screen::Fonts || m_screen == Screen::ColorPicker ||
                               m_screen == Screen::Keyboard);
 
+        Phase("pre-frame");
         DrawBackground();
+        Phase("background");
         switch (m_screen) {
             case Screen::Oobe:        DrawOobe();   break;
             case Screen::Main:        DrawMain();   break;
@@ -3766,10 +5140,13 @@ namespace sl::menu::ui {
             case Screen::About:       DrawAbout(); break;
             case Screen::Welcome:     DrawWelcome(); break;
             case Screen::SysEntries:  DrawSysEntries(); break;
+            case Screen::Network:     DrawNetwork();    break;
+            case Screen::CoverPicker: DrawCoverPicker(); break;
             case Screen::Power:       DrawPower(); break;
             case Screen::Payloads:    DrawPayloads(); break;
         }
         if (m_options_open) DrawOptions();
+        Phase("draw screen");
         if (m_dialog != Dialog::None) DrawDialog();
 
         // Last, so it sits over every screen including dialogs, and always in
@@ -3780,7 +5157,83 @@ namespace sl::menu::ui {
             m_gfx->UseDefaultFont(true);
             m_debug.Draw(m_gfx, DebugCounters());
         }
+
+        // Building the cover cache is the one wait worth explaining. It happens
+        // only the first time each cover is seen, but the frames carrying those
+        // decodes are slow, and an unexplained pause reads as a lock-up. The
+        // notice clears itself once no decode has happened for a moment.
+        if (m_cache_msg_tick != 0) {
+            const u64 since = (armGetSystemTick() - m_cache_msg_tick) * 1000
+                            / armGetSystemTickFreq();
+            if (since < 700) {
+                const Theme &tt = m_theme.Current();
+                const int W  = gfx::Gfx::Width;
+                // Up top, clear of both the centred title at the bottom and
+                // the tops of the cases, which start around y=120.
+                const int pw = 360, ph = 54;
+                const int px = (W - pw) / 2;
+                const int py = 56;
+
+                m_gfx->FillRect(px, py, pw, ph, WithAlpha(tt.bg_bottom, 235));
+                m_gfx->FillRect(px, py, pw, 3, tt.accent);
+
+                char line[80];
+                snprintf(line, sizeof(line), "%s  %d",
+                         T("Preparing box art"), m_cache_built);
+                m_gfx->TextCentered(FontSize::Small, W / 2, py + 8,  tt.fg, line);
+                m_gfx->TextCentered(FontSize::Small, W / 2, py + 29, tt.dim,
+                                    T("First time only"));
+            } else {
+                m_cache_msg_tick = 0;
+            }
+        }
+
+        // Appear fade: black lifting off, the reverse of the launch fade below.
+        // Started on the first frame rather than at Init, so the timing is not
+        // skewed by however long start-up took.
+        {
+            constexpr u64 kAppearMs = 420;
+            const u64 now_t = armGetSystemTick();
+            if (m_appear_prev == 0) m_appear_prev = now_t;
+            const u64 dms = (now_t - m_appear_prev) * 1000 / armGetSystemTickFreq();
+            m_appear_prev = now_t;
+
+            if (m_appear_p < 1.0f) {
+                // Follows wall time normally, but never advances more than an
+                // eighth in one frame - so however slow the early frames are,
+                // the fade is always at least eight steps rather than a jump.
+                float step = (float)dms / (float)kAppearMs;
+                if (step > 0.125f) step = 0.125f;
+                m_appear_p += step;
+                if (m_appear_p > 1.0f) m_appear_p = 1.0f;
+
+                const float t = m_appear_p;
+                // Ease out, so it clears quickly and lingers least where the
+                // picture is already complete.
+                const float a = (1.0f - t) * (1.0f - t);
+                m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height,
+                                SDL_Color{0, 0, 0, (Uint8)(255.0f * a)});
+            }
+        }
+
+
+        // The back half of the launch bounce fades the whole screen down, so the
+        // menu goes out under the growing case instead of being cut off by the
+        // game appearing. Drawn last, over everything including the widgets.
+        {
+            const float lt = LaunchAnimT();
+            if (lt > kLaunchFadeAt) {
+                const float u = (lt - kLaunchFadeAt) / (1.0f - kLaunchFadeAt);
+                m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height,
+                                SDL_Color{0, 0, 0, (Uint8)(255.0f * u)});
+            }
+        }
+
         m_gfx->Present();
+        // First frame is up: write the phase breakdown out once. Everything
+        // after this is a no-op.
+        Phase("present");
+        PhaseFlush();
     }
 
     void Menu::DrawSdRemoved() {
@@ -3804,37 +5257,109 @@ namespace sl::menu::ui {
         m_gfx->TextCentered(FontSize::Normal, cx, 470, soft, T("Restarting..."));
     }
 
+    // The setup wizard, as an XMB cross.
+    //
+    // The five steps ARE the category row: the same bar, the same anchor, the
+    // same zoom-and-fade tween, with each step's content in the column beneath
+    // it. That is what makes this read as XMB rather than as centred pages with
+    // a progress bar bolted on - and it is why the progress dots are gone. XMB
+    // already has a way of showing where you are along a row, which is the row.
+    //
+    // Everything is drawn in XMB regardless of the layout being previewed at
+    // step 2. Letting the wizard restyle itself as you scrolled that list was
+    // never a real preview - only the list chrome changed, so picking "Flow"
+    // showed you a text list either way - and it would now mean the wizard
+    // falling out of XMB halfway through setting XMB up.
     void Menu::DrawOobe() {
-        const Theme &t = m_theme.Current();
-        const int cx = gfx::Gfx::Width / 2;
+        const Theme  &t = m_theme.Current();
+        const int     W = gfx::Gfx::Width;
+        const int     H = gfx::Gfx::Height;
+        constexpr int kSteps = 5;
+
+        // Shared with DrawCarouselXmb, so the steps that are lists and the steps
+        // that are prose sit on one left edge instead of two.
+        const int colX   = kXmbAnchorX + kXmbIcon / 2 + kXmbLabelLeft - kXmbIcon;
+        const int textX  = kXmbAnchorX + kXmbIcon / 2 + kXmbLabelLeft;
+        const int valueX = kXmbMarginLeft + kXmbSpacingH + kXmbLabelLeft
+                         + kXmbSettingLeft - kXmbIcon;
+        auto rowY = [](float d) {
+            return kXmbMarginTop + kXmbIcon / 2 + (int)XmbRowOffset(d);
+        };
+
+        m_oobe_scroll += ((float)m_oobe_step - m_oobe_scroll) * 0.20f;
+        if (std::abs((float)m_oobe_step - m_oobe_scroll) < 0.004f)
+            m_oobe_scroll = (float)m_oobe_step;
+
+        // The category name doubles as the screen title here too.
+        const char *titles[kSteps] = { T("Welcome"), T("Theme"), T("Layout"),
+                                       T("Good to know"), T("All set") };
+        DrawXmbHeader(titles[m_oobe_step]);
+
+        // --- step row, drawn exactly as the main screen draws its categories --
+        const ItemKind icons[kSteps] = {
+            ItemKind::UserPage, ItemKind::Theming, ItemKind::Game,
+            ItemKind::Controllers, ItemKind::Settings,
+        };
+        for (int c = 0; c < kSteps; c++) {
+            const float d  = (float)c - m_oobe_scroll;
+            const int   cx = kXmbAnchorX + (int)(d * kXmbSpacingH);
+            if (cx < -kXmbIcon || cx > W + kXmbIcon) continue;
+
+            const float prox = std::max(0.0f, 1.0f - std::abs(d));
+            const float zoom = kXmbZoomPassive + (kXmbZoomActive - kXmbZoomPassive) * prox;
+            const int   sz   = (int)(kXmbIcon * zoom);
+            // Steps not yet reached are dimmer than a passive tab. This is the
+            // one thing a wizard needs that a category row does not: some sense
+            // of how much of it is left.
+            const float lit = (c <= m_oobe_step) ? 1.0f : 0.4f;
+            const Uint8 a   = (Uint8)(255.0f * (0.75f + 0.25f * prox) * lit);
+
+            if (SDL_Texture *icon = SystemIcon(icons[c])) {
+                const int ix = cx - sz / 2, iy = kXmbTabY - sz / 2;
+                m_gfx->FillRect(ix, iy, sz, sz, IconPlate(t, a));
+                m_gfx->DrawImage(icon, ix, iy, sz, sz, a);
+            }
+        }
+
+        // --- step content -----------------------------------------------------
+        // Faded out and back while the row slides, so the two axes never look
+        // like two independent screens - the same trick DrawMainXmb uses.
+        const float slide = std::min(1.0f, std::abs((float)m_oobe_step - m_oobe_scroll));
+        const Uint8 colA  = (Uint8)(255.0f * (1.0f - slide));
+        const int   lhN   = m_gfx->LineHeight(FontSize::Normal);
+        const int   lhS   = m_gfx->LineHeight(FontSize::Small);
 
         switch (m_oobe_step) {
-            case 0: // Welcome
-                m_gfx->TextCentered(FontSize::Title, cx, 210, t.title, "sLaunch");
-                m_gfx->FillRect(cx - 130, 288, 260, 3, t.accent);
-                m_gfx->TextCentered(FontSize::Normal, cx, 336, t.fg, T("A clean HOME Menu replacement"));
-                m_gfx->TextCentered(FontSize::Small, cx, 392, t.dim,
-                                    T("Let's set it up - just a few seconds."));
+            case 0:   // Welcome
+                // The product name takes the active row - the slot the curve
+                // pushes clear of the tab bar - with the tagline in the band
+                // underneath, where an entry's sublabel goes.
+                m_gfx->Text(FontSize::Title, colX,
+                            rowY(0) - m_gfx->LineHeight(FontSize::Title) / 2,
+                            WithAlpha(t.title, colA), "sLaunch");
+                m_gfx->FillRect(colX, rowY(0) + 34, 220, 3, WithAlpha(t.accent, colA));
+                m_gfx->Text(FontSize::Normal, colX, rowY(0) + 56,
+                            WithAlpha(t.fg, colA), T("A clean HOME Menu replacement"));
+                m_gfx->Text(FontSize::Small, colX, rowY(1) - lhS / 2,
+                            WithAlpha(t.dim, colA),
+                            T("Let's set it up - just a few seconds."));
                 DrawHint("A: Get started");
                 break;
 
-            case 1: { // Theme - the menu's own list, applied live
-                DrawTopBar(T("Setup"));
-                m_gfx->TextCentered(FontSize::Small, cx, 96, t.dim, T("Pick a theme"));
+            case 1: {   // Theme - applied live as you scroll
                 std::vector<std::string> labels, values;
                 for (int i = 0; i < m_theme.Count(); i++) {
                     labels.push_back(m_theme.At(i).name);
                     values.push_back(i == m_theme_cursor ? T("Applied") : std::string());
                 }
-                DrawCarousel(labels, values, m_theme_cursor, m_sub_scroll);
+                DrawCarouselXmb(labels, values, m_theme_cursor, m_sub_scroll, colA);
                 DrawHint("Up/Down: Choose    A: Next    B: Back");
                 break;
             }
 
-            case 2: { // Layout - same list, description under it
-                DrawTopBar(T("Setup"));
-                m_gfx->TextCentered(FontSize::Small, cx, 96, t.dim, T("Choose a layout"));
-                const char *names[7] = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf"), T("XMB"), T("Flow") };
+            case 2: {   // Layout
+                const char *names[7] = { T("List"), T("Line"), T("Grid"), T("Cover"),
+                                         T("Shelf"), T("XMB"), T("Flow") };
                 const char *desc[7]  = { T("A simple scrolling text list"),
                                          T("A cover carousel (EmulationStation)"),
                                          T("A grid of app icons"),
@@ -3844,16 +5369,22 @@ namespace sl::menu::ui {
                                          T("A 3D coverflow shelf") };
                 std::vector<std::string> labels, values;
                 for (int i = 0; i < 7; i++) { labels.push_back(names[i]); values.emplace_back(); }
-                int cur = (int)m_ui_mode;
-                DrawCarousel(labels, values, cur, m_sub_scroll);
-                m_gfx->TextCentered(FontSize::Small, cx, 556, t.dim, desc[cur]);
+
+                const int cur = (int)m_ui_mode;
+                DrawCarouselXmb(labels, values, cur, m_sub_scroll, colA);
+                // The description rides the selected row into place instead of
+                // sitting at a fixed y, so it stays attached to the row it is
+                // describing while the column is still moving. m_sub_scroll has
+                // just been advanced by the call above, so this matches the
+                // frame that was actually drawn.
+                m_gfx->Text(FontSize::Small, colX,
+                            rowY((float)cur - m_sub_scroll) + lhN / 2 + 6,
+                            WithAlpha(t.dim, colA), desc[cur]);
                 DrawHint("Up/Down: Choose    A: Next    B: Back");
                 break;
             }
 
-            case 3: { // Good to know
-                DrawTopBar(T("Setup"));
-                m_gfx->TextCentered(FontSize::Small, cx, 96, t.dim, T("Good to know"));
+            case 3: {   // Good to know
                 struct Tip { const char *key; const char *val; };
                 const Tip tips[] = {
                     { "X",        T("Options on any entry: favourite, rename, move") },
@@ -3861,46 +5392,55 @@ namespace sl::menu::ui {
                     { "Homebrew", T("Browse .nro files and pin them to this menu") },
                     { "HOME",     T("Suspends your game and brings this back") },
                 };
-                const int lx = cx - 330, top = 200;
+                // The button name takes the slot an XMB row gives its icon, so
+                // these read as ordinary entries rather than as a table dropped
+                // into the middle of the menu.
                 for (int i = 0; i < 4; i++) {
-                    const int y = top + i * 74;
-                    const int kw = m_gfx->TextWidth(FontSize::Small, tips[i].key) + 26;
-                    m_gfx->FillRect(lx, y - 4, 4, 40, t.accent);            // accent rule
-                    m_gfx->FillRect(lx + 12, y - 4, kw, 40, WithAlpha(t.accent, 38));
-                    m_gfx->Text(FontSize::Small, lx + 25, y + 4, t.accent, tips[i].key);
-                    m_gfx->Text(FontSize::Normal, lx + 150, y, t.fg, tips[i].val);
+                    const int y  = 330 + i * 74;
+                    const int bx = kXmbAnchorX - kXmbIcon / 2;
+                    const int kw = m_gfx->TextWidth(FontSize::Small, tips[i].key) + 28;
+                    const int kh = lhS + 16;
+                    m_gfx->FillRect(bx, y - kh / 2, kw, kh,
+                                    WithAlpha(t.accent, (Uint8)(colA * 34 / 255)));
+                    m_gfx->Text(FontSize::Small, bx + 14, y - lhS / 2,
+                                WithAlpha(t.accent, colA), tips[i].key);
+                    m_gfx->Text(FontSize::Normal, textX, y - lhN / 2,
+                                WithAlpha(t.fg, colA),
+                                Ellipsize(tips[i].val, W - 60 - textX,
+                                          FontSize::Normal).c_str());
                 }
                 DrawHint("A: Next    B: Back");
                 break;
             }
 
-            default: { // Done
-                DrawTopBar(T("Setup"));
-                m_gfx->TextCentered(FontSize::Large, cx, 190, t.title, T("You're all set"));
-                m_gfx->FillRect(cx - 100, 250, 200, 3, t.accent);
-                m_gfx->TextCentered(FontSize::Normal, cx, 292, t.fg, T("Enjoy sLaunch."));
-                // Update-check opt-out, styled like a menu row.
-                const int rx = cx - 300, ry = 400;
-                m_gfx->FillRect(rx, ry - 10, 600, 56, WithAlpha(t.accent, 34));
-                m_gfx->Text(FontSize::Normal, rx + 24, ry, t.fg,
-                            T("Check for updates on startup"));
-                const char *val = m_check_updates ? T("On") : T("Off");
-                const int vw = m_gfx->TextWidth(FontSize::Normal, val);
-                m_gfx->Text(FontSize::Normal, rx + 600 - 24 - vw, ry, t.accent, val);
+            default: {  // Done
+                m_gfx->Text(FontSize::Large, colX,
+                            rowY(0) - m_gfx->LineHeight(FontSize::Large) / 2,
+                            WithAlpha(t.title, colA), T("You're all set"));
+                m_gfx->FillRect(colX, rowY(0) + 34, 220, 3, WithAlpha(t.accent, colA));
+                m_gfx->Text(FontSize::Small, colX, rowY(0) + 56,
+                            WithAlpha(t.dim, colA), T("Enjoy sLaunch."));
+                // The last choice, drawn as an XMB settings row: label on the
+                // column edge, value in the setting column, same as every other
+                // setting in the menu.
+                m_gfx->Text(FontSize::Normal, colX, rowY(1) - lhN / 2,
+                            WithAlpha(t.title, colA),
+                            Ellipsize(T("Check for updates on startup"),
+                                      valueX - 24 - colX, FontSize::Normal).c_str());
+                m_gfx->Text(FontSize::Normal, valueX, rowY(1) - lhN / 2,
+                            WithAlpha(t.accent, colA),
+                            m_check_updates ? T("On") : T("Off"));
                 DrawHint("Left/Right: Change    A: Finish    B: Back");
                 break;
             }
         }
 
-        // Progress dots.
-        constexpr int kSteps = 5;
-        const int gap = 28;
-        const int x0 = cx - (kSteps - 1) * gap / 2;
-        for (int i = 0; i < kSteps; i++) {
-            const bool cur = (i == m_oobe_step);
-            const int sz = cur ? 12 : 8;
-            m_gfx->FillRect(x0 + i * gap - sz / 2, 596 - sz / 2, sz, sz,
-                            cur ? t.accent : WithAlpha(t.dim, 110));
+        // Step counter where XMB puts its entry index.
+        if (m_show_counter) {
+            char pos[32];
+            snprintf(pos, sizeof(pos), "%d/%d", m_oobe_step + 1, kSteps);
+            const int pw = m_gfx->TextWidth(FontSize::Small, pos);
+            m_gfx->Text(FontSize::Small, W - 8 - pw, H - 8 - lhS, t.dim, pos);
         }
     }
 
@@ -3926,7 +5466,7 @@ namespace sl::menu::ui {
         // Nothing to draw until the deferred worker has finished building them.
         if (m_deferred_joined && m_widgets.AnyEnabled()) {
             const Theme &t = m_theme.Current();
-            m_widgets.Render(m_gfx, t);
+            m_widgets.Render(m_gfx, t, m_ui_mode == UiMode::Grid);
 
             // Accent outline around the widget being dragged, so it reads as "held".
             int bx, by, bw, bh;
@@ -3951,7 +5491,8 @@ namespace sl::menu::ui {
         // enlarged with a '>' cursor; neighbours shrink and fade with distance.
         // The whole list slides smoothly because m_scroll_pos eases toward the
         // integer cursor rather than snapping to it.
-        m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f; // ease toward target
+        if (!ScrollBusy())   // a finger or a throw owns the scroll instead
+            m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f; // ease toward target
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
 
         const int margin   = kListX;      // left/right margin for text
@@ -4029,6 +5570,9 @@ namespace sl::menu::ui {
         if ((int)m_items.size() > 1) {
             char pos[28];
             snprintf(pos, sizeof(pos), "%d / %d", m_cursor + 1, (int)m_items.size());
+            // Position counters are optional; blanking the string here keeps
+            // the layout arithmetic below untouched.
+            if (!m_show_counter) pos[0] = '\0';
             int pw = m_gfx->TextWidth(FontSize::Small, pos);
             m_gfx->Text(FontSize::Small, gfx::Gfx::Width - pw - 40, 120, t.dim, pos);
         }
@@ -4095,6 +5639,7 @@ namespace sl::menu::ui {
         auto it = m_sys_icons.find((int)kind);
         if (it != m_sys_icons.end()) return it->second;
 
+        const u64 t_icon0 = armGetSystemTick();   // cold load; see PhaseFlush
         const char *file = nullptr;
         switch (kind) {
             case ItemKind::Theming:      file = "theming";      break;
@@ -4112,6 +5657,7 @@ namespace sl::menu::ui {
             case ItemKind::WebBrowser:   file = "browser";      break;
             case ItemKind::MiiEdit:      file = "mii";          break;
             case ItemKind::Settings:     file = "settings";     break;
+            case ItemKind::Wifi:         file = "wifi";         break;
             case ItemKind::Power:        file = "power";        break;
             case ItemKind::HomebrewMenu: file = "homebrewmenu"; break;
             default: break;
@@ -4142,29 +5688,28 @@ namespace sl::menu::ui {
             }
         }
         m_sys_icons[(int)kind] = tex; // cache even nullptr so we don't re-stat
+        if (!g_phase_done) {
+            g_sysicon_n++;
+            g_sysicon_ms += (unsigned)((armGetSystemTick() - t_icon0) * 1000
+                                       / armGetSystemTickFreq());
+        }
         return tex;
     }
 
     // Item index under a touch point in Grid mode (mirrors DrawMainGrid), or -1.
+    // Entry under a touch point on the tile wall, or -1. Answered from the same
+    // packed layout the renderer draws, so a tap always lands on what you see -
+    // including the wide tiles, which no row/column arithmetic would cover.
     int Menu::GridItemAt(int px, int py) const {
-        const int cols = GridColumns();
-        const int tile = kGridTile, gapX = kGridGap, pitch = kGridPitch, topBase = kGridTopBase;
-        const int gridW = cols * tile + (cols - 1) * gapX;
-        const int startX = (gfx::Gfx::Width - gridW) / 2;
-        const float scrollPx = m_grid_scroll * pitch;
-
-        const int relx = px - startX;
-        if (relx < 0) return -1;
-        const int c = relx / (tile + gapX);
-        if (c >= cols || (relx - c * (tile + gapX)) >= tile) return -1; // in the gap
-
-        const float fy = (float)py - topBase + scrollPx;
-        if (fy < 0) return -1;
-        const int r = (int)(fy / pitch);
-        if ((fy - r * pitch) >= tile) return -1;                       // in the gap
-
-        const int idx = r * cols + c;
-        return (idx >= 0 && idx < (int)m_items.size()) ? idx : -1;
+        std::vector<TileRect> tiles;
+        BuildTiles(tiles);
+        const int scrollPx = (int)lroundf(m_grid_scroll * TilePitch());
+        for (const TileRect &r : tiles) {
+            const int y = r.y - scrollPx;
+            if (px >= r.x && px < r.x + r.w && py >= y && py < y + r.h)
+                return r.item;
+        }
+        return -1;   // in a gap, or off the wall
     }
 
     // Item index under a touch point in List mode (inverts the carousel), or -1.
@@ -4190,7 +5735,7 @@ namespace sl::menu::ui {
     int Menu::XmbItemAt(int x, int y) const {
         (void)x;
         if (m_xmb_col < 0 || m_xmb_col >= (int)m_xmb_cols.size()) return -1;
-        if (y < kXmbFadeEnd || y > kXmbItemBottom) return -1;
+        if (y < kXmbFadeEnd || y >= kXmbFadeBotEnd) return -1;
         const auto &items = m_xmb_cols[m_xmb_col].items;
 
         // Rows are not evenly spaced - the cursor row carries a wide band above
@@ -4293,7 +5838,8 @@ namespace sl::menu::ui {
 
         if (m_items.empty()) { DrawMainEmpty(); return; }
 
-        m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
+        if (!ScrollBusy())   // a finger or a throw owns the scroll instead
+            m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
 
         const int center_x = gfx::Gfx::Width / 2;
@@ -4329,6 +5875,9 @@ namespace sl::menu::ui {
                             t.accent, sel.name.c_str());
         char pos[28];
         snprintf(pos, sizeof(pos), "%d / %d", m_cursor + 1, (int)m_items.size());
+        // Position counters are optional; blanking the string here keeps
+        // the layout arithmetic below untouched.
+        if (!m_show_counter) pos[0] = '\0';
         m_gfx->TextCentered(FontSize::Small, center_x, center_y + bigSize / 2 + 74, t.dim, pos);
 
         DrawStatusHint("A: Select    X: Options");
@@ -4338,87 +5887,712 @@ namespace sl::menu::ui {
     // offset) and the selection is a highlight frame that glides to the cursor,
     // so both axes animate instead of snapping. Tiles fade as they cross the top
     // and bottom edges of the viewport.
+    // The unit is whatever squares up inside the band at the chosen counts -
+    // limited by whichever axis is tighter, so a wide-and-short wall is sized by
+    // its columns and a tall-and-narrow one by its rows.
+    int Menu::TileUnit() const {
+        const int aw = gfx::Gfx::Width - kWallMargin * 2;
+        const int ah = kWallBot - kWallTop;
+        const int by_w = (aw - (TileCols()    - 1) * kGridGap) / TileCols();
+        const int by_h = (ah - (TileRowsVis() - 1) * kGridGap) / TileRowsVis();
+        return std::max(24, std::min(by_w, by_h));
+    }
+
+    int Menu::TilePitch() const { return TileUnit() + kGridGap; }
+    int Menu::TileWideW() const { return TileUnit() * 2 + kGridGap; }
+
+    int Menu::TileLeft() const {
+        const int wall = TileCols() * TileUnit() + (TileCols() - 1) * kGridGap;
+        return (gfx::Gfx::Width - wall) / 2;
+    }
+
+    // Centred in the band as well as across it: whichever axis did not set the
+    // unit has slack, and leaving it all at the bottom looks like a mistake.
+    int Menu::TileTop() const {
+        const int wall = TileRowsVis() * TileUnit() + (TileRowsVis() - 1) * kGridGap;
+        return kWallTop + ((kWallBot - kWallTop) - wall) / 2;
+    }
+
+    // How many rows a tile covers, from the height the packer gave it.
+    int Menu::TileRowsOf(int h) const { return (h + kGridGap) / TilePitch(); }
+
+    void Menu::SetTileCols(int n) {
+        m_tile_cols = std::min(std::max(kTileColsMin, n), kTileColsMax);
+        FreeWidgetTileTextures();   // sized to the boxes they were made for
+        SaveSettings();
+    }
+
+    void Menu::SetTileRows(int n) {
+        m_tile_rows = std::min(std::max(kTileRowsMin, n), kTileRowsMax);
+        FreeWidgetTileTextures();
+        SaveSettings();
+    }
+
+    // ---- tiles ---------------------------------------------------------------
+    //
+    // Packing is row-major with a wrap, which is what makes mixed tile sizes
+    // work without a bin-packer: a wide tile that will not fit in what is left
+    // of a row starts the next one. Every tile still maps to an m_items index,
+    // so A, X and the options overlay need no special case here.
+    void Menu::BuildTiles(std::vector<TileRect> &out) const {
+        out.clear();
+        out.reserve(m_items.size());
+
+        const int x0 = TileLeft();
+
+        // An occupancy grid rather than a running column, because a tile can now
+        // be two rows tall: once one of those is placed, the cells beside it on
+        // BOTH its rows are what the following tiles have to flow around, and a
+        // single "next free column" cannot express that.
+        std::vector<std::vector<char>> occ;
+        auto ensure = [&](int rows) {
+            while ((int)occ.size() < rows) occ.push_back(std::vector<char>(TileCols(), 0));
+        };
+        auto free_at = [&](int r, int c, int w, int h) {
+            ensure(r + h);
+            for (int y = r; y < r + h; y++)
+                for (int x = c; x < c + w; x++)
+                    if (occ[y][x]) return false;
+            return true;
+        };
+
+        // The search never starts above the row the last tile landed on. That
+        // keeps the wall in list order - a small tile drops into a hole beside a
+        // large one, which is the point, but it can never leap back up the wall
+        // past entries that come before it.
+        int scan = 0;
+        for (int i = 0; i < (int)m_items.size(); i++) {
+            int sw, sh;
+            TileSpan(m_items[i], sw, sh);
+
+            int pr = -1, pc = -1;
+            for (int r = scan; pr < 0 && r < scan + 64; r++)
+                for (int c = 0; c + sw <= TileCols(); c++)
+                    if (free_at(r, c, sw, sh)) { pr = r; pc = c; break; }
+            if (pr < 0) continue;   // cannot happen with sw <= TileCols(), but be safe
+
+            ensure(pr + sh);
+            for (int y = pr; y < pr + sh; y++)
+                for (int x = pc; x < pc + sw; x++) occ[y][x] = 1;
+            scan = pr;
+
+            TileRect t;
+            t.item = i;
+            t.x = x0 + pc * TilePitch();
+            t.y = TileTop() + pr * TilePitch();
+            t.w = sw * TileUnit() + (sw - 1) * kGridGap;
+            t.h = sh * TileUnit() + (sh - 1) * kGridGap;
+            out.push_back(t);
+        }
+    }
+
+    // Nearest tile in a direction, resolved entirely from the packed geometry.
+    //
+    // Every direction has to be geometric, left and right included. Walking the
+    // packed list instead looks right until a tall tile is on the wall: it is
+    // placed before the entries that flow around it, so from the row under it
+    // the list order steps to the end of the row ABOVE, and the tall tile is
+    // skipped over - unreachable from its own lower half.
+    int Menu::TileNeighbour(int dir) const {
+        std::vector<TileRect> tiles;
+        BuildTiles(tiles);
+        if (tiles.empty()) return m_cursor;
+
+        const int n = (int)tiles.size();
+        int cur = 0;
+        for (int i = 0; i < n; i++)
+            if (tiles[i].item == m_cursor) { cur = i; break; }
+
+        const TileRect &c = tiles[cur];
+        const int c_r0   = (c.y - TileTop()) / TilePitch();
+        const int c_rows = TileRowsOf(c.h);
+        const int c_r1   = c_r0 + c_rows;          // one past the last row it covers
+        auto rowOf  = [&](const TileRect &t) { return (t.y - TileTop()) / TilePitch(); };
+
+        if (dir == 0 || dir == 1) {
+            const bool right = (dir == 1);
+            // Anything sharing a row with the current tile is on the same line as
+            // far as the eye is concerned, whichever of its rows that is.
+            int best = -1, best_dx = 1 << 30, best_dr = 1 << 30;
+            for (int i = 0; i < n; i++) {
+                if (i == cur) continue;
+                const int r0 = rowOf(tiles[i]), r1 = r0 + TileRowsOf(tiles[i].h);
+                if (r1 <= c_r0 || r0 >= c_r1) continue;          // no row in common
+                if (right ? (tiles[i].x <= c.x) : (tiles[i].x >= c.x)) continue;
+                const int dx = std::abs(tiles[i].x - c.x);
+                const int dr = std::abs(r0 - c_r0);
+                // Nearest across, then the one starting on the same row - which
+                // is the tiebreak that matters when leaving a tall tile, where
+                // two candidates can sit at the same x on different rows.
+                if (dx < best_dx || (dx == best_dx && dr < best_dr))
+                    { best_dx = dx; best_dr = dr; best = i; }
+            }
+            if (best >= 0) return tiles[best].item;
+
+            // Off the end of the line: continue onto the next one, the way text
+            // wraps. Right leaves from the bottom of the tile, left from the top.
+            //
+            // Two passes, because a tall tile covers the next row without
+            // starting on it: wrapping onto its lower half would put the cursor
+            // back beside where it just came from, which reads as going
+            // backwards. Tiles that BEGIN on the row win; one that merely covers
+            // it is the fallback for a row that has nothing else.
+            const int want_row = right ? c_r1 : c_r0 - 1;
+            int edge = -1, edge_any = -1;
+            for (int i = 0; i < n; i++) {
+                const int r0 = rowOf(tiles[i]), r1 = r0 + TileRowsOf(tiles[i].h);
+                if (want_row < r0 || want_row >= r1) continue;
+                int &slot = (r0 == want_row) ? edge : edge_any;
+                if (slot < 0 || (right ? tiles[i].x < tiles[slot].x
+                                       : tiles[i].x > tiles[slot].x)) slot = i;
+            }
+            if (edge < 0) edge = edge_any;
+            if (edge >= 0) return tiles[edge].item;
+
+            // Off the wall entirely: the same wrap rule as every other mode.
+            if (!(m_nav_fresh && m_wrap_nav)) return m_cursor;
+            return right ? tiles[0].item : tiles[n - 1].item;
+        }
+
+        // Leaving a tall tile downwards means clearing all of it, not just its
+        // top row; leaving upwards is always the row above its top.
+        const int want = (dir == 2) ? c_r0 - 1 : c_r1;
+        if (want < 0) return m_cursor;
+        const int cx = c.x + c.w / 2;
+
+        int best = -1, best_d = 1 << 30;
+        for (int i = 0; i < n; i++) {
+            const int r0 = rowOf(tiles[i]);
+            // A tall tile answers for every row it covers, so it can be reached
+            // from either side of it.
+            if (want < r0 || want >= r0 + TileRowsOf(tiles[i].h)) continue;
+            const int tc = tiles[i].x + tiles[i].w / 2;
+            const int d  = std::abs(tc - cx);
+            if (d < best_d) { best_d = d; best = i; }
+        }
+        return (best >= 0) ? tiles[best].item : m_cursor;
+    }
+
+    // Metro's start screen is a wall of DIFFERENT colours, so a grid painted in
+    // one accent misses the whole look. Rather than hard-code a palette that
+    // would fight every theme, the theme's own accent is rotated round the hue
+    // wheel by a fixed offset per tile: the wall stays recognisably the user's
+    // colour scheme while reading as a set of tiles rather than one slab.
+    SDL_Color Menu::TileColor(int idx) const {
+        // A colour the user picked for this entry beats the generated one.
+        if (idx >= 0 && idx < (int)m_items.size()) {
+            const auto c = m_tilecfg.find(ItemKey(m_items[idx]));
+            if (c != m_tilecfg.end() && c->second.has_color) return c->second.color;
+        }
+        const SDL_Color b = m_theme.Current().accent;
+
+        const float r = b.r / 255.0f, g = b.g / 255.0f, bl = b.b / 255.0f;
+        const float mx = std::max(r, std::max(g, bl));
+        const float mn = std::min(r, std::min(g, bl));
+        const float d  = mx - mn;
+
+        float h = 0.0f;
+        if (d > 0.0001f) {
+            if      (mx == r)  h = 60.0f * fmodf((g - bl) / d, 6.0f);
+            else if (mx == g)  h = 60.0f * (((bl - r) / d) + 2.0f);
+            else               h = 60.0f * (((r - g) / d) + 4.0f);
+        }
+        // A flat accent has no hue to rotate, so give it one to spread from.
+        float s = (mx > 0.0001f) ? d / mx : 0.35f;
+        float v = mx;
+        if (s < 0.15f) { s = 0.35f; h = 205.0f; }
+
+        static const float kShift[] = { 0, 34, -40, 68, -20, 104, 16, -68 };
+        h = fmodf(h + kShift[idx % (int)(sizeof(kShift) / sizeof(kShift[0]))] + 360.0f, 360.0f);
+        // Nudge value as well, so neighbouring hues never read as one block.
+        v = std::min(1.0f, std::max(0.30f, v + ((idx % 3) - 1) * 0.07f));
+
+        const float c = v * s, x = c * (1.0f - std::fabs(fmodf(h / 60.0f, 2.0f) - 1.0f));
+        const float m = v - c;
+        float rr = 0, gg = 0, bb = 0;
+        if      (h <  60) { rr = c; gg = x; }
+        else if (h < 120) { rr = x; gg = c; }
+        else if (h < 180) { gg = c; bb = x; }
+        else if (h < 240) { gg = x; bb = c; }
+        else if (h < 300) { rr = x; bb = c; }
+        else              { rr = c; bb = x; }
+        return SDL_Color{ (Uint8)((rr + m) * 255), (Uint8)((gg + m) * 255),
+                          (Uint8)((bb + m) * 255), b.a };
+    }
+
+    // ---- per-entry tile config ----------------------------------------------
+    //
+    // One line per customised entry:  <ItemKey>=<w>x<h>,<rrggbb|->
+    // Entries the user has not touched are simply absent, so the file stays
+    // small and a default that changes later still reaches everyone.
+    namespace { constexpr const char *kTileCfgPath = "sdmc:/slaunch/config/tiles.txt"; }
+
+    void Menu::LoadTileCfg() {
+        m_tilecfg.clear();
+        FILE *fp = fopen(kTileCfgPath, "r");
+        if (!fp) return;
+        char line[192];
+        while (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            char *eq = strchr(line, '=');
+            if (!eq || eq == line) continue;
+            *eq = '\0';
+            int w = 0, h = 0; char col[16] = "-";
+            if (sscanf(eq + 1, "%dx%d,%15s", &w, &h, col) < 2) continue;
+            TileCfg c;
+            c.w = w; c.h = h;
+            unsigned rgb = 0;
+            if (col[0] != '-' && sscanf(col, "%x", &rgb) == 1) {
+                c.has_color = true;
+                c.color = SDL_Color{ (Uint8)((rgb >> 16) & 0xFF), (Uint8)((rgb >> 8) & 0xFF),
+                                     (Uint8)(rgb & 0xFF), 255 };
+            }
+            m_tilecfg[line] = c;
+        }
+        fclose(fp);
+    }
+
+    void Menu::SaveTileCfg() {
+        mkdir("sdmc:/slaunch", 0777);
+        mkdir("sdmc:/slaunch/config", 0777);
+        FILE *fp = fopen(kTileCfgPath, "w");
+        if (!fp) return;
+        for (const auto &kv : m_tilecfg) {
+            char col[8] = "-";
+            if (kv.second.has_color)
+                snprintf(col, sizeof(col), "%02x%02x%02x", kv.second.color.r,
+                         kv.second.color.g, kv.second.color.b);
+            fprintf(fp, "%s=%dx%d,%s\n", kv.first.c_str(),
+                    kv.second.w, kv.second.h, col);
+        }
+        fclose(fp);
+    }
+
+    Menu::TileCfg &Menu::TileCfgFor(const std::string &key) {
+        auto it = m_tilecfg.find(key);
+        if (it != m_tilecfg.end()) return it->second;
+        return m_tilecfg[key];   // default-constructed: 0x0 means "kind default"
+    }
+
+    // How many units an entry covers. The kind sets the default; a saved config
+    // overrides it.
+    void Menu::TileSpan(const MenuItem &it, int &w, int &h) const {
+        w = 1; h = 1;
+        if (it.kind == ItemKind::Album || it.kind == ItemKind::MusicPlayer) w = 2;
+        if (it.kind == ItemKind::WidgetTile)                              { w = 2; h = 2; }
+        const auto c = m_tilecfg.find(ItemKey(it));
+        if (c != m_tilecfg.end() && c->second.w > 0) { w = c->second.w; h = c->second.h; }
+        w = std::min(std::max(1, w), TileCols());
+        h = std::min(std::max(1, h), TileRowsVis());
+    }
+
+    // Small -> Wide -> Large -> Small, the three shapes Windows 8 offered.
+    void Menu::CycleTileSize(const std::string &key) {
+        for (const auto &it : m_items) {
+            if (ItemKey(it) != key) continue;
+            int w, h; TileSpan(it, w, h);
+            if      (w == 1 && h == 1) { w = 2; h = 1; }
+            else if (w == 2 && h == 1) { w = 2; h = 2; }
+            else                       { w = 1; h = 1; }
+            TileCfg &c = TileCfgFor(key);
+            c.w = w; c.h = h;
+            SaveTileCfg();
+            // The widget render targets are sized to the box they were made for.
+            FreeWidgetTileTextures();
+            return;
+        }
+    }
+
+    const char *Menu::TileSizeLabel(const std::string &key) const {
+        const auto c = m_tilecfg.find(key);
+        int w = 0, h = 0;
+        if (c != m_tilecfg.end()) { w = c->second.w; h = c->second.h; }
+        if (w == 0) {
+            for (const auto &it : m_items)
+                if (ItemKey(it) == key) { TileSpan(it, w, h); break; }
+        }
+        if (w >= 2 && h >= 2) return "Large";
+        if (w >= 2)           return "Wide";
+        return "Small";
+    }
+
+    // Ease the drawn colour toward the configured one. The +/-1 nudge on top of
+    // the proportional step is what guarantees it actually arrives: the
+    // proportional part truncates to zero over the last few units.
+    SDL_Color Menu::TileShownColor(const std::string &key, SDL_Color target) {
+        auto it = m_tile_shown.find(key);
+        if (it == m_tile_shown.end()) { m_tile_shown[key] = target; return target; }
+        SDL_Color &c = it->second;
+        auto ease = [](Uint8 &v, Uint8 t) {
+            const int d = (int)t - (int)v;
+            if (d == 0) return;
+            if (std::abs(d) <= 2) { v = t; return; }
+            v = (Uint8)((int)v + (int)(d * 0.22f) + (d > 0 ? 1 : -1));
+        };
+        ease(c.r, target.r); ease(c.g, target.g); ease(c.b, target.b);
+        c.a = target.a;
+        return c;
+    }
+
+    void Menu::FreeWidgetTileTextures() {
+        if (m_tile_wscratch) { SDL_DestroyTexture(m_tile_wscratch); m_tile_wscratch = nullptr; }
+    }
+
+    int Menu::WidgetIndexByName(const std::string &n) {
+        if (!m_deferred_joined) return -1;
+        for (int i = 0; i < m_widgets.Count(); i++) {
+            widgets::IWidget *w = m_widgets.At(i);
+            if (w && w->Name() == n) return i;
+        }
+        return -1;
+    }
+
+    void Menu::AddWidgetTile(int widget_index) {
+        widgets::IWidget *w = m_widgets.At(widget_index);
+        if (!w) return;
+        const std::string key = "w" + w->Name();
+        TileCfg &c = TileCfgFor(key);
+        if (c.w == 0) { c.w = 2; c.h = 2; }
+        SaveTileCfg();
+        // Deliberately NOT SetEnabled: that flag is the user's choice about the
+        // floating home-screen widget, and flipping it here made a tile added to
+        // the wall show up on every other layout too. The fetch thread ticks
+        // tiled widgets on their own account.
+        m_widgets.SetTiled(widget_index, true);
+        RebuildItems();
+        SelectByKey(key);
+    }
+
+    void Menu::RemoveWidgetTile(std::string name) {
+        m_tilecfg.erase("w" + name);
+        SaveTileCfg();
+        const int i = WidgetIndexByName(name);
+        if (i >= 0) m_widgets.SetTiled(i, false);
+        FreeWidgetTileTextures();
+        RebuildItems();
+    }
+
+    int Menu::TileRowOf(int item) const {
+        std::vector<TileRect> tiles;
+        BuildTiles(tiles);
+        for (const TileRect &r : tiles)
+            if (r.item == item) return (r.y - TileTop()) / TilePitch();
+        return 0;
+    }
+
+    int Menu::TileRowCount() const {
+        std::vector<TileRect> tiles;
+        BuildTiles(tiles);
+        // Max over every tile, not just the last one: the packer fills holes, so
+        // the final entry in the list is not necessarily the lowest on the wall.
+        int rows = 0;
+        for (const TileRect &r : tiles)
+            rows = std::max(rows, (r.y - TileTop()) / TilePitch() + TileRowsOf(r.h));
+        return rows;
+    }
+
+    int Menu::TileFirstInRow(int row) const {
+        std::vector<TileRect> tiles;
+        BuildTiles(tiles);
+        for (const TileRect &r : tiles)
+            if ((r.y - TileTop()) / TilePitch() == row) return r.item;
+        return m_cursor;
+    }
+
+    int Menu::TileMaxScroll() const {
+        return std::max(0, TileRowCount() - TileRowsVis());
+    }
+
+    // The picture tile, cycling through the album. One image is held and the
+    // next cross-fades in over it, so only two are ever decoded.
+    void Menu::UpdateLiveAlbum() {
+        if (!m_album_scanned) ScanAlbum();
+        if (m_album.empty()) return;
+
+        const u64 now = armGetSystemTick();
+        const u64 hz  = armGetSystemTickFreq();
+        if (m_tile_pic_tick == 0) m_tile_pic_tick = now;
+        const u64 ms = (now - m_tile_pic_tick) * 1000 / hz;
+
+        // Mid-fade: advance it, and promote once it completes.
+        if (m_tile_pic_next) {
+            m_tile_pic_fade = (float)ms / (float)kTileFadeMs;
+            if (m_tile_pic_fade >= 1.0f) {
+                if (m_tile_pic) m_gfx->FreeImage(m_tile_pic);
+                m_tile_pic      = m_tile_pic_next;
+                m_tile_pic_next = nullptr;
+                m_tile_pic_fade = 1.0f;
+                m_tile_pic_tick = now;
+            }
+            return;
+        }
+
+        // Time for the next picture. Newest first, which is what you want to see.
+        if (m_tile_pic && ms < kTilePicMs) return;
+        const int n = (int)m_album.size();
+        const int next = (m_tile_pic_idx < 0) ? n - 1
+                       : ((m_tile_pic_idx - 1) + n) % n;
+        SDL_Texture *tex = m_gfx->LoadImageScaled(m_album[next].c_str(),
+                                                  TileWideW(), TileUnit());
+        if (!tex) { m_tile_pic_tick = now; return; }   // unreadable: try later
+        m_tile_pic_idx = next;
+        if (!m_tile_pic) {                 // first one: no fade to run
+            m_tile_pic = tex;
+            m_tile_pic_fade = 1.0f;
+        } else {
+            m_tile_pic_next = tex;
+            m_tile_pic_fade = 0.0f;
+        }
+        m_tile_pic_tick = now;
+    }
+
+    // A widget tile. The widget draws through a render target the size of the
+    // box, so one that reports a taller height than it was given is cropped by
+    // the texture instead of spilling over its neighbours - the widget API
+    // returns a height, it does not accept a limit.
+    void Menu::DrawWidgetTile(const TileRect &r, const MenuItem &it, Uint8 a) {
+        const int wi = WidgetIndexByName(it.name);
+        if (wi < 0) return;
+        widgets::IWidget *w = m_widgets.At(wi);
+        SDL_Renderer *ren = m_gfx->Renderer();
+        if (!w || !ren) return;
+
+        // The widget always draws at the width it was written for, so its text
+        // metrics stay the ones it was designed against and its own cached
+        // texture is never reallocated between here and the home screen. What it
+        // is asked for is a HEIGHT in that same space with the tile's aspect
+        // ratio: a script that honours it lays its frame and content out to fill
+        // exactly that, and the blit below then scales the whole thing into the
+        // box with nothing left over. A script that ignores it returns its
+        // natural height instead and gets scaled to fit, which is why an old
+        // widget still works - it just does not fill the tile.
+        if (!m_tile_wscratch) {
+            m_tile_wscratch = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA8888,
+                                                SDL_TEXTUREACCESS_TARGET,
+                                                kTileWidgetW, gfx::Gfx::Height);
+            if (!m_tile_wscratch) return;
+            SDL_SetTextureBlendMode(m_tile_wscratch, SDL_BLENDMODE_BLEND);
+        }
+
+        // The wall draws inside a clip rect, and that clip is in the screen's
+        // coordinates - left in place it would carve the same band out of this
+        // texture, whose origin is its own corner. Dropped for the duration of
+        // the widget's own drawing and put back before the blit, which is the
+        // part that does need clipping.
+        const SDL_bool clipped = SDL_RenderIsClipEnabled(ren);
+        SDL_Rect saved{};
+        SDL_RenderGetClipRect(ren, &saved);
+        SDL_RenderSetClipRect(ren, nullptr);
+
+        // The widget saves and restores the target around its own cache, so
+        // nesting one inside ours is safe.
+        SDL_Texture *prev = SDL_GetRenderTarget(ren);
+        SDL_SetRenderTarget(ren, m_tile_wscratch);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 0);
+        SDL_RenderClear(ren);
+        int reqH = (r.w > 0) ? (int)lroundf((float)kTileWidgetW * (float)r.h / (float)r.w)
+                             : 0;
+        reqH = std::min(reqH, (int)gfx::Gfx::Height);
+        const int natH = w->Render(m_gfx, m_theme.Current(), 0, 0, kTileWidgetW, reqH);
+        SDL_SetRenderTarget(ren, prev);
+
+        SDL_RenderSetClipRect(ren, clipped ? &saved : nullptr);
+        if (natH <= 0) return;   // nothing rendered yet (first frames)
+
+        // Fit rather than stretch: a calendar grid or a clock face pulled to a
+        // different aspect ratio looks broken, so the widget is scaled as large
+        // as fits and centred, and the tile colour fills what is left.
+        const float s = std::min((float)r.w / (float)kTileWidgetW,
+                                 (float)r.h / (float)natH);
+        const int dw = std::max(1, (int)(kTileWidgetW * s));
+        const int dh = std::max(1, (int)(natH * s));
+
+        SDL_SetTextureAlphaMod(m_tile_wscratch, a);
+        SDL_Rect src{ 0, 0, kTileWidgetW, natH };
+        SDL_Rect dst{ r.x + (r.w - dw) / 2, r.y + (r.h - dh) / 2, dw, dh };
+        SDL_RenderCopy(ren, m_tile_wscratch, &src, &dst);
+    }
+
+    // One tile face. Flat, no border and no shadow: the colour block and the
+    // label in the bottom-left corner are the whole of Metro's vocabulary.
+    void Menu::DrawTileFace(const TileRect &r, const MenuItem &it, bool sel, Uint8 a) {
+        const Theme &t = m_theme.Current();
+        const bool wide = (r.w > TileUnit());
+        const std::string key = ItemKey(it);
+        // Eased every frame, so a recolour arrives as a fade rather than a jump.
+        const SDL_Color face = TileShownColor(key, TileColor(r.item));
+
+        if (it.kind == ItemKind::WidgetTile) {
+            m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
+            DrawWidgetTile(r, it, a);
+            if (sel) {
+                const SDL_Color c = WithAlpha(t.title, a);
+                m_gfx->FillRect(r.x - 3, r.y - 3, r.w + 6, 3, c);
+                m_gfx->FillRect(r.x - 3, r.y + r.h, r.w + 6, 3, c);
+                m_gfx->FillRect(r.x - 3, r.y - 3, 3, r.h + 6, c);
+                m_gfx->FillRect(r.x + r.w, r.y - 3, 3, r.h + 6, c);
+            }
+            return;   // no label band: the widget is the content
+        }
+
+        if (it.kind == ItemKind::MusicPlayer) {
+            // The music tile is always a colour block: it is showing text, and a
+            // picture behind a track name would only make it harder to read.
+            m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
+            if (SDL_Texture *g = SystemIcon(it.kind))
+                m_gfx->DrawImage(g, r.x + 14, r.y + 20, 52, 52, a);
+            if (m_deferred_joined) {
+                const int lh = m_gfx->LineHeight(FontSize::Small);
+                m_gfx->Text(FontSize::Small, r.x + 78, r.y + 24, WithAlpha(t.fg, a),
+                            m_music.Enabled() ? T("Playing") : T("Paused"));
+                char n[48];
+                snprintf(n, sizeof(n), "%d / %d", m_music.TrackIndex() + 1,
+                         std::max(1, m_music.TrackCount()));
+                m_gfx->Text(FontSize::Small, r.x + 78, r.y + 24 + lh + 4,
+                            WithAlpha(t.dim, a), n);
+            }
+        } else if (it.kind == ItemKind::Album && m_tile_pic) {
+            m_gfx->DrawImage(m_tile_pic, r.x, r.y, r.w, r.h, a);
+            if (m_tile_pic_next)
+                m_gfx->DrawImage(m_tile_pic_next, r.x, r.y, r.w, r.h,
+                                 (Uint8)(a * m_tile_pic_fade));
+        } else if (it.kind == ItemKind::Game || it.kind == ItemKind::Homebrew) {
+            // A game's own icon fills the tile, which is what gives the wall its
+            // colour - the same job Metro gave photo and people tiles.
+            SDL_Texture *icon = (it.kind == ItemKind::Homebrew)
+                                  ? m_hb_icons.Get(it.hb_icon)
+                                  : m_icons.Get(it.app_id);
+            // Picking a colour for a game turns its tile into the other kind of
+            // Windows 8 tile: a solid block with the app's logo inset, rather
+            // than artwork edge to edge. Without this the choice would be
+            // invisible on a square tile, because the icon covers every pixel
+            // of it - and a colour you cannot see is not worth choosing.
+            const auto cfg = m_tilecfg.find(key);
+            const bool tinted = (cfg != m_tilecfg.end() && cfg->second.has_color);
+            const int  fit    = std::min(r.w, r.h);
+            const int  sz     = tinted ? (fit * 5) / 8 : fit;
+            if (!icon || tinted || sz != r.w || sz != r.h)
+                m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
+            if (icon)
+                m_gfx->DrawImage(icon, r.x + (r.w - sz) / 2,
+                                 r.y + (r.h - sz) / 2 - (tinted ? 8 : 0), sz, sz, a);
+        } else {
+            // System tiles are a solid block with the glyph centred.
+            m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
+            if (SDL_Texture *g = SystemIcon(it.kind)) {
+                const int sz = wide ? 56 : 64;
+                m_gfx->DrawImage(g, r.x + (r.w - sz) / 2,
+                                 r.y + (r.h - sz) / 2 - (wide ? 10 : 8), sz, sz, a);
+            }
+        }
+
+        // A band under the label so it stays readable over artwork.
+        const int band = 30;
+        m_gfx->FillRect(r.x, r.y + r.h - band, r.w, band, SDL_Color{0, 0, 0,
+                        (Uint8)(a * 0.55f)});
+
+        std::string label = it.name;
+        // The music tile names the track rather than naming itself - the play
+        // state is already spelled out on its face, so it is not repeated here.
+        if (it.kind == ItemKind::MusicPlayer && m_deferred_joined) {
+            const std::string now_playing = m_music.CurrentName();
+            if (!now_playing.empty()) label = now_playing;
+        }
+        m_gfx->Text(FontSize::Small, r.x + 10,
+                    r.y + r.h - band + (band - m_gfx->LineHeight(FontSize::Small)) / 2,
+                    WithAlpha(t.fg, a),
+                    Ellipsize(label, r.w - 20, FontSize::Small).c_str());
+
+        // Selection is a ring, not a fill: Metro never dims the tile itself.
+        if (sel) {
+            const SDL_Color c = WithAlpha(t.title, a);
+            m_gfx->FillRect(r.x - 3, r.y - 3, r.w + 6, 3, c);
+            m_gfx->FillRect(r.x - 3, r.y + r.h, r.w + 6, 3, c);
+            m_gfx->FillRect(r.x - 3, r.y - 3, 3, r.h + 6, c);
+            m_gfx->FillRect(r.x + r.w, r.y - 3, 3, r.h + 6, c);
+        }
+    }
+
     void Menu::DrawMainGrid() {
         const Theme &t = m_theme.Current();
-        m_icons.SetScale(gfx::IconCache::GridScale); // many tiles: downscaled for perf
+        m_icons.SetScale(gfx::IconCache::GridScale);
         DrawTopBar(nullptr);
 
         if (m_items.empty()) { DrawMainEmpty(); return; }
 
-        // 8 columns x 4 visible rows. The name text is hidden, so tiles reach
-        // further down. Keep these in sync with GridItemAt (touch hit-testing).
-        const int cols     = GridColumns();               // 8
-        const int tile     = kGridTile;
-        const int gapX     = kGridGap;
-        const int gapY     = kGridGap;
-        const int pitch    = tile + gapY;                 // vertical distance between rows
-        const int rowsVis  = 4;                           // rows fully on screen
-        const int gridW    = cols * tile + (cols - 1) * gapX;
-        const int startX   = (gfx::Gfx::Width - gridW) / 2;
-        const int topBase  = kGridTopBase;                // y of row 0 at scroll 0
-        const int total    = (int)m_items.size();
-        const int rows     = (total + cols - 1) / cols;
+        UpdateLiveAlbum();
 
-        const int cur_row = m_cursor / cols;
-        const int cur_col = m_cursor % cols;
+        std::vector<TileRect> tiles;
+        BuildTiles(tiles);
+        if (tiles.empty()) { DrawMainEmpty(); return; }
 
-        // --- ease the vertical scroll (keep the selected row one row from the top
-        // when possible, clamped so we never scroll past the last page). ---
-        const float maxScroll = (float)std::max(0, rows - rowsVis);
-        float target = (float)std::min(std::max(0, cur_row - 1), (int)maxScroll);
-        m_grid_scroll += (target - m_grid_scroll) * 0.30f;
+        // Scroll so the whole of the selected tile sits inside the visible band.
+        int cur_row = 0, cur_rows = 1, rows = 0;
+        for (const TileRect &r : tiles) {
+            const int r0 = (r.y - TileTop()) / TilePitch();
+            // Over every tile, not just the last one: the packer fills holes, so
+            // the final entry is not necessarily the lowest thing on the wall.
+            rows = std::max(rows, r0 + TileRowsOf(r.h));
+            if (r.item == m_cursor) { cur_row = r0; cur_rows = TileRowsOf(r.h); }
+        }
+
+        const int maxScroll = std::max(0, rows - TileRowsVis());
+        // One row of lead-in above the selection, except that a tall tile whose
+        // bottom would fall off the band wins - showing half a tile is worse
+        // than losing the lead-in.
+        int target_i = std::min(std::max(0, cur_row - 1), maxScroll);
+        target_i = std::min(std::max(target_i, cur_row + cur_rows - TileRowsVis()), maxScroll);
+        const float target = (float)std::max(0, target_i);
+        if (!ScrollBusy()) m_grid_scroll += (target - m_grid_scroll) * 0.30f;
         if (std::abs(target - m_grid_scroll) < 0.01f) m_grid_scroll = target;
-        const float scrollPx = m_grid_scroll * pitch;
+        const int scrollPx = (int)lroundf(m_grid_scroll * TilePitch());
 
-        // Viewport band used for edge fading (tiles above/below fade out).
-        const int bandTop = topBase;
-        const int bandBot = topBase + (rowsVis - 1) * pitch + tile;
+        const int bandTop = TileTop() - 4;
+        const int bandBot = TileTop() + TileRowsVis() * TilePitch();
 
-        // Draw a couple of extra rows beyond the visible band so scrolling reveals
-        // tiles gradually rather than popping them in.
-        const int firstR = std::max(0, (int)std::floor(m_grid_scroll) - 1);
-        const int lastR  = std::min(rows - 1, firstR + rowsVis + 2);
-        for (int r = firstR; r <= lastR; r++) {
-            const int y = topBase + (int)lroundf(r * pitch - scrollPx);
-            Uint8 alpha = 255;
-            if (y < bandTop)               alpha = (Uint8)std::max(0, 255 - (bandTop - y) * 4);
-            else if (y + tile > bandBot)   alpha = (Uint8)std::max(0, 255 - (y + tile - bandBot) * 4);
-            if (alpha <= 8) continue;
-            for (int c = 0; c < cols; c++) {
-                const int idx = r * cols + c;
-                if (idx >= total) break;
-                const int x = startX + c * (tile + gapX);
-                DrawAppTile(m_items[idx], x, y, tile, /*selected*/ false, alpha);
-            }
+        // Clip to the band. The fade alone was enough while every tile was one
+        // row high, but a two-row tile reaches a whole pitch further up than the
+        // row it is fading with, and painted straight over the clock.
+        SDL_Renderer *ren = m_gfx->Renderer();
+        const SDL_Rect band{ 0, bandTop - 4, gfx::Gfx::Width,
+                             (bandBot + 4) - (bandTop - 4) };
+        if (ren) SDL_RenderSetClipRect(ren, &band);
+
+        for (const TileRect &src : tiles) {
+            TileRect r = src;
+            r.y -= scrollPx;
+            if (r.y + r.h < bandTop - TilePitch() || r.y > bandBot + TilePitch()) continue;
+
+            // Fade rather than clip at the band edges, so a row scrolling away
+            // does not cut off against nothing.
+            //
+            // Measured from the tile's LAST row going off the top and its FIRST
+            // row going off the bottom, not from its outer edges: a two-row tile
+            // has its top edge a whole pitch above its bottom row, so measuring
+            // from the edge faded it to nothing while most of it was still on
+            // screen - which read as a hole in the wall.
+            const int over_top = bandTop - (r.y + r.h - TileUnit());
+            const int over_bot = (r.y + TileUnit()) - bandBot;
+            Uint8 a = 255;
+            if (over_top > 0)      a = (Uint8)std::max(0, 255 - over_top * 5);
+            else if (over_bot > 0) a = (Uint8)std::max(0, 255 - over_bot * 5);
+            if (a == 0) continue;
+
+            DrawTileFace(r, m_items[src.item], src.item == m_cursor, a);
         }
+        if (ren) SDL_RenderSetClipRect(ren, nullptr);
 
-        // --- glide the selection highlight toward the selected tile. ---
-        const float tHLx = (float)(startX + cur_col * (tile + gapX));
-        const float tHLy = (float)topBase + (float)cur_row * pitch - scrollPx;
-        if (m_grid_hl_x < 0.0f) {                 // first frame: snap into place
-            m_grid_hl_x = tHLx; m_grid_hl_y = tHLy;
-        } else {
-            m_grid_hl_x += (tHLx - m_grid_hl_x) * 0.35f;
-            m_grid_hl_y += (tHLy - m_grid_hl_y) * 0.35f;
-        }
-        const int hx = (int)lroundf(m_grid_hl_x), hy = (int)lroundf(m_grid_hl_y);
-        const SDL_Color a = t.accent;
-        m_gfx->FillRect(hx - 4,        hy - 4,    tile + 8, 4,        a);
-        m_gfx->FillRect(hx - 4,        hy + tile, tile + 8, 4,        a);
-        m_gfx->FillRect(hx - 4,        hy - 4,    4,        tile + 8, a);
-        m_gfx->FillRect(hx + tile,     hy - 4,    4,        tile + 8, a);
+        // The selected entry's name, in the corner Metro puts its page title.
+        const MenuItem &sel = m_items[m_cursor];
+        m_gfx->Text(FontSize::Large, TileLeft(), TileTop() - 58, t.title,
+                    Ellipsize(sel.name, 900, FontSize::Large).c_str());
 
-        // Position indicator only (name text hidden by request).
-        char pos[28];
-        snprintf(pos, sizeof(pos), "%d / %d", m_cursor + 1, total);
-        int pw = m_gfx->TextWidth(FontSize::Small, pos);
-        m_gfx->Text(FontSize::Small, gfx::Gfx::Width - pw - 40, 120, t.dim, pos);
-
-        DrawStatusHint("A: Select    X: Options");
+        if (sel.kind == ItemKind::MusicPlayer)
+            DrawStatusHint("A: Open    Y: Play/pause    X: Options");
+        else
+            DrawStatusHint("A: Select    X: Options");
     }
 
-    // Cover mode: a fullscreen single-cover pager. One large cover is centred;
-    // browsing slides it out one screen-width while the next slides in.
     void Menu::DrawMainCover() {
         const Theme &t = m_theme.Current();
         m_icons.SetScale(0);   // one large cover -> original resolution
@@ -4426,7 +6600,8 @@ namespace sl::menu::ui {
 
         if (m_items.empty()) { DrawMainEmpty(); return; }
 
-        m_scroll_pos += (m_cursor - m_scroll_pos) * 0.28f;
+        if (!ScrollBusy())   // a finger or a throw owns the scroll instead
+            m_scroll_pos += (m_cursor - m_scroll_pos) * 0.28f;
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
 
         const int cx = gfx::Gfx::Width / 2;
@@ -4458,6 +6633,9 @@ namespace sl::menu::ui {
         m_gfx->TextCentered(FontSize::Large, cx, cy + size / 2 + 22, t.accent, sel.name.c_str());
         char pos[28];
         snprintf(pos, sizeof(pos), "%d / %d", m_cursor + 1, total);
+        // Position counters are optional; blanking the string here keeps
+        // the layout arithmetic below untouched.
+        if (!m_show_counter) pos[0] = '\0';
         m_gfx->TextCentered(FontSize::Small, cx, cy + size / 2 + 68, t.dim, pos);
 
         DrawStatusHint("A: Launch    X: Options    Left/Right: Browse");
@@ -4474,7 +6652,8 @@ namespace sl::menu::ui {
 
         if (m_items.empty()) { DrawMainEmpty(); return; }
 
-        m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
+        if (!ScrollBusy())   // a finger or a throw owns the scroll instead
+            m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
         if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
 
         const int total = (int)m_items.size();
@@ -4493,6 +6672,9 @@ namespace sl::menu::ui {
         {
             char cnt[32];
             snprintf(cnt, sizeof(cnt), "%d / %d", m_cursor + 1, total);
+            // Position counters are optional; blanking the string here keeps
+            // the layout arithmetic below untouched.
+            if (!m_show_counter) cnt[0] = '\0';
             const int cw = m_gfx->TextWidth(FontSize::Large, cnt);
             m_gfx->Text(FontSize::Large, gfx::Gfx::Width - 44 - cw, 70, t.dim, cnt);
         }
@@ -4792,7 +6974,8 @@ namespace sl::menu::ui {
         if (m_xmb_col < 0) { m_xmb_col = 0; m_xmb_item = 0; }
 
         m_xmb_col_scroll  += ((float)m_xmb_col  - m_xmb_col_scroll)  * 0.20f;
-        m_xmb_item_scroll += ((float)m_xmb_item - m_xmb_item_scroll) * 0.26f;
+        if (!ScrollBusy())   // a finger or a throw owns the scroll instead
+            m_xmb_item_scroll += ((float)m_xmb_item - m_xmb_item_scroll) * 0.26f;
         if (std::abs((float)m_xmb_col  - m_xmb_col_scroll)  < 0.004f) m_xmb_col_scroll  = (float)m_xmb_col;
         if (std::abs((float)m_xmb_item - m_xmb_item_scroll) < 0.004f) m_xmb_item_scroll = (float)m_xmb_item;
 
@@ -4840,14 +7023,18 @@ namespace sl::menu::ui {
         for (int i = firstv; i <= lastv; i++) {
             const float d  = (float)i - m_xmb_item_scroll;
             const int   cy = kXmbMarginTop + kXmbIcon / 2 + (int)XmbRowOffset(d);
-            if (cy > kXmbItemBottom) break;
-            if (cy < kXmbFadeEnd)    continue;
+            if (cy >= kXmbFadeBotEnd) break;
+            if (cy < kXmbFadeEnd)     continue;
 
             // Rows drifting up into the category row fade out behind it instead
-            // of clipping against it - RetroArch's vertical fade factor.
+            // of clipping against it - RetroArch's vertical fade factor - and
+            // rows sliding off the bottom fade the same way rather than popping.
             float fade = 1.0f;
             if (cy < kXmbFadeStart)
                 fade = (float)(cy - kXmbFadeEnd) / (float)(kXmbFadeStart - kXmbFadeEnd);
+            else if (cy > kXmbFadeBotStart)
+                fade = (float)(kXmbFadeBotEnd - cy)
+                     / (float)(kXmbFadeBotEnd - kXmbFadeBotStart);
 
             const bool  sel  = (i == m_xmb_item);
             const float prox = std::max(0.0f, 1.0f - std::abs(d));
@@ -4900,6 +7087,9 @@ namespace sl::menu::ui {
         // entry index.
         char pos[32];
         snprintf(pos, sizeof(pos), "%d/%d", m_xmb_item + 1, count);
+        // Position counters are optional; blanking the string here keeps
+        // the layout arithmetic below untouched.
+        if (!m_show_counter) pos[0] = '\0';
         const int pw = m_gfx->TextWidth(FontSize::Small, pos);
         const int ph = m_gfx->LineHeight(FontSize::Small);
         m_gfx->Text(FontSize::Small, W - 8 - pw, H - 8 - ph,
@@ -5003,6 +7193,16 @@ namespace sl::menu::ui {
             0.34f, 0.030f, 0.70f, 0.14f, 0.60f, 0.10f, 2.35f, 0.38f, 0.30f, 0.12f,
         };
 
+        // Wrap a row index into the list. With an endless row the drawn range
+        // runs past both ends and every index is folded back, which is what lets
+        // the shelf carry on into a second lap instead of stopping at the last
+        // game.
+        int FlowWrap(int i, int n) {
+            if (n <= 0) return 0;
+            i %= n;
+            return (i < 0) ? i + n : i;
+        }
+
         // Place one cover: how far it has swung, receded and slid aside, all
         // driven by its signed distance from the centre and all saturating at
         // one item out, which is what gives coverflow its "wall either side of a
@@ -5093,6 +7293,131 @@ namespace sl::menu::ui {
         m_flow_wrap = m_gfx->LoadImage("sdmc:/slaunch/covers/coveroverlay.png");
     }
 
+    // ---- decoded-cover cache -------------------------------------------------
+    //
+    // SteamGridDB serves its grids as PNG, and they are saved here with a .jpg
+    // name because SDL sniffs the real format. That matters more than it looks:
+    // PNG is zlib inflate plus a per-row unfilter, all on the CPU, and a row of
+    // thirteen 600x900 covers is around seven megapixels of it. Redoing that on
+    // every launch is what made the shelf take a second or two to fill in.
+    //
+    // So the finished, already-downscaled pixels are kept, exactly as the blur
+    // cache keeps its result: loading one becomes a read and an upload with no
+    // decode at all.
+    //
+    // Stored as RGB565 rather than RGBA. Box art is opaque, so the alpha channel
+    // is dead weight, and halving the file halves the read - which is the whole
+    // cost once the decode is gone. The banding that costs is not visible at the
+    // size a case is drawn.
+    namespace {
+        constexpr const char *kCoverTexDir = "sdmc:/slaunch/cache/covertex";
+        constexpr u32 kCoverTexMagic   = 0x31565343;   // 'CSV1'
+        constexpr u32 kCoverTexVersion = 1;
+        // Matches what the decode path produced before, so nothing about how a
+        // case looks changes - only how quickly it gets there.
+        constexpr int kCoverTexW = 480;
+        constexpr int kCoverTexH = 720;
+
+        struct CoverTexHeader {
+            u32 magic, version, w, h;
+            u64 src_size, src_mtime;
+        };
+
+        // Covers are 480x720; the back panels are screenshots, drawn a couple
+        // of hundred pixels wide, so the same treatment applies to both.
+        constexpr int kShotTexW = 640;
+        constexpr int kShotTexH = 207;
+
+        std::string TexCachePath(const char *key) {
+            char buf[112];
+            snprintf(buf, sizeof(buf), "%s/%s.ctx", kCoverTexDir, key);
+            return std::string(buf);
+        }
+
+        // Any mismatch is a miss, and a miss just means the decode runs as it
+        // always did. The source's size and mtime are checked, so replacing a
+        // cover - by hand or through the picker - rebuilds this entry.
+        SDL_Texture *ReadCoverTex(SDL_Renderer *rend, const char *cpath,
+                                  const struct stat &src, int tw, int th) {
+            FILE *f = fopen(cpath, "rb");
+            if (!f) return nullptr;
+
+            CoverTexHeader h {};
+            if (fread(&h, sizeof(h), 1, f) != 1) { fclose(f); return nullptr; }
+            if (h.magic != kCoverTexMagic || h.version != kCoverTexVersion ||
+                h.w != (u32)tw || h.h != (u32)th ||
+                h.src_size  != (u64)src.st_size ||
+                h.src_mtime != (u64)src.st_mtime) {
+                fclose(f);
+                return nullptr;
+            }
+
+            const size_t bytes = (size_t)tw * th * 2;
+            std::vector<u8> px(bytes);
+            const bool ok = fread(px.data(), 1, bytes, f) == bytes;
+            fclose(f);
+            if (!ok) return nullptr;          // truncated; rebuild over the top
+
+            SDL_Texture *tex = SDL_CreateTexture(rend, SDL_PIXELFORMAT_RGB565,
+                                                 SDL_TEXTUREACCESS_STATIC, tw, th);
+            if (!tex) return nullptr;
+            SDL_UpdateTexture(tex, nullptr, px.data(), tw * 2);
+            return tex;
+        }
+
+        void WriteCoverTex(const char *cpath, const struct stat &src,
+                           SDL_Surface *surf) {
+            if (!surf) return;
+            const int tw = surf->w, th = surf->h;
+
+            mkdir("sdmc:/slaunch", 0777);
+            mkdir("sdmc:/slaunch/cache", 0777);
+            mkdir(kCoverTexDir, 0777);
+
+            // Written beside and renamed in, so a power cut mid-write cannot
+            // leave a full-length file with a stale tail that reads back as
+            // valid - the same reason the blur cache does it this way.
+            const std::string tmp = std::string(cpath) + ".tmp";
+            FILE *f = fopen(tmp.c_str(), "wb");
+            if (!f) return;
+
+            CoverTexHeader h {};
+            h.magic     = kCoverTexMagic;
+            h.version   = kCoverTexVersion;
+            h.w         = (u32)tw;
+            h.h         = (u32)th;
+            h.src_size  = (u64)src.st_size;
+            h.src_mtime = (u64)src.st_mtime;
+
+            bool ok = fwrite(&h, sizeof(h), 1, f) == 1;
+            // Row by row: a surface's pitch can carry padding past the last
+            // pixel of a row, and writing it would shear the image on read-back.
+            for (int y = 0; ok && y < th; y++)
+                ok = fwrite((const u8 *)surf->pixels + (size_t)y * surf->pitch,
+                            1, (size_t)tw * 2, f) == (size_t)tw * 2;
+            fclose(f);
+            if (!ok) { remove(tmp.c_str()); return; }
+
+            remove(cpath);                    // FAT rename will not overwrite
+            rename(tmp.c_str(), cpath);
+        }
+
+        // Decode and downscale to exactly the cached shape, as a surface, so the
+        // pixels can be written out before they are handed to the GPU.
+        SDL_Surface *DecodeCoverSurface(const char *path, int tw, int th) {
+            SDL_Surface *raw = IMG_Load(path);
+            if (!raw) return nullptr;
+
+            SDL_Surface *dst = SDL_CreateRGBSurfaceWithFormat(
+                    0, tw, th, 16, SDL_PIXELFORMAT_RGB565);
+            if (!dst) { SDL_FreeSurface(raw); return nullptr; }
+
+            SDL_BlitScaled(raw, nullptr, dst, nullptr);
+            SDL_FreeSurface(raw);
+            return dst;
+        }
+    }
+
     // Box front art for an entry, or nullptr for a blank case.
     //
     // This is deliberately *not* the title's square icon. A 1:1 icon stretched
@@ -5112,19 +7437,57 @@ namespace sl::menu::ui {
         char path[96];
         snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX.jpg",
                  (unsigned long long)it.app_id);
-        // Same budget as the icon caches, and for the same reason: a row of
-        // thirteen boxes would otherwise decode thirteen covers on the frame it
-        // first appears. A miss here is not recorded, so the next frame retries.
+        // Nothing is recorded when a budget runs out, so the next frame simply
+        // retries. Hits and decodes draw on separate budgets: see below.
         if (m_cover_budget <= 0) return nullptr;
-        m_cover_budget--;
 
-        // Downscaled on load. A box is 185-260 px wide on screen and a
-        // SteamGridDB grid is 600x900, so the full image is four times the
-        // resolution anyone can see and four times the memory - 2.1 MB each,
-        // against 0.8 at this size. The tuning screen can grow the boxes, hence
-        // the headroom rather than matching the drawn size exactly.
-        SDL_Texture *tex = m_gfx->LoadImageScaled(path, 480, 720);
+        // Downscaled to 480x720. A box is 185-260 px wide on screen and a grid
+        // is 600x900, so the full image is four times the resolution anyone can
+        // see and four times the memory. The tuning screen can grow the boxes,
+        // hence the headroom rather than matching the drawn size exactly.
+        //
+        // The finished pixels are cached (see above), so this decode happens
+        // once per cover rather than on every launch.
+        struct stat src {};
+        if (stat(path, &src) != 0) {           // no art for this title
+            m_covers[it.app_id] = nullptr;
+            return nullptr;
+        }
+
+        const u64 t_cov0 = armGetSystemTick();
+        char key[24];
+        snprintf(key, sizeof(key), "%016llX", (unsigned long long)it.app_id);
+        const std::string cpath = TexCachePath(key);
+        if (SDL_Texture *hit = ReadCoverTex(m_gfx->Renderer(), cpath.c_str(), src,
+                                            kCoverTexW, kCoverTexH)) {
+            m_cover_budget--;
+            m_covers[it.app_id] = hit;
+            g_cover_hits++;
+            g_cover_ms += (unsigned)((armGetSystemTick() - t_cov0) * 1000
+                                     / armGetSystemTickFreq());
+            return hit;
+        }
+
+        // A miss costs an order of magnitude more than a hit: a 600x900 PNG
+        // inflate, then a 691 KB write back to the card. Six of those in one
+        // frame - which is what sharing the hit budget allowed - is a two-second
+        // stall while scrolling. They come out of their own much smaller budget,
+        // which is zero while the row is moving.
+        if (m_decode_budget <= 0) return nullptr;
+        m_decode_budget--;
+        m_cache_msg_tick = armGetSystemTick();
+        m_cache_built++;
+
+        SDL_Texture *tex = nullptr;
+        if (SDL_Surface *surf = DecodeCoverSurface(path, kCoverTexW, kCoverTexH)) {
+            WriteCoverTex(cpath.c_str(), src, surf);
+            tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), surf);
+            SDL_FreeSurface(surf);
+        }
         m_covers[it.app_id] = tex;
+        g_cover_miss++;
+        g_cover_ms += (unsigned)((armGetSystemTick() - t_cov0) * 1000
+                                 / armGetSystemTickFreq());
         return tex;
     }
 
@@ -5149,6 +7512,25 @@ namespace sl::menu::ui {
         // before that has finished; curl_global_init is a no-op once done.
         net::GlobalInit();
         m->m_cover_ok = false;
+        m->m_shots_ok = false;
+
+        // Fetch only what is actually absent.
+        //
+        // The screenshots used to be fetched inside the cover fetch, and the
+        // cover fetch only ran when the COVER was missing - so a title that
+        // already had its cover never got screenshots at all, however long you
+        // sat on it. The two are looked for independently now.
+        bool need_cover, need_shots;
+        {
+            char probe[96];
+            struct stat st {};
+            snprintf(probe, sizeof(probe), "sdmc:/slaunch/covers/%016llX.jpg",
+                     (unsigned long long)m->m_cover_id);
+            need_cover = (stat(probe, &st) != 0);
+            snprintf(probe, sizeof(probe), "sdmc:/slaunch/covers/%016llX_s0.jpg",
+                     (unsigned long long)m->m_cover_id);
+            need_shots = (stat(probe, &st) != 0);
+        }
         m->m_cover_state.store((int)CoverState::Searching, std::memory_order_release);
         CoverState end = CoverState::Failed;
 
@@ -5179,6 +7561,14 @@ namespace sl::menu::ui {
 
             std::string body;
             long http = 0; int rc = 0;
+            char dst[96];
+
+            if (!need_cover) {
+                end = CoverState::Got;      // already on the card
+                goto shots;
+            }
+
+            {
             std::string url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" + q;
             const bool okq = net::Get(url.c_str(), body, 12, auth.c_str(), &http, &rc);
             logline("search", http, rc, body.size());
@@ -5219,43 +7609,79 @@ namespace sl::menu::ui {
             // extension stays .jpg because that is what FlowCover looks for and
             // SDL_image sniffs the actual format anyway.
             mkdir("sdmc:/slaunch/covers", 0777);
-            char dst[96];
             snprintf(dst, sizeof(dst), "sdmc:/slaunch/covers/%016llX.jpg",
                      (unsigned long long)m->m_cover_id);
             m->m_cover_ok = net::Download(img.c_str(), dst, 25);
             logline(m->m_cover_ok ? "download-ok" : "download-fail", 0, 0, img.size());
             end = m->m_cover_ok ? CoverState::Got : CoverState::Failed;
             if (!m->m_cover_ok) break;
-
-            // Two images for the back of the case.
-            //
-            // SteamGridDB has no screenshots endpoint - grids, heroes, logos and
-            // icons is the whole catalogue - so these are "heroes", the wide
-            // banner art. They are the only gameplay-ish wide asset available
-            // and they sit convincingly where a real case prints screenshots.
-            char hero[160];
-            snprintf(hero, sizeof(hero),
-                     "https://www.steamgriddb.com/api/v2/heroes/game/%lld"
-                     "?types=static&limit=2", gid);
-            body.clear();
-            http = 0; rc = 0;
-            const bool okh = net::Get(hero, body, 12, auth.c_str(), &http, &rc);
-            logline("heroes", http, rc, body.size());
-            if (!okh) break;   // the cover is already saved; the panels are a bonus
-
-            // Two separate "url" values out of the data array.
-            size_t scan = body.find("\"data\"");
-            for (int k = 0; k < 2 && scan != std::string::npos; k++) {
-                const size_t up = body.find("\"url\"", scan);
-                if (up == std::string::npos) break;
-                const std::string one = JsonStr(body.substr(up), "url");
-                if (one.empty()) break;
-                snprintf(dst, sizeof(dst), "sdmc:/slaunch/covers/%016llX_s%d.jpg",
-                         (unsigned long long)m->m_cover_id, k);
-                const bool sok = net::Download(one.c_str(), dst, 25);
-                logline(sok ? "shot-ok" : "shot-fail", 0, 0, one.size());
-                scan = up + 5;
             }
+
+        shots:
+            if (!need_shots) break;
+
+            // The two panels on the back of the case.
+            //
+            // These come from Steam rather than SteamGridDB, which has no
+            // screenshots at all - grids, heroes, logos and icons is its whole
+            // catalogue, and its "heroes" are wide key art rather than anything
+            // from the game. Steam is also keyless, and serves JPEG where a
+            // hero was PNG, so the panels are far cheaper to decode.
+            int shots = 0;
+            if (!m->m_steam_dead) {
+                // Steam, in two keyless steps: search the name for an appid,
+                // then ask the store for that app's screenshots. No key, no
+                // sign-up, and the shots are actual gameplay rather than the
+                // wide key art SteamGridDB calls a hero.
+                char url_s[288];
+                snprintf(url_s, sizeof(url_s),
+                         "https://steamcommunity.com/actions/SearchApps/%s", q.c_str());
+                body.clear();
+                http = 0; rc = 0;
+                // Shorter than the SteamGridDB calls: there is a fallback
+                // waiting behind this, so waiting a long time to find out it is
+                // not coming only delays the panels that would have worked.
+                const bool oka = net::Get(url_s, body, 8, nullptr, &http, &rc);
+                logline("steam-search", http, rc, body.size());
+                if (!oka && (http == 0 || http >= 500)) m->m_steam_dead = true;
+
+                // The search returns an array; the first appid is the best
+                // match. It is a string in this response, not a number.
+                const std::string appid = oka ? JsonStr(body, "appid") : std::string();
+
+                if (!appid.empty()) {
+                    snprintf(url_s, sizeof(url_s),
+                             "https://store.steampowered.com/api/appdetails"
+                             "?appids=%s&filters=screenshots", appid.c_str());
+                    body.clear();
+                    http = 0; rc = 0;
+                    const bool okd = net::Get(url_s, body, 8, nullptr, &http, &rc);
+                    logline("steam-shots", http, rc, body.size());
+                    if (!okd && (http == 0 || http >= 500)) m->m_steam_dead = true;
+
+                    if (okd) {
+                        // Each screenshot carries a thumbnail and a full-size
+                        // image; the panels are drawn a few hundred pixels wide,
+                        // so the full one is what is wanted.
+                        const std::vector<std::string> imgs =
+                            JsonStrAll(body, "path_full", 2);
+                        for (size_t k = 0; k < imgs.size(); k++) {
+                            snprintf(dst, sizeof(dst),
+                                     "sdmc:/slaunch/covers/%016llX_s%u.jpg",
+                                     (unsigned long long)m->m_cover_id, (unsigned)k);
+                            const bool sok = net::Download(imgs[k].c_str(), dst, 25);
+                            logline(sok ? "shot-ok" : "shot-fail", 0, 0, imgs[k].size());
+                            if (sok) { shots++; m->m_shots_ok = true; }
+                        }
+                    }
+                }
+            }
+
+            // No hero fallback. SteamGridDB's heroes are wide key art, not
+            // anything from the game, and printing marketing art where a case
+            // prints screenshots was only ever a stand-in for having none. A
+            // title Steam has never heard of now gets a plain back rather than
+            // a misleading one.
         } while (false);
 
         m->m_cover_state.store((int)end, std::memory_order_release);
@@ -5269,6 +7695,7 @@ namespace sl::menu::ui {
             m_cover_state.store((int)CoverState::NoKey, std::memory_order_release);
             return;                        // no key: feature stays off entirely
         }
+
         if (m_cover_tried.count(app_id))  return;
 
         m_cover_tried[app_id] = true;
@@ -5288,6 +7715,16 @@ namespace sl::menu::ui {
         threadClose(&m_cover_thread);
         m_cover_running = false;
 
+        // Screenshots arrived: drop the recorded "none" so they decode.
+        if (m_shots_ok) {
+            auto g = m_shots.find(m_cover_id);
+            if (g != m_shots.end()) {
+                if (g->second.a) m_gfx->FreeImage(g->second.a);
+                if (g->second.b) m_gfx->FreeImage(g->second.b);
+                m_shots.erase(g);
+            }
+        }
+
         // Drop the cached miss so FlowCover picks the new file up next frame.
         if (m_cover_ok) {
             m_cover_ok_count++;
@@ -5305,6 +7742,9 @@ namespace sl::menu::ui {
         }
     }
 
+    // Decoded on a worker; see the note on m_shot_thread. Returns nothing until
+    // the panels are ready, so the back of a case is briefly blank rather than
+    // the whole menu stopping to inflate two 1920x620 images.
     const Menu::FlowShots &Menu::FlowBackShots(const MenuItem &it) {
         static const FlowShots none;
         if (it.kind != ItemKind::Game || it.app_id == 0) return none;
@@ -5312,18 +7752,64 @@ namespace sl::menu::ui {
         auto f = m_shots.find(it.app_id);
         if (f != m_shots.end()) return f->second;
 
+        // One at a time: two of these already saturate a core, and only the box
+        // you have stopped on ever asks.
+        if (!m_shot_running) StartShotDecode(it.app_id);
+        return none;
+    }
+
+    void Menu::StartShotDecode(u64 app_id) {
+        snprintf(m_shot_path_a, sizeof(m_shot_path_a),
+                 "sdmc:/slaunch/covers/%016llX_s0.jpg", (unsigned long long)app_id);
+        snprintf(m_shot_path_b, sizeof(m_shot_path_b),
+                 "sdmc:/slaunch/covers/%016llX_s1.jpg", (unsigned long long)app_id);
+        m_shot_job_id = app_id;
+        m_shot_surf_a = nullptr;
+        m_shot_surf_b = nullptr;
+        m_shot_done.store(false, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_shot_thread, &Menu::ShotDecodeTrampoline,
+                                     this, nullptr, 0x20000, 0x3B, -2))) {
+            threadStart(&m_shot_thread);
+            m_shot_running = true;
+        } else {
+            // No worker available: record the miss so it is not retried every
+            // frame for the rest of the session.
+            m_shots[app_id] = FlowShots{};
+            m_shot_job_id = 0;
+        }
+    }
+
+    // Surfaces only - IMG_Load, a format convert and a scaled blit are all CPU
+    // work on ordinary memory. Nothing here touches the renderer, which is what
+    // makes it safe off the main thread.
+    void Menu::ShotDecodeTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        m->m_shot_surf_a = DecodeCoverSurface(m->m_shot_path_a, kShotTexW, kShotTexH);
+        m->m_shot_surf_b = DecodeCoverSurface(m->m_shot_path_b, kShotTexW, kShotTexH);
+        m->m_shot_done.store(true, std::memory_order_release);
+    }
+
+    void Menu::PollShotDecode() {
+        if (!m_shot_running || !m_shot_done.load(std::memory_order_acquire)) return;
+        threadWaitForExit(&m_shot_thread);
+        threadClose(&m_shot_thread);
+        m_shot_running = false;
+
         FlowShots s;
-        char path[96];
-        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_s0.jpg",
-                 (unsigned long long)it.app_id);
-        // Same again: a hero is 1920x620 and lands on a panel a couple of
-        // hundred pixels wide, so full size costs 4.5 MB apiece for nothing.
-        s.a = m_gfx->LoadImageScaled(path, 640, 207);
-        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_s1.jpg",
-                 (unsigned long long)it.app_id);
-        s.b = m_gfx->LoadImageScaled(path, 640, 207);
-        m_shots[it.app_id] = s;
-        return m_shots[it.app_id];
+        if (m_shot_surf_a) {
+            s.a = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_shot_surf_a);
+            SDL_FreeSurface(m_shot_surf_a);
+            m_shot_surf_a = nullptr;
+        }
+        if (m_shot_surf_b) {
+            s.b = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_shot_surf_b);
+            SDL_FreeSurface(m_shot_surf_b);
+            m_shot_surf_b = nullptr;
+        }
+        // Recorded even when both are null, so a title with no hero art is not
+        // asked for again every frame.
+        if (m_shot_job_id != 0) m_shots[m_shot_job_id] = s;
+        m_shot_job_id = 0;
     }
 
     // Flow shows launchable content only. Everything else - Settings, Album,
@@ -5420,9 +7906,17 @@ namespace sl::menu::ui {
         if (m_flow_items.empty()) return -1;
         if (py < 90 || py > gfx::Gfx::Height - 150) return -1;   // title / hint rows
 
-        const int n     = (int)m_flow_items.size();
-        const int first = std::max(0, (int)m_flow_scroll - kFlowVisible);
-        const int last  = std::min(n - 1, (int)m_flow_scroll + kFlowVisible);
+        // Same virtual range the renderer walks, so a box drawn past either end
+        // of an endless row is tappable rather than being ignored because its
+        // index is out of bounds.
+        const int n      = (int)m_flow_items.size();
+        const int centre = (int)lroundf(m_flow_scroll);
+        int first = centre - kFlowVisible;
+        int last  = centre + kFlowVisible;
+        if (!m_wrap_nav) {
+            if (first < 0)     first = 0;
+            if (last  > n - 1) last  = n - 1;
+        }
 
         int    best = -1;
         float  best_d = 1e9f;
@@ -5449,7 +7943,7 @@ namespace sl::menu::ui {
             const float d = std::abs(p);
             if (d < best_d) { best_d = d; best = i; }
         }
-        return (best < 0) ? -1 : m_flow_items[best];
+        return (best < 0) ? -1 : m_flow_items[FlowWrap(best, n)];
     }
 
     // ---- Flow layout tuning -------------------------------------------------
@@ -5552,7 +8046,11 @@ namespace sl::menu::ui {
 
     void Menu::DrawMainFlow() {
         const Theme &t = m_theme.Current();
-        EnsureFlowWrap();
+        // The box wrap is a 165 KB PNG loaded on first use and never budgeted,
+        // so it landed squarely on the frame the menu was trying to show. One
+        // frame of plain cases costs nothing next to holding the whole menu
+        // back for it.
+        if (g_phase_done) EnsureFlowWrap();
         const int    W = gfx::Gfx::Width;
         const int    H = gfx::Gfx::Height;
 
@@ -5568,13 +8066,48 @@ namespace sl::menu::ui {
         // m_cursor indexes m_items; the row indexes m_flow_items. Find where the
         // shared cursor sits in the filtered row, so switching in from another
         // layout keeps your place on the same game.
+        // m_cursor indexes m_items; the row indexes m_flow_items. Find where the
+        // shared cursor sits in the filtered row, so switching in from another
+        // layout keeps your place on the same game.
         int sel = 0;
         for (int i = 0; i < n; i++)
             if (m_flow_items[i] == m_cursor) { sel = i; break; }
 
-        m_flow_scroll += ((float)sel - m_flow_scroll) * 0.22f;
-        if (std::abs((float)sel - m_flow_scroll) < 0.002f)
-            m_flow_scroll = (float)sel;
+        // The fling itself runs centrally in StepFling, for every layout. All
+        // that is left here is the settle, and it must not run while a finger or
+        // a throw owns the row - that ease is what snapped a flick back to
+        // wherever you let go.
+        if (!ScrollBusy()) {
+            // With an endless row, settle toward whichever copy of the selected
+            // item is nearest rather than the one at index sel: after wrapping
+            // past the end those can be a whole library apart, and easing to the
+            // literal index would rewind the row.
+            float target = (float)sel;
+            if (m_wrap_nav && n > 0) {
+                while (target - m_flow_scroll >  n * 0.5f) target -= (float)n;
+                while (target - m_flow_scroll < -n * 0.5f) target += (float)n;
+            }
+            m_flow_scroll += (target - m_flow_scroll) * 0.22f;
+            if (std::abs(target - m_flow_scroll) < 0.002f) m_flow_scroll = target;
+        }
+
+        // Has the row come to rest on the selected item?
+        //
+        // With an endless row this is NOT the same question as
+        // "m_flow_scroll == sel". The settle above eases toward whichever copy
+        // of the item is nearest, so the resting position is often sel - n or
+        // sel + n; the row is showing the right game while the number differs
+        // from sel by a whole library.
+        //
+        // Comparing against the literal index therefore never matched for
+        // anything the row reached by wrapping backwards - and a newly
+        // installed game always is, because an unknown id sorts to the end of
+        // the arrangement and the shortest way there is backwards past zero.
+        // That is why a new game never fetched its box art and never loaded its
+        // back panels, while games in the middle of the library did both.
+        const bool flow_settled =
+            (m_flow_scroll == std::floor(m_flow_scroll)) &&
+            (FlowWrap((int)m_flow_scroll, n) == sel);
 
         // Right stick. X yaws the camera and, held past halfway, starts spinning
         // the selected box so you can read the back of the case; Y dollies in and
@@ -5591,8 +8124,16 @@ namespace sl::menu::ui {
         // box in the row is placed against the same instant.
         const float flow_now = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
 
-        const int first = std::max(0, (int)m_flow_scroll - kFlowVisible);
-        const int last  = std::min(n - 1, (int)m_flow_scroll + kFlowVisible);
+        // The drawn range is expressed in *virtual* positions - they may run
+        // below zero or past the end - so the row is continuous across a wrap.
+        // Each one is folded to a real item only when its content is needed.
+        const int centre = (int)lroundf(m_flow_scroll);
+        int first = centre - kFlowVisible;
+        int last  = centre + kFlowVisible;
+        if (!m_wrap_nav) {                 // finite row: stop at the ends
+            if (first < 0)     first = 0;
+            if (last  > n - 1) last  = n - 1;
+        }
 
         // Outside-in: the two ends are farthest, the centre is nearest and must
         // land last so it covers its neighbours.
@@ -5611,20 +8152,26 @@ namespace sl::menu::ui {
         // what made scrolling crawl. Doing the loads up front costs the same
         // decode but leaves the draw pass unbroken.
         {
-            const bool settled = (m_flow_scroll == (float)sel);
+            // Cached covers keep loading while you scroll - they are cheap - but
+            // decoding a new one is not, so that waits until the row has come to
+            // rest. Building the cache mid-scroll is what made scrolling stall.
+            if (!flow_settled) m_decode_budget = 0;
+
             for (int row : order) {
-                if (m_cover_budget <= 0) break;
-                FlowCover(m_items[m_flow_items[row]]);
+                if (m_cover_budget <= 0 && m_decode_budget <= 0) break;
+                FlowCover(m_items[m_flow_items[FlowWrap(row, n)]]);
             }
             // Back panels are far more expensive - a hero is 1920x620 - and are
             // only wanted once you have stopped somewhere. Loading them as the
             // selection swept past during a scroll was two full decodes every
             // few frames.
-            if (settled) FlowBackShots(m_items[m_flow_items[sel]]);
+            if (flow_settled) FlowBackShots(m_items[m_flow_items[sel]]);
         }
 
         for (int row : order) {
-            const MenuItem &it = m_items[m_flow_items[row]];
+            // row is a virtual position; the item it shows is that position
+            // folded back into the list.
+            const MenuItem &it = m_items[m_flow_items[FlowWrap(row, n)]];
             const float p = (float)row - m_flow_scroll;
 
             float x, z, angle;
@@ -5634,7 +8181,7 @@ namespace sl::menu::ui {
             z += m_flow_dolly;
 
             // The selected box carries the extra spin, so only it turns around.
-            const bool is_sel = (row == sel);
+            const bool is_sel = (FlowWrap(row, n) == sel);
             if (is_sel) angle += m_flow_spin;
 
             // The game currently running turns slowly on its own, so you can
@@ -5648,9 +8195,29 @@ namespace sl::menu::ui {
             const float ca_face = cosf(angle);
             const bool  showing_back = (ca_face < 0.0f);
 
+            // Launch bounce: the chosen case dips and then springs toward you.
+            // Scaling the corners in world space lets the perspective do the
+            // rest, so it grows the way it would if it were really coming
+            // forward rather than just being drawn bigger.
+            //
+            // All three dimensions scale, and every face is built from these
+            // rather than from the globals. Scaling only the front panel grew
+            // the picture while the case it is printed on stayed put, so the
+            // box came apart as it sprang.
+            float half_w = gFlowHalfW, half_h = kFlowHalf, depth = gFlowDepth;
+            if (is_sel) {
+                const float lt = LaunchAnimT();
+                if (lt >= 0.0f) {
+                    const float sc = LaunchScale(lt);
+                    half_w *= sc;
+                    half_h *= sc;
+                    depth  *= sc;
+                }
+            }
+
             // The box front, 2:3 rather than square.
             float corners[4][3];
-            FlowCorners(x, z, angle, gFlowHalfW, kFlowHalf, corners);
+            FlowCorners(x, z, angle, half_w, half_h, corners);
 
             SDL_Texture *cover = FlowCover(it);
             // No cover yet: fall back to the title's own icon, centred on the
@@ -5682,19 +8249,18 @@ namespace sl::menu::ui {
             const SDL_Color back_col { backg, backg, backg, 255 };
 
             auto side_face = [&](float lx, float out[4][3]) {
-                FlowFace(x, z, angle, lx, 0.0f, lx, 2.0f * gFlowDepth,
-                         kFlowHalf, out);
+                FlowFace(x, z, angle, lx, 0.0f, lx, 2.0f * depth, half_h, out);
             };
 
             float back[4][3];
             FlowFace(x, z, angle,
-                     gFlowHalfW, 2.0f * gFlowDepth,
-                    -gFlowHalfW, 2.0f * gFlowDepth,
-                     kFlowHalf, back);
+                     half_w, 2.0f * depth,
+                    -half_w, 2.0f * depth,
+                     half_h, back);
 
-            auto draw_side = [&](float lx, bool spine) {
-                float face[4][3];
-                side_face(lx, face);
+            // Takes the face already built, because the draw order below needs
+            // every face's geometry before it can decide what to paint first.
+            auto draw_side = [&](const float face[4][3], bool spine) {
                 m_gfx->DrawQuad3D(nullptr, face, side_col, 255, 255, false, 4);
                 if (spine && m_flow_wrap) {
                     const float uv_spine[4] = { kWrapSpine0, 0.0f, kWrapSpine1, 1.0f };
@@ -5734,23 +8300,22 @@ namespace sl::menu::ui {
                     // Two of them come to 0.765 of the case height, which leaves
                     // the bottom quarter for the printed legal block - the same
                     // place a real case puts it.
-                    const float half_w = gFlowHalfW;
                     const float h      = (2.0f * half_w) * 9.0f / 16.0f;
                     const float gap    = 0.0f;
-                    const float top    = kFlowHalf;        // flush with the top edge
+                    const float top    = half_h;           // flush with the top edge
 
                     // The back face runs +halfW on the left to -halfW on the
                     // right so its texture is not mirrored; these follow suit.
                     float panel[4][3];
                     if (sh.a) {
                         FlowPanel(x, z, angle, half_w, -half_w,
-                                  top - h, top, 2.0f * gFlowDepth, panel);
+                                  top - h, top, 2.0f * depth, panel);
                         m_gfx->DrawQuad3D(sh.a, panel, tint, 255, 255, false, 8);
                     }
                     if (sh.b) {
                         const float t2 = top - h - gap;
                         FlowPanel(x, z, angle, half_w, -half_w,
-                                  t2 - h, t2, 2.0f * gFlowDepth, panel);
+                                  t2 - h, t2, 2.0f * depth, panel);
                         m_gfx->DrawQuad3D(sh.b, panel, tint, 255, 255, false, 8);
                     }
                 }
@@ -5769,8 +8334,7 @@ namespace sl::menu::ui {
                 } else if (icon) {
                     // Square icon inset on the face, leaving case above and below.
                     float inset[4][3];
-                    FlowCorners(x, z, angle, gFlowHalfW * 0.82f, gFlowHalfW * 0.82f,
-                                inset);
+                    FlowCorners(x, z, angle, half_w * 0.82f, half_w * 0.82f, inset);
                     m_gfx->DrawQuad3D(icon, inset, tint, 255, 255);
                 }
                 // The printed wrap over the art is what makes this a boxed game
@@ -5783,27 +8347,52 @@ namespace sl::menu::ui {
             };
 
             // Painted back to front. There is no depth buffer, so draw order is
-            // the only depth information there is - and the sides sit *between*
-            // the two big faces, so they have to be drawn between them. Drawing
-            // all the sides first, as this did, let the far face paint over them.
+            // the only depth information there is.
+            //
+            // The four faces are sorted by their actual depth rather than by
+            // rules read off the angle. The angle on its own is not enough: the
+            // boxes sit well off to either side, so perspective slides the faces
+            // past one another at rotations the sine and cosine know nothing
+            // about, and a face could be painted over one genuinely in front of
+            // it. That is what made sides go missing and the order look wrong at
+            // certain angles - the old rules were right near the centre of the
+            // row and drifted further out.
+            //
+            // Sorting a convex box's faces far-to-near is correct at every angle
+            // and every position, and it needs no winding convention: the ones
+            // pointing away are simply painted over by the ones in front.
             //
             // The spine is the wrap's left edge, so it lives on the box's left;
             // the plain opening edge is on the right.
-            //
-            // Which of the two is nearer follows the swing: a face at local x
-            // sits at z - x*sin(angle), so a positive sine brings the right edge
-            // forward. This was hardcoded to left-then-right, which is only
-            // correct for half the rotation - turn the box side-on, where the
-            // sides are at their widest and the front has collapsed to nothing,
-            // and the far edge painted straight over the near one.
-            const float sa_now = sinf(angle);
-            auto draw_sides = [&]() {
-                if (sa_now > 0.0f) { draw_side(-gFlowHalfW, true);  draw_side(gFlowHalfW, false); }
-                else               { draw_side(gFlowHalfW, false); draw_side(-gFlowHalfW, true); }
+            float face_l[4][3], face_r[4][3];
+            side_face(-half_w, face_l);
+            side_face( half_w, face_r);
+
+            auto mid_z = [](const float f[4][3]) {
+                return 0.25f * (f[0][2] + f[1][2] + f[2][2] + f[3][2]);
             };
 
-            if (showing_back) { draw_front(); draw_sides(); draw_back();  }
-            else              { draw_back();  draw_sides(); draw_front(); }
+            struct FaceOrder { float z; int which; };   // 0 front 1 back 2 left 3 right
+            FaceOrder faces[4] = {
+                { mid_z(corners), 0 },
+                { mid_z(back),    1 },
+                { mid_z(face_l),  2 },
+                { mid_z(face_r),  3 },
+            };
+            for (int a = 1; a < 4; a++) {          // insertion sort, farthest first
+                const FaceOrder key = faces[a];
+                int b = a - 1;
+                while (b >= 0 && faces[b].z < key.z) { faces[b + 1] = faces[b]; b--; }
+                faces[b + 1] = key;
+            }
+            for (int k = 0; k < 4; k++) {
+                switch (faces[k].which) {
+                    case 0:  draw_front(); break;
+                    case 1:  draw_back();  break;
+                    case 2:  draw_side(face_l, true);  break;
+                    default: draw_side(face_r, false); break;
+                }
+            }
 
             // Reflection. Mirroring only the front face left the box floating on
             // a reflection narrower than itself; every face the box is built from
@@ -5820,9 +8409,9 @@ namespace sl::menu::ui {
                 float m[4][3], face[4][3];
                 // Sides first, then the face you are actually looking at, so the
                 // reflection stacks the same way the box does.
-                side_face(gFlowHalfW, face);  mirror(face, m);
+                side_face(half_w, face);  mirror(face, m);
                 m_gfx->DrawQuad3D(nullptr, m, blank, 70, 0, true, 4);
-                side_face(-gFlowHalfW, face); mirror(face, m);
+                side_face(-half_w, face); mirror(face, m);
                 m_gfx->DrawQuad3D(nullptr, m, blank, 70, 0, true, 4);
 
                 mirror(showing_back ? back : corners, m);
@@ -5844,36 +8433,53 @@ namespace sl::menu::ui {
         // Loading ahead moves that work to frames with nothing else to do, and
         // the per-frame cap stops the filling itself becoming a hitch.
         {
-            const int keep_lo = std::max(0, first - kFlowPreload);
-            const int keep_hi = std::min(n - 1, last + kFlowPreload);
+            // The drawn range is virtual and may run past either end, so the
+            // keep window has to be folded the same way the draw loop folds it.
+            // Clamping it to [0, n-1] instead meant that once the row wrapped,
+            // the boxes actually on screen had indices outside the window: they
+            // were evicted and re-decoded every single frame, which is the
+            // four-frames-a-second you hit on the second lap.
+            //
+            // The membership test is a set rather than a scan per cached entry.
+            // The old nested loop was the window size times the cache size every
+            // frame, and both grew with the preload margin.
+            const int lo = first - kFlowPreload;
+            const int hi = last  + kFlowPreload;
+
+            auto row_item = [&](int i) -> const MenuItem * {
+                const int idx = m_wrap_nav ? FlowWrap(i, n) : i;
+                if (idx < 0 || idx >= n) return nullptr;
+                return &m_items[m_flow_items[idx]];
+            };
+
+            std::unordered_set<u64> keep_ids;
+            keep_ids.reserve((size_t)(hi - lo + 1) * 2);
+            for (int i = lo; i <= hi; i++)
+                if (const MenuItem *it2 = row_item(i)) keep_ids.insert(it2->app_id);
 
             int budget = m_cover_budget;
-            for (int i = keep_lo; i <= keep_hi && budget > 0; i++) {
-                const MenuItem &pit = m_items[m_flow_items[i]];
-                if (pit.kind != ItemKind::Game || pit.app_id == 0) continue;
-                if (m_covers.count(pit.app_id)) continue;   // cached, hit or miss
-                FlowCover(pit);
+            for (int i = lo; i <= hi && budget > 0; i++) {
+                const MenuItem *pit = row_item(i);
+                if (!pit || pit->kind != ItemKind::Game || pit->app_id == 0) continue;
+                if (m_covers.count(pit->app_id)) continue;   // cached, hit or miss
+                FlowCover(*pit);
                 budget--;
             }
             for (auto it2 = m_covers.begin(); it2 != m_covers.end(); ) {
-                bool keep = false;
-                for (int i = keep_lo; i <= keep_hi && !keep; i++)
-                    keep = (m_items[m_flow_items[i]].app_id == it2->first);
-                if (keep) { ++it2; continue; }
+                if (keep_ids.count(it2->first)) { ++it2; continue; }
                 if (it2->second) m_gfx->FreeImage(it2->second);
                 it2 = m_covers.erase(it2);
             }
+
             // Back panels are held a couple either side of the selection rather
             // than for the selected box alone. Only the selected box loads them,
             // but dropping them the instant the cursor moves meant stepping one
             // across and back re-decoded a megabyte each time.
-            const int shot_lo = std::max(0, sel - 2);
-            const int shot_hi = std::min(n - 1, sel + 2);
+            std::unordered_set<u64> keep_shots;
+            for (int i = sel - 2; i <= sel + 2; i++)
+                if (const MenuItem *it2 = row_item(i)) keep_shots.insert(it2->app_id);
             for (auto it2 = m_shots.begin(); it2 != m_shots.end(); ) {
-                bool keep = false;
-                for (int i = shot_lo; i <= shot_hi && !keep; i++)
-                    keep = (m_items[m_flow_items[i]].app_id == it2->first);
-                if (keep) { ++it2; continue; }
+                if (keep_shots.count(it2->first)) { ++it2; continue; }
                 if (it2->second.a) m_gfx->FreeImage(it2->second.a);
                 if (it2->second.b) m_gfx->FreeImage(it2->second.b);
                 it2 = m_shots.erase(it2);
@@ -5887,14 +8493,33 @@ namespace sl::menu::ui {
             // Fetch art for whatever you have actually stopped on. Gating on the
             // row being settled means scrolling through a big library queues one
             // lookup, not one per game you passed.
-            if (m_flow_scroll == (float)sel && cur.kind == ItemKind::Game
-                    && !FlowCover(cur))
+            //
+            // "No cover" has to mean a cover that was looked for and not found,
+            // not merely one that has not been decoded yet. FlowCover also
+            // returns null when the per-frame decode budget is spent, and
+            // treating that as missing sent a SteamGridDB search for a title
+            // whose art was already sitting on the card - once per launch,
+            // which is what filled covers.log with the same game over and over.
+            const bool cover_missing = m_covers.count(cur.app_id) &&
+                                       m_covers[cur.app_id] == nullptr;
+            // Same rule for the back panels: "no screenshots" means the decoder
+            // looked and found nothing, not that it has yet to run. Without this
+            // a title whose cover was already on the card never fetched any,
+            // because the fetch was only ever triggered by a missing cover.
+            const auto sit = m_shots.find(cur.app_id);
+            const bool shots_missing = (sit != m_shots.end()) &&
+                                       !sit->second.a && !sit->second.b;
+            if (flow_settled && cur.kind == ItemKind::Game &&
+                ((!FlowCover(cur) && cover_missing) || shots_missing))
                 StartCoverFetch(cur.app_id, cur.name);
             const int ty = H - 132;
             m_gfx->TextCentered(FontSize::Large, W / 2, ty, t.title,
                                 Ellipsize(cur.name, W - 160, FontSize::Large).c_str());
             char pos[32];
             snprintf(pos, sizeof(pos), "%d / %d", sel + 1, n);
+            // Position counters are optional; blanking the string here keeps
+            // the layout arithmetic below untouched.
+            if (!m_show_counter) pos[0] = '\0';
             m_gfx->TextCentered(FontSize::Small, W / 2,
                                 ty + m_gfx->LineHeight(FontSize::Large) + 4, t.dim, pos);
         }
@@ -5913,6 +8538,8 @@ namespace sl::menu::ui {
             // Both of these only mean anything to the coverflow.
             if ((i == TH_SgdbKey || i == TH_FlowSet) && m_ui_mode != UiMode::Flow) continue;
             if (i == TH_ShelfVert && m_ui_mode != UiMode::Shelf) continue;
+            // The wall shape is only meaningful where there is a wall.
+            if ((i == TH_TileCols || i == TH_TileRows) && m_ui_mode != UiMode::Grid) continue;
             v.push_back(i);
         }
         return v;
@@ -5943,7 +8570,9 @@ namespace sl::menu::ui {
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("Vertical covers"), T("SteamGridDB key"), T("Flow layout"),
+            T("Icon pack"), T("Vertical covers"), T("Columns"), T("Rows"),
+            T("SteamGridDB key"), T("Flow layout"),
+            T("Wrap around"), T("Button hints"), T("Position counter"),
             T("Fonts"), T("Language"),
             T("Music"), T("Widgets"),
             T("Menu entries"),
@@ -5958,6 +8587,16 @@ namespace sl::menu::ui {
                                   m_icon_pack_idx <= (int)m_icon_packs.size())
                                ? m_icon_packs[m_icon_pack_idx - 1] : T("Built-in");
         values[TH_ShelfVert]   = m_shelf_vertical ? T("On") : T("Off");
+        {
+            char c[16];
+            snprintf(c, sizeof(c), "%d", TileCols());
+            values[TH_TileCols] = c;
+            snprintf(c, sizeof(c), "%d", TileRowsVis());
+            values[TH_TileRows] = c;
+        }
+        values[TH_Wrap]        = m_wrap_nav ? T("On") : T("Off");
+        values[TH_Hints]       = m_show_hints ? T("On") : T("Off");
+        values[TH_Counter]     = m_show_counter ? T("On") : T("Off");
         values[TH_SgdbKey]     = SgdbKeyPresent() ? T("Set") : T("Not set");
         values[TH_Language]    = kLangs[m_lang_idx].name
                                ? kLangs[m_lang_idx].name : T("Automatic");
@@ -6394,6 +9033,9 @@ namespace sl::menu::ui {
 
         char pos[32];
         snprintf(pos, sizeof(pos), "%d/%d", m_album_cursor + 1, n);
+        // Position counters are optional; blanking the string here keeps
+        // the layout arithmetic below untouched.
+        if (!m_show_counter) pos[0] = '\0';
         const int pwid = m_gfx->TextWidth(FontSize::Small, pos);
         m_gfx->Text(FontSize::Small, W - 8 - pwid,
                     H - 8 - m_gfx->LineHeight(FontSize::Small), t.dim, pos);
@@ -6457,6 +9099,9 @@ namespace sl::menu::ui {
         }
         char pos[28];
         snprintf(pos, sizeof(pos), "%d / %d", m_hb_cursor + 1, (int)m_hb.size());
+        // Position counters are optional; blanking the string here keeps
+        // the layout arithmetic below untouched.
+        if (!m_show_counter) pos[0] = '\0';
         m_gfx->Text(FontSize::Small, gfx::Gfx::Width - 150, 74, t.dim, pos);
         DrawHint(m_hb_donor ? "A: Run as app   Y: Applet mode   X: Pin   B: Back"
                             : "A: Launch   X: Pin to menu   B: Back");

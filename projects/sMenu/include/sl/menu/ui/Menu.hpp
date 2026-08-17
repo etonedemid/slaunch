@@ -36,6 +36,14 @@ namespace sl::menu::ui {
         // so the Media category header can have artwork of its own instead of
         // borrowing the Album entry's.
         MediaCat,
+        // Network status / Wi-Fi. Appended, like every kind before it: these are
+        // persisted by number in the hidden-entries setting as s<n>.
+        Wifi,
+        // A tile on the wall that hosts one of the Lua home widgets. Unlike every
+        // other kind this one is not built in: the user adds it, and which ones
+        // exist comes from the tile config. Its `name` is the widget's name,
+        // which is also what ItemKey uses to tie the two together.
+        WidgetTile,
     };
 
     // Horizontal alignment of the main list text.
@@ -156,10 +164,19 @@ namespace sl::menu::ui {
         // loop should then let the applet exit so qlaunch can show swkbd.
         bool WantsExit() const { return m_want_exit; }
 
+        // An action the menu deferred rather than returning from OnButton, and
+        // which is now ready. The launch bounce needs this: dispatching a launch
+        // exits the applet immediately, so there would be no frames left to
+        // animate in. The host polls this after Render and dispatches it exactly
+        // as it dispatches an OnButton result. Returns None when there is
+        // nothing waiting, and clears itself when it returns anything else.
+        Action TakePendingAction(u64 &out_app_id);
+
     private:
         enum class Screen { Oobe, Welcome, Main, Theming, Themes, ThemeEditor, ColorPicker,
                             Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew, About,
-                            SysEntries, Power, Payloads, Album, FlowMenu, FlowSettings };
+                            SysEntries, Power, Payloads, Album, FlowMenu, FlowSettings,
+                            Network, CoverPicker };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower };
 
         void RebuildItems();
@@ -176,6 +193,24 @@ namespace sl::menu::ui {
         Action OnButtonTheming(Btn b);
         Action OnButtonAbout(Btn b);
         void   DrawAbout();
+
+        // ---- network screen -------------------------------------------------
+        // nifm answers over IPC, so the values are polled on a timer and cached
+        // rather than read per frame.
+        Action OnButtonNetwork(Btn b);
+        void   DrawNetwork();
+        void   RefreshNetwork(bool force);
+        struct NetStatus {
+            bool        connected = false;
+            bool        ethernet  = false;
+            bool        wifi_on   = true;
+            int         strength  = 0;      // 0-3
+            std::string name;               // SSID / profile name
+            std::string ip;
+        };
+        NetStatus m_net{};
+        int       m_net_cursor = 0;
+        u64       m_net_tick   = 0;
 
         // ---- power screen ---------------------------------------------------
         // Replaces the old "+ sleeps immediately": sleep, restart, power off, and
@@ -279,6 +314,79 @@ namespace sl::menu::ui {
         // straightforward way to run the menu out of memory.
         Action OnButtonAlbum(Btn b);
         void   OpenAlbumViewer();         // scan (lazily) + show the browser
+        // ---- tiles (UiMode::Grid) -------------------------------------------
+        // A Windows 8 / Windows Phone start screen: flat tiles on a fixed unit
+        // grid, some of them live. Games are one unit; the Album and Music tiles
+        // are two wide and show content rather than an icon.
+        struct TileRect { int item; int x, y, w, h; };
+        void BuildTiles(std::vector<TileRect> &out) const;
+        int  TileNeighbour(int dir) const;   // 0 left, 1 right, 2 up, 3 down
+        int  TileRowOf(int item) const;      // packed row an entry landed on
+        int  TileRowCount() const;
+        int  TileFirstInRow(int row) const;  // leftmost entry on a row
+        int  TileMaxScroll() const;          // rows the view can travel
+
+        // Wall shape. The counts are the user's; everything else is derived from
+        // them so the tiles always square up inside the band.
+        int  TileCols()    const { return m_tile_cols; }
+        int  TileRowsVis() const { return m_tile_rows; }
+        int  TileUnit()    const;    // one square unit, sized to fit
+        int  TilePitch()   const;
+        int  TileWideW()   const;    // two units and the gap between them
+        int  TileLeft()    const;    // x of column 0
+        int  TileTop()     const;    // y of row 0 at scroll 0
+        int  TileRowsOf(int h) const;
+        void SetTileCols(int n);
+        void SetTileRows(int n);
+        int  m_tile_cols = 9;
+        int  m_tile_rows = 4;
+
+        // ---- per-entry tile customisation -----------------------------------
+        // Size and colour, keyed by ItemKey and persisted to config/tiles.txt.
+        // A key with no matching entry anywhere else is also how a widget tile
+        // is remembered - the config is the only record that it exists.
+        struct TileCfg {
+            int       w = 0, h = 0;      // units; 0 means "use the kind's default"
+            bool      has_color = false;
+            SDL_Color color {};
+        };
+        std::unordered_map<std::string, TileCfg> m_tilecfg;
+        void      LoadTileCfg();
+        void      SaveTileCfg();
+        TileCfg  &TileCfgFor(const std::string &key);
+        void      TileSpan(const MenuItem &it, int &w, int &h) const;
+        void      CycleTileSize(const std::string &key);
+        const char *TileSizeLabel(const std::string &key) const;
+
+        // Displayed colours, eased toward the configured ones each frame so a
+        // recolour arrives as a fade rather than a jump.
+        std::unordered_map<std::string, SDL_Color> m_tile_shown;
+        SDL_Color TileShownColor(const std::string &key, SDL_Color target);
+
+        // Widget tiles render through a scratch target at the width widgets are
+        // authored for, then scale into whatever box they were given. One
+        // texture serves every widget tile, because each is drawn and blitted
+        // before the next one starts.
+        SDL_Texture *m_tile_wscratch = nullptr;
+        void FreeWidgetTileTextures();
+        int  WidgetIndexByName(const std::string &n);
+        void DrawWidgetTile(const TileRect &r, const MenuItem &it, Uint8 a);
+        void AddWidgetTile(int widget_index);
+        // By value: it rebuilds the entry list, which is where the caller's
+        // reference would have been living.
+        void RemoveWidgetTile(std::string name);
+        void DrawTileFace(const TileRect &r, const MenuItem &it, bool sel, Uint8 a);
+        SDL_Color TileColor(int idx) const;  // theme accent, hue-shifted per tile
+        void UpdateLiveAlbum();              // advance the cycling picture tile
+
+        // The picture tile holds one image and cross-fades to the next, so at
+        // most two are ever decoded - a tile is 304x148, so this is cheap.
+        SDL_Texture *m_tile_pic      = nullptr;
+        SDL_Texture *m_tile_pic_next = nullptr;
+        int          m_tile_pic_idx  = -1;
+        u64          m_tile_pic_tick = 0;
+        float        m_tile_pic_fade = 1.0f;
+
         void   ScanAlbum();               // fill m_album from the SD
         void   EnsureAlbumTexture();      // decode the selected shot, free the old
         void   FreeAlbumTexture();
@@ -319,7 +427,10 @@ namespace sl::menu::ui {
         void ScanIconPacks();       // discover packs under slaunch/icon_packs
         void LoadIconPackSetting(); // read saved icon pack selection
         void SaveIconPackSetting(); // persist icon pack selection
-        void OpenColorPicker(SDL_Color *target);
+        // back is where B/A return to, and preview drives the theme live-refresh
+        // that only makes sense while editing a theme's own colours.
+        void OpenColorPicker(SDL_Color *target, Screen back = Screen::ThemeEditor,
+                             bool preview = true);
         void CycleBackground(int dir);  // Gradient <-> Ribbon
         void CycleWallpaper(int dir);    // cycle photo overlay independently
 
@@ -336,7 +447,8 @@ namespace sl::menu::ui {
         std::string ItemKey(const MenuItem &it) const; // stable per-entry order key
         void SelectByKey(const std::string &key);      // move cursor to that entry
         bool SelectApp(u64 app_id); // move cursor to the item for app_id; false if absent
-        void BuildOptions();        // populate the X-menu for the current selection
+        void BuildOptions();
+        int  UnplacedWidgets();   // widgets not already on the wall        // populate the X-menu for the current selection
 
         // Appearance settings (text alignment) + custom game names.
         void LoadSettings();
@@ -371,9 +483,11 @@ namespace sl::menu::ui {
                           int cursor, float &scroll_pos);
         // XMB-styled variant of the above, used for every sub-screen while the
         // main layout is XMB so the whole menu reads as one thing.
+        // alpha scales the whole column, so a caller sliding a category row can
+        // cross-fade the list under it the way the main screen does.
         void DrawCarouselXmb(const std::vector<std::string> &labels,
                              const std::vector<std::string> &values,
-                             int cursor, float &scroll_pos);
+                             int cursor, float &scroll_pos, Uint8 alpha = 255);
         void DrawOobe();
         void DrawMain();
         void DrawMainList();        // original text carousel
@@ -388,6 +502,21 @@ namespace sl::menu::ui {
 
         // Animated position of the flow row, in item units.
         float m_flow_scroll = 0.0f;
+        // Momentum, shared by every layout.
+        //
+        // Each layout keeps its scroll position in a different member, so rather
+        // than repeating the same fling five times, ActiveAxis() hands back
+        // whichever one is live and the fling works through that.
+        // wrap: this axis is endless, so a position past either end folds back
+        // into the list instead of stopping there.
+        struct ScrollAxis { float *pos = nullptr; int max = 0; bool wrap = false; };
+        ScrollAxis ActiveAxis();
+        void  SyncCursorFromScroll();   // scroll -> cursor, per layout
+        void  StepFling();              // advance and decay, once a frame
+        bool  ScrollBusy() const;       // finger down, or still coasting
+        float m_fling_vel  = 0.0f;      // items per second
+        u64   m_fling_tick = 0;         // last frame, for the fling step
+        u64   m_drag_tick  = 0;         // last drag sample, for measuring speed
         // Camera yaw (look left/right) and dolly (stick Y pulls the row closer
         // or pushes it away, which reads as a field-of-view change).
         float m_flow_yaw    = 0.0f;
@@ -413,7 +542,38 @@ namespace sl::menu::ui {
         // title with no cover costs one failed open rather than one per frame.
         std::unordered_map<u64, SDL_Texture *> m_covers;
         SDL_Texture *FlowCover(const MenuItem &it);
-        int m_cover_budget = 3;   // cover decodes left this frame
+        int m_cover_budget  = 6;  // cached covers to upload this frame
+        // Full decodes are in a separate, much smaller budget. A cache hit is a
+        // read; a miss is a 600x900 PNG inflate. Sharing one budget meant that
+        // while the cache was being built a frame did six decodes and took most
+        // of a second, which is the hang - the work is the same either way, but
+        // spread thinly the menu keeps drawing and can say what it is doing.
+        int m_decode_budget = 2;
+        // Set every time a cover is decoded, so the notice shows only while the
+        // cache is actually being built and disappears on its own after.
+        u64 m_cache_msg_tick = 0;
+        int m_cache_built    = 0;
+
+        // ---- background hero decode -----------------------------------------
+        // The two panels on the back of a case are heroes: 1920x620 at source,
+        // two per title, and only ever seen if you turn a box round. That makes
+        // them the least important thing the shelf draws and by some way the
+        // dearest to decode, so they are decoded off the main thread and simply
+        // appear when they are ready.
+        //
+        // Only the decode runs on the worker. Creating the texture needs the
+        // renderer, so the surfaces come back and the main thread uploads them.
+        Thread            m_shot_thread {};
+        std::atomic<bool> m_shot_done { false };
+        bool              m_shot_running = false;
+        u64               m_shot_job_id  = 0;
+        SDL_Surface      *m_shot_surf_a  = nullptr;
+        SDL_Surface      *m_shot_surf_b  = nullptr;
+        char              m_shot_path_a[96] = {};
+        char              m_shot_path_b[96] = {};
+        void   StartShotDecode(u64 app_id);
+        void   PollShotDecode();
+        static void ShotDecodeTrampoline(void *self);
         // The two panels printed across the top of a case's back. Cached the
         // same way as covers, with a null entry remembered so a title without
         // them costs one failed open rather than one per frame.
@@ -442,9 +602,111 @@ namespace sl::menu::ui {
         u64         m_cover_id   = 0;   // title being fetched
         std::string m_cover_name;       // its name, for the search
         bool        m_cover_ok   = false;
+        bool        m_shots_ok   = false;   // screenshots landed this fetch
         // Titles already attempted this session, so a miss is not retried on
         // every cursor move.
         std::unordered_map<u64, bool> m_cover_tried;
+
+        // Real screenshots come from Steam's store API, which needs no key at
+        // all: search the name for an appid, then ask for that app's
+        // screenshots. SteamGridDB has none of its own - grids, heroes, logos
+        // and icons is its whole catalogue - so the panels on the back of a case
+        // were "heroes", which are wide key art rather than anything from the
+        // game.
+        //
+        // Steam does not carry Nintendo's own titles, so heroes remain the
+        // fallback and those keep the art they had.
+        //
+        // One failed request turns the source off for the rest of the session:
+        // something unreachable rather than merely empty would otherwise cost
+        // the full timeout on every title before falling back. RAWG was tried
+        // first and had to be dropped for exactly that - it stopped answering
+        // altogether.
+        bool m_steam_dead = false;
+        bool        RawgKeyPresent();
+
+        // ---- launch animation -----------------------------------------------
+        // A short bounce on the chosen case before Flow hands off, so launching
+        // reads as a deliberate act rather than the picture vanishing.
+        // Appear fade, the mirror of the launch fade. The menu comes up over
+        // whatever was on screen - usually the game you just left - so starting
+        // black and lifting reads as the menu arriving rather than as a cut. It
+        // also covers the first few frames, which are exactly the ones still
+        // filling in icons and box art.
+        u64    m_appear_tick   = 0;             // set on the first frame drawn
+        // Dissolving in from the game's own last frame was tried and does not
+        // work: capsscCaptureRawImageWithTimeout on ViLayerStack_LastFrame -
+        // the stack the system keeps for exactly this - is refused from a
+        // library applet, consistently and in 2ms. It is a system-applet
+        // privilege, which sSystem has and the menu does not. Routing it through
+        // the daemon would mean moving 3.7MB across, and the only channel is a
+        // file on the card, which costs more than the effect is worth. So the
+        // fade comes up from black.
+        // Progress 0..1 rather than a start time. The first frames after a HOME
+        // press are the slowest the menu ever draws - cache building, icons -
+        // and a purely time-based fade simply elapsed between frame one and
+        // frame two, so the whole thing came out as a single black frame and a
+        // cut. Advancing this per frame, capped, guarantees it is actually seen.
+        float m_appear_p    = 0.0f;
+        u64   m_appear_prev = 0;
+
+
+        u64    m_launch_tick   = 0;             // start tick; 0 when idle
+        // The action has been handed to the host, but the animation state is
+        // deliberately kept so the screen stays black until the applet exits.
+        bool   m_launch_fired  = false;
+        u64    m_launch_id     = 0;
+        Action m_launch_action = Action::None;
+        Action m_pending_action = Action::None; // waiting for the host to take it
+        u64    m_pending_id     = 0;
+        void   StartLaunchAnim(Action a, u64 app_id);
+        // Progress 0..1, or -1 when no animation is running.
+        float  LaunchAnimT() const;
+
+        // ---- cover picker ---------------------------------------------------
+        // Name matching picks one grid out of however many SteamGridDB holds,
+        // and it is often not the one you would have chosen. This lists them all
+        // and lets you take the one you want.
+        //
+        // Only the atomics cross the thread boundary. The url vectors are built
+        // in full before m_pick_have is first released, and are not touched
+        // afterwards, so reading them behind an acquire load of that counter is
+        // safe without a lock.
+        enum class PickState { Idle, Searching, Listing, Ready,
+                               NoMatch, NoArt, Failed, NoKey, BadKey,
+                               Applying, Applied };
+        std::atomic<int>  m_pick_state { (int)PickState::Idle };
+        std::atomic<int>  m_pick_have  { 0 };   // thumbnails on disk so far
+        std::atomic<int>  m_pick_total { 0 };   // grids the search turned up
+        std::atomic<bool> m_pick_done  { false };
+        Thread            m_pick_thread {};
+        bool              m_pick_running = false;
+        bool              m_pick_apply   = false;  // worker is fetching the choice
+        // Choosing must not wait for the listing to finish. The thumbnails are
+        // downloaded one at a time, so insisting the worker be idle before A did
+        // anything meant sitting through every remaining download - about ten
+        // seconds - to take a cover already visible on screen. Pressing A now
+        // asks the download loop to stop where it is and remembers the choice
+        // until the worker has been joined.
+        std::atomic<bool> m_pick_abort { false };
+        bool              m_pick_want_apply = false;
+        int               m_pick_choice  = 0;
+        u64               m_pick_id      = 0;
+        std::string       m_pick_name;
+        std::vector<std::string>   m_pick_urls;    // full size
+        std::vector<std::string>   m_pick_thumbs;  // preview
+        std::vector<SDL_Texture *> m_pick_tex;
+        int   m_pick_cursor = 0;
+        float m_pick_scroll = 0.0f;               // animated row offset
+
+        void   EnterCoverPicker();
+        void   LeaveCoverPicker();
+        void   PollCoverPicker();
+        void   StartPickApply();   // spawn the worker that downloads the choice
+        static void CoverPickTrampoline(void *self);
+        Action OnButtonCoverPicker(Btn b);
+        void   DrawCoverPicker();
+        int    CoverPickAt(int x, int y) const;   // touch: cell under a point, or -1
         // Sort mode -> short label for the shelf header / options menu.
         const char *SortLabel() const;
         void DrawMainEmpty();       // "Loading..." / "No apps found" placeholder
@@ -452,7 +714,8 @@ namespace sl::menu::ui {
         // themed placeholder with the name. Used by the Line and Grid modes.
         void DrawAppTile(const MenuItem &it, int x, int y, int size,
                          bool selected, Uint8 alpha);
-        int  GridColumns() const { return 8; }  // tiles per row in Grid mode
+        // Packed-layout queries, all answered from BuildTiles so scrolling,
+        // touch and navigation can never disagree with what was drawn.
         // Item index under a touch point (or -1), for touch-to-select/launch.
         int  MainItemAt(int x, int y) const;   // dispatches by UI mode
         int  GridItemAt(int x, int y) const;
@@ -533,6 +796,14 @@ namespace sl::menu::ui {
         // Shelf draws portrait 2:3 tiles instead of square ones, using the
         // fetched box art when a game has it. Shares the cover cache with Flow.
         bool      m_shelf_vertical = false;
+        // Whether moving past either end of the list loops round to the other.
+        // On by default, which is how every layout has always behaved.
+        bool      m_wrap_nav = true;
+        // Screen furniture, both on by default. Hints are the control legend
+        // along the bottom; the counter is the "3 / 47" position readout.
+        // Status messages ("Saved", "Pinned") are not hints and always show.
+        bool      m_show_hints   = true;
+        bool      m_show_counter = true;
         int  ShelfTileW() const { return m_shelf_vertical ? 152 : 208; }
         int  ShelfTileH() const { return m_shelf_vertical ? 228 : 208; }
         int  ShelfPitch() const { return ShelfTileW() + kShelfGapPx; }
@@ -603,8 +874,14 @@ namespace sl::menu::ui {
         dbg::Counters DebugCounters() const;   // cache/entry counts for the overlay
 
         // Options overlay for the selected item.
-        struct OptionEntry { std::string label; int action; };
+        // arg carries which thing the action applies to when the label alone is
+        // not enough - the "Add widget" entries, one per unplaced widget.
+        struct OptionEntry { std::string label; int action; int arg = 0; };
         std::vector<OptionEntry> m_options;
+        // Which submenu the overlay is showing instead of the entry's own
+        // options. B steps back out of one instead of closing the overlay.
+        enum OptSub { Sub_None = 0, Sub_Widgets };
+        int m_options_sub = Sub_None;
         bool m_options_open   = false;
         int  m_options_cursor = 0;
 
@@ -657,6 +934,9 @@ namespace sl::menu::ui {
         float m_edit_scroll  = 0.0f; // animated scroll position for the editor
         int m_editing_theme  = -1; // global index of the custom theme being edited
         int m_oobe_step      = 0;
+        // Animated position of the setup step row, which is drawn as an XMB
+        // category row; it lags m_oobe_step so advancing a step slides.
+        float m_oobe_scroll  = 0.0f;
 
         // Music + Widgets submenus
         int m_music_cursor  = 0;   // cursor in the music submenu
@@ -689,6 +969,9 @@ namespace sl::menu::ui {
         SDL_Color *m_pick_target   = nullptr;    // Color being edited
         SDL_Color  m_pick_original = {};         // for cancel/revert
         int        m_pick_channel  = 0;          // 0=R 1=G 2=B
+        Screen     m_pick_return   = Screen::ThemeEditor;
+        bool       m_pick_preview  = true;       // re-select the theme on each nudge
+        bool       m_pick_tile     = false;      // editing a tile colour, so persist it
 
         // Fonts: names[0]/paths[0] = "Default (System)".
         std::vector<std::string> m_font_names;

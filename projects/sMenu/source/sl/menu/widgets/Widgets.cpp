@@ -44,8 +44,13 @@ namespace sl::menu::widgets {
 
     void Widgets::ThreadLoop() {
         while (m_run) {
+            // Ticked if anything is showing it. Enabled is the user's choice for
+            // the floating home-screen copy; tiled means a wall tile is drawing
+            // it, which is just as good a reason to keep its data fresh - and it
+            // must NOT imply the other, or putting a widget on the wall would
+            // switch it on across every layout.
             for (size_t i = 0; i < m_widgets.size(); i++)
-                if (IsEnabled((int)i)) m_widgets[i]->Update();   // disabled = not ticked
+                if (IsEnabled((int)i) || IsTiled((int)i)) m_widgets[i]->Update();
             svcSleepThread(166'000'000ULL); // ~6 Hz
         }
     }
@@ -66,10 +71,13 @@ namespace sl::menu::widgets {
         closedir(d);
     }
 
-    void Widgets::Render(gfx::Gfx *gfx, const ui::Theme &t) {
+    void Widgets::Render(gfx::Gfx *gfx, const ui::Theme &t, bool skip_tiled) {
         for (size_t i = 0; i < m_widgets.size(); i++) {
             Box &b = m_box[i];
             if (!IsEnabled((int)i)) { b.h = 0; continue; }   // off = not drawn / not grabbable
+            // Owned by a tile this frame: h = 0 also takes it out of the
+            // drag hit-test, which is right - you move it by moving the tile.
+            if (skip_tiled && IsTiled((int)i)) { b.h = 0; continue; }
             int ynew = m_widgets[i]->Render(gfx, t, b.x, b.y, b.w);
             b.h = std::max(0, ynew - b.y);   // measured for hit-testing
         }
@@ -150,6 +158,7 @@ namespace sl::menu::widgets {
         // disabled, so nothing shows on the home screen until the user turns it on
         // in Theming > Widgets. Saved state in widget_enabled.txt overrides this.
         m_enabled.assign(m_widgets.size(), 0);   // default: off
+        m_tiled.assign(m_widgets.size(), 0);
         FILE *fp = fopen(kEnPath, "r");
         if (!fp) return;
         char line[128];

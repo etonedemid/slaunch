@@ -33,7 +33,12 @@ namespace sl::menu::widgets {
         virtual ~IWidget() = default;
 
         virtual void Update() = 0;
-        virtual int  Render(gfx::Gfx* gfx, const ui::Theme& t, int x, int y, int w) = 0;
+        // box_h is the height the caller wants filled, or 0 for "as tall as your
+        // content needs" - which is what the floating home screen always asks
+        // for. A widget is free to ignore it; the tile wall detects that from
+        // the height it gets back and falls back to scaling the result.
+        virtual int  Render(gfx::Gfx* gfx, const ui::Theme& t, int x, int y, int w,
+                            int box_h = 0) = 0;
 
         // Configuration surface (default: none). Types are "string" or "bool".
         virtual std::string Name() const { return "Widget"; }
@@ -47,7 +52,10 @@ namespace sl::menu::widgets {
     // A widget whose behaviour lives in a Lua script on the SD card.
     //
     //   update()  - runs on the widget fetch thread; may block on the network.
-    //   render(x,y,w) -> height  - runs on the main thread; draw only.
+    //   render(x,y,w,h) -> height  - runs on the main thread; draw only.
+    //     h is the height to fill, or 0 for "whatever your content needs". A
+    //     script that wants to work as a tile should draw its frame at w x h
+    //     and space its content across it; one that ignores h still works.
     //
     // Configuration: a script may define a `widget` table describing itself, e.g.
     //   widget = {
@@ -65,6 +73,7 @@ namespace sl::menu::widgets {
     //   Drawing (render only):
     //     gfx_fill_rect(x,y,w,h, r,g,b,a)
     //     gfx_text(x,y,text) / gfx_text_ex(size,x,y,text, r,g,b) / gfx_text_width(text)
+    //     gfx_text_width_ex(size,text) / gfx_text_height(size)
     //     gfx_image(path,x,y,w,h) -> bool
     //     theme_color(name) -> r,g,b   ("bg" "fg" "dim" "accent" "title")
     //     screen_width() / screen_height()
@@ -225,6 +234,23 @@ namespace sl::menu::widgets {
             m_lua.set_function("gfx_text_width", [this](const std::string& text) {
                 if (!m_currentGfx) return 0;
                 return m_currentGfx->TextWidth(gfx::FontSize::Small, text.c_str());
+            });
+
+            // Measuring at a chosen size, which a script needs as soon as it
+            // picks its own sizes to fill a box rather than drawing at one.
+            auto clamp_size = [](int s) {
+                if (s < 0) s = 0;
+                if (s > (int)gfx::FontSize::Title) s = (int)gfx::FontSize::Title;
+                return (gfx::FontSize)s;
+            };
+            m_lua.set_function("gfx_text_width_ex", [this, clamp_size](int size,
+                                                     const std::string& text) {
+                if (!m_currentGfx) return 0;
+                return m_currentGfx->TextWidth(clamp_size(size), text.c_str());
+            });
+            m_lua.set_function("gfx_text_height", [this, clamp_size](int size) {
+                if (!m_currentGfx) return 0;
+                return m_currentGfx->LineHeight(clamp_size(size));
             });
 
             m_lua.set_function("theme_color", [this](const std::string& name) {
@@ -406,7 +432,8 @@ namespace sl::menu::widgets {
             (void)result; // errors land in result (valid()==false); ignore a bad tick
         }
 
-        int Render(gfx::Gfx* gfx, const ui::Theme& t, int x, int y, int w) override {
+        int Render(gfx::Gfx* gfx, const ui::Theme& t, int x, int y, int w,
+                   int box_h = 0) override {
             SDL_Renderer* ren = gfx->Renderer();
 
             // Never block the render thread: if update() holds the lock (it may be
@@ -448,7 +475,7 @@ namespace sl::menu::widgets {
                 SDL_SetRenderDrawColor(ren, 0, 0, 0, 0);
                 SDL_RenderClear(ren);                       // transparent
 
-                auto result = m_luaRender(0, 0, w);
+                auto result = m_luaRender(0, 0, w, box_h);
 
                 SDL_SetRenderTarget(ren, prev);
 
@@ -466,7 +493,7 @@ namespace sl::menu::widgets {
                 newY = y + h;
             } else if (m_luaRender.valid()) {
                 // No render target available: draw straight to the screen (old path).
-                auto result = m_luaRender(x, y, w);
+                auto result = m_luaRender(x, y, w, box_h);
                 if (result.valid()) { sol::optional<int> h = result; if (h) newY = y + *h; }
             }
 

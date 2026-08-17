@@ -25,8 +25,9 @@ namespace sl::menu::gfx {
         // SDL_WINDOW_OPENGL makes SDL load the GLES/EGL library before creating
         // the window; the switch port's CreateWindow requires egl_data to exist
         // (otherwise "EGL not initialized" -> failure).
-        m_window = SDL_CreateWindow("sLaunch", SDL_WINDOWPOS_CENTERED,
-                                    SDL_WINDOWPOS_CENTERED, Width, Height,
+        m_window = SDL_CreateWindow(m_title, SDL_WINDOWPOS_CENTERED,
+                                    SDL_WINDOWPOS_CENTERED,
+                                    Width * m_ss, Height * m_ss,
                                     SDL_WINDOW_OPENGL);
         if (!m_window) { GfxLog("SDL_CreateWindow"); fatalThrow(MAKERESULT(360, 32)); }
 
@@ -34,6 +35,14 @@ namespace sl::menu::gfx {
             m_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
         if (!m_renderer) fatalThrow(MAKERESULT(360, 33)); // CreateRenderer (GPU)
         SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
+
+        // Everything the menu draws is in 1280x720 coordinates. At a
+        // supersample factor above 1 the output surface is larger, and this is
+        // what keeps every existing coordinate correct without touching a
+        // single call site. The scale is an exact integer, so the mapping lands
+        // on whole pixels rather than blurring across them.
+        if (m_ss != 1)
+            SDL_RenderSetLogicalSize(m_renderer, Width, Height);
 
         if (TTF_Init() != 0) fatalThrow(MAKERESULT(360, 34)); // TTF_Init
         IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
@@ -63,7 +72,7 @@ namespace sl::menu::gfx {
         for (int i = 0; i < (int)FontSize::Count; i++) {
             // Fresh RWops per open; the font memory is owned by pl and stays valid.
             SDL_RWops *rw = SDL_RWFromConstMem(font.address, font.size);
-            m_sysFonts[i] = TTF_OpenFontRW(rw, 1 /*freesrc*/, kPtSize[i]);
+            m_sysFonts[i] = TTF_OpenFontRW(rw, 1 /*freesrc*/, kPtSize[i] * m_ss);
             if (!m_sysFonts[i]) fatalThrow(MAKERESULT(360, 36)); // TTF_OpenFont
             // Light hinting + kerning: the shared font's default (normal)
             // hinting spaces glyphs out oddly at small UI sizes.
@@ -81,23 +90,39 @@ namespace sl::menu::gfx {
 
     void Gfx::FreeAltFonts() {
         for (auto &f : m_altFonts) { if (f) TTF_CloseFont(f); f = nullptr; }
+        m_altPath.clear();
         m_altLoaded = false;
         ClearTextCache(); // cached textures referenced the now-freed fonts
     }
 
+    // Opened lazily per size; see the note on Font() in the header. Only one
+    // size is opened here, both to validate the file and because the caller
+    // needs a yes/no answer before committing to the font.
     bool Gfx::LoadContentFont(const char *path) {
-        TTF_Font *loaded[(int)FontSize::Count] = {};
-        for (int i = 0; i < (int)FontSize::Count; i++) {
-            loaded[i] = TTF_OpenFont(path, kPtSize[i]);
-            if (!loaded[i]) {
-                for (int j = 0; j < i; j++) TTF_CloseFont(loaded[j]);
-                return false; // keep the previously active font
-            }
-        }
+        if (!path || !*path) return false;
+        // Probed at the smallest size because that is the one every layout
+        // draws (clock, battery, hints), so the validating open is not an extra
+        // one - it is the first of the sizes that were going to be opened.
+        TTF_Font *probe = TTF_OpenFont(path, kPtSize[(int)FontSize::Small] * m_ss);
+        if (!probe) return false;      // keep the previously active font
+
         FreeAltFonts();
-        for (int i = 0; i < (int)FontSize::Count; i++) m_altFonts[i] = loaded[i];
+        m_altPath = path;
+        m_altFonts[(int)FontSize::Small] = probe;
         m_altLoaded = true;
         return true;
+    }
+
+    TTF_Font *Gfx::Font(FontSize s) {
+        if (m_useDefault || !m_altLoaded) return m_sysFonts[(int)s];
+        const int i = (int)s;
+        if (!m_altFonts[i] && !m_altPath.empty()) {
+            m_altFonts[i] = TTF_OpenFont(m_altPath.c_str(), kPtSize[i] * m_ss);
+            // A size that will not open falls back to the system font for that
+            // size only, rather than losing the chosen font everywhere.
+            if (!m_altFonts[i]) return m_sysFonts[i];
+        }
+        return m_altFonts[i] ? m_altFonts[i] : m_sysFonts[i];
     }
 
     void Gfx::ClearContentFont() { FreeAltFonts(); }
@@ -195,16 +220,22 @@ namespace sl::menu::gfx {
         return m_textCache.emplace(std::move(key), ct).first->second;
     }
 
-    int Gfx::TextWidth(FontSize s, const char *text) { return GetText(s, text).w; }
+    // Text is rasterised at m_ss times the layout size (see SetSupersample), so
+    // every metric is divided back down: the menu lays out in 1280x720 whatever
+    // the output resolution is.
+    int Gfx::TextWidth(FontSize s, const char *text) { return GetText(s, text).w / m_ss; }
 
-    int Gfx::LineHeight(FontSize s) { return TTF_FontHeight(Font(s)); }
+    int Gfx::LineHeight(FontSize s) { return TTF_FontHeight(Font(s)) / m_ss; }
 
     void Gfx::Text(FontSize s, int x, int y, SDL_Color c, const char *text) {
         const CachedText &e = GetText(s, text);
         if (!e.tex) return;
         SDL_SetTextureColorMod(e.tex, c.r, c.g, c.b);
         SDL_SetTextureAlphaMod(e.tex, c.a);   // see FillRect: 0 means invisible
-        SDL_Rect dst { x, y, e.w, e.h };
+        // The glyph texture is m_ss times the layout size; the destination is in
+        // layout space, and the logical-size mapping scales it back up to land
+        // on the texture's own pixels one for one.
+        SDL_Rect dst { x, y, e.w / m_ss, e.h / m_ss };
         SDL_RenderCopy(m_renderer, e.tex, nullptr, &dst);
     }
 

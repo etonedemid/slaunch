@@ -102,6 +102,24 @@ namespace sl::menu::gfx {
         bool HasContentFont() const { return m_altLoaded; }
         void UseDefaultFont(bool v) { m_useDefault = v; }
 
+        // ---- supersampling (desktop simulator only) -------------------------
+        // Render the same 1280x720 layout into a surface N times larger, for
+        // screenshots that are actually high resolution rather than an upscale.
+        //
+        // Everything the menu draws stays in 1280x720 coordinates: SDL's logical
+        // size maps them onto the bigger target, and fonts are opened N times
+        // larger so glyphs are rasterised at the output resolution instead of
+        // being stretched. Text metrics are therefore divided back down by N,
+        // which is exact at N=1 and can differ by a pixel above it - so trust
+        // N=1 for pixel-exact layout checks and use N>1 for pictures.
+        //
+        // Must be called before Init(). The console always runs at 1.
+        void SetSupersample(int n) { m_ss = (n < 1) ? 1 : (n > 4 ? 4 : n); }
+        int  Supersample() const { return m_ss; }
+        // Open a window (simulator) instead of the console's single fullscreen
+        // surface. No effect on hardware, where SDL has one window anyway.
+        void SetWindowTitle(const char *title) { m_title = title; }
+
     private:
         SDL_Window   *m_window   = nullptr;
         SDL_Renderer *m_renderer = nullptr;
@@ -109,11 +127,18 @@ namespace sl::menu::gfx {
         TTF_Font     *m_altFonts[(int)FontSize::Count] = {}; // selected content font
         bool          m_altLoaded  = false;
         bool          m_useDefault = false;
+        int           m_ss         = 1;        // supersample factor, 1 on console
+        const char   *m_title      = "sLaunch";
 
-        TTF_Font *Font(FontSize s) {
-            if (!m_useDefault && m_altLoaded && m_altFonts[(int)s]) return m_altFonts[(int)s];
-            return m_sysFonts[(int)s];
-        }
+        // Content-font sizes are opened on first use, not all at once.
+        //
+        // TTF_OpenFont re-reads and re-parses the file per call, and a CJK font
+        // is tens of megabytes - opening all four sizes up front read 74 MB off
+        // the SD card before the menu could draw anything, which measured as the
+        // single largest cost in start-up. A layout typically draws two of the
+        // four sizes, and the rest are opened only if something asks for them.
+        std::string   m_altPath;
+        TTF_Font     *Font(FontSize s);
         void FreeAltFonts();
 
         // --- Text texture cache -------------------------------------------

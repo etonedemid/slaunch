@@ -24,7 +24,10 @@ function update()
   -- Nothing to fetch.
 end
 
-function render(x, y, w)
+-- box_h is the height the caller wants filled (0 = natural). The grid keeps its
+-- proportions and the row pitch grows to take up whatever height is in use, so
+-- the frame fills a tile rather than leaving a gap under the last week.
+function render(x, y, w, box_h)
   local ar, ag, ab = theme_color("accent")
   local dr, dg, db = theme_color("dim")
   local fr, fg, fb = theme_color("fg")
@@ -39,12 +42,24 @@ function render(x, y, w)
   local ndays = days_in_month(t.year, t.month)
   local rows  = math.ceil((start_col + ndays) / 7)
 
-  local pad, cell_h = 18, 30
+  local pad    = math.max(12, math.floor(w * 0.053))
   local grid_w = w - pad * 2
   local col_w  = math.floor(grid_w / 7)
   local top    = 78                            -- y of the first date row
 
-  local h = top + rows * cell_h + 12
+  local cell_h  = 30
+  local natural = top + rows * cell_h + 12
+  local h = natural
+  -- Only ever grow into the box. Asked for less than the content needs, the
+  -- natural layout is returned instead and the caller scales it down - text
+  -- has a minimum readable size, and squeezing rows past it just overlaps
+  -- them.
+  if box_h and box_h > natural then
+    -- The extra height goes to the date rows, which is the part that scales
+    -- cleanly; the header keeps its own size.
+    h = box_h
+    cell_h = math.floor((h - top - 12) / rows)
+  end
 
   gfx_fill_rect(x, y, w, h, 20, 20, 20, 105)
   gfx_fill_rect(x, y, w, 3, ar, ag, ab, 255)
@@ -83,5 +98,7 @@ function render(x, y, w)
     end
   end
 
+  -- Unconstrained: the trailing gap the stacked home layout has always had.
+  if box_h and box_h > 0 then return h end
   return h + 12
 end

@@ -647,6 +647,12 @@ int main() {
         step(dir_v, held_v, next_v, start_v, Btn::Up,   Btn::Down);
         step(dir_h, held_h, next_h, start_h, Btn::Left, Btn::Right);
         ui.Render();
+        // An action the menu held back to animate first (the Flow launch
+        // bounce). Dispatched exactly like an OnButton result.
+        {
+            u64 pending_id = 0;
+            run(ui.TakePendingAction(pending_id), pending_id);
+        }
         if (!first_frame_logged) { first_frame_logged = true; BootLog("applet: first frame drawn"); }
         // First frame is up; now do the heavier init (widgets) off the hot path.
         ui.InitDeferred();

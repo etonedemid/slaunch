@@ -80,23 +80,40 @@ function update()
   end
 end
 
-function render(x, y, w)
-  local h = 175
+-- box_h is the height the caller wants filled (0 = natural). The lines keep
+-- their natural proportions and are simply spread across whatever height is in
+-- use, so the frame fills a tile instead of sitting in a band across the middle
+-- of it.
+function render(x, y, w, box_h)
+  local natural = 175
+  -- Only ever grow into the box. Asked for less than the content needs, the
+  -- natural layout is returned instead and the caller scales it down - text
+  -- has a minimum readable size, and squeezing rows past it just overlaps
+  -- them.
+  local h  = (box_h and box_h > natural) and box_h or natural
+  local vs = h / natural                       -- vertical scale
+  local function ly(v) return y + math.floor(v * vs) end
+
   local ar, ag, ab = theme_color("accent")
   local dr, dg, db = theme_color("dim")
   local fr, fg, fb = theme_color("fg")
 
+  local pad = math.max(12, math.floor(w * 0.053))
+
   gfx_fill_rect(x, y, w, h, 20, 20, 20, 105)
-  gfx_fill_rect(x, y, w, 3, ar, ag, ab, 255)
-  gfx_text_ex(0, x + 18, y + 14, "WEATHER", dr, dg, db)
+  gfx_fill_rect(x, y, w, math.max(3, math.floor(h * 0.017)), ar, ag, ab, 255)
+  gfx_text_ex(0, x + pad, ly(14), "WEATHER", dr, dg, db)
 
   if not valid then
-    gfx_text_ex(1, x + 18, y + 60, "Loading...", dr, dg, db)
+    gfx_text_ex(1, x + pad, ly(60), "Loading...", dr, dg, db)
   else
-    gfx_text_ex(3, x + 18, y + 40,  string.format("%.0f", temp) .. "\xC2\xB0C", fr, fg, fb)
-    gfx_text_ex(1, x + 18, y + 96,  weather_text(code), ar, ag, ab)
-    gfx_text_ex(0, x + 18, y + 128, place, dr, dg, db)
-    gfx_text_ex(0, x + 18, y + 152, string.format("Wind %.0f km/h", wind), dr, dg, db)
+    gfx_text_ex(3, x + pad, ly(40),  string.format("%.0f", temp) .. "\xC2\xB0C", fr, fg, fb)
+    gfx_text_ex(1, x + pad, ly(96),  weather_text(code), ar, ag, ab)
+    gfx_text_ex(0, x + pad, ly(128), place, dr, dg, db)
+    gfx_text_ex(0, x + pad, ly(152), string.format("Wind %.0f km/h", wind), dr, dg, db)
   end
+
+  -- Unconstrained: the trailing gap the stacked home layout has always had.
+  if box_h and box_h > 0 then return h end
   return h + 12
 end

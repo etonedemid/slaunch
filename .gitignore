@@ -28,3 +28,13 @@ projects/sInstaller/romfs/ui
 # Local build helper
 wsl_build_debug.sh
 *.elf
+
+# Desktop simulator (projects/sMenu/sim)
+projects/sMenu/sim/build/
+projects/sMenu/sim/build-win/
+projects/sMenu/sim/dist-win/
+projects/sMenu/sim/slaunch-sim
+# The simulated card lives in $HOME, but guard against an in-tree copy: a
+# colon is not a legal Windows filename and would break Windows tooling.
+projects/sMenu/sim/sdmc:/
+projects/sMenu/sim/shots/
