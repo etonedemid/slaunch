@@ -9,7 +9,7 @@ translations, and lots of UI modes.
 
 <img width="640" height="360" alt="2026081514233500-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/60f9b2ec-b202-4646-9ff6-8addbf3f8498" />
 <img width="640" height="360" alt="2026081514223900-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/2d65d40b-23a2-40d9-921f-2de83a317440" />
-<img width="1280" height="720" alt="2026081701534700-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/07c247c4-70d0-45fa-86c7-d4f151f8de20" />
+<img width="640" height="360" alt="2026081701534700-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/07c247c4-70d0-45fa-86c7-d4f151f8de20" />
 <img width="640" height="360" alt="2026081514234500-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/759afbcb-6e1e-4b69-ac33-3649acd45737" />
 
 ## Architecture
