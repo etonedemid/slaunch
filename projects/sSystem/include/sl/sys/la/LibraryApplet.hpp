@@ -7,7 +7,8 @@ namespace sl::sys::la {
     extern AppletHolder g_MenuHolder;
     extern bool         g_MenuRunning;
 
-    // Launch sMenu as a library applet in the eShop slot via ECS redirect.
+    // Launch sMenu as a library applet via ECS redirect, in whichever slot the
+    // daemon picked for this firmware (ecs::MenuSlots).
     // The status blob is pushed as the applet's input data BEFORE it starts,
     // so sMenu can read it with appletPopInData at launch.
     Result LaunchMenu(AppletId menu_applet_id, const void *status, size_t status_size);

@@ -317,6 +317,7 @@ extern "C" Result nifmGetCurrentIpAddress(u32 *out) {
     return 0;
 }
 
+
 extern "C" Result nifmGetCurrentNetworkProfile(NifmNetworkProfileData *profile) {
     if (!profile) return SIM_UNSUPPORTED;
     memset(profile, 0, sizeof(*profile));

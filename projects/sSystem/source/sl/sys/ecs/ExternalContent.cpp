@@ -20,7 +20,9 @@ namespace sl::sys::ecs {
             static constexpr bool   CanDeferInvokeRequest = false;
             static constexpr bool   CanManageMitmServers  = false;
         };
-        constexpr size_t MaxEcsSessions = 6;
+        // One session per registered program id, and the menu registers every
+        // id its slot might resolve to on each launch, so leave headroom.
+        constexpr size_t MaxEcsSessions = 12;
 
         // No named ports: sessions are added manually via RegisterSession.
         class EcsServerManager : public ams::sf::hipc::ServerManager<0, ServerOptions, MaxEcsSessions> {
@@ -138,6 +140,37 @@ namespace sl::sys::ecs {
             StartServerThreadOnce();
 
         return r.GetValue();
+    }
+
+    // `am`'s applet-id -> program-id table, as far as it is publicly known
+    // (libnx's AppletId comments, plus 0x...1042 which newer firmware launches
+    // for the shop slot). Used to turn a program id from takeover.txt back into
+    // the applet slot to start.
+    AppletId AppletIdForProgramId(u64 program_id) {
+        struct Entry { u64 program_id; AppletId applet_id; };
+        constexpr Entry Table[] = {
+            { 0x0100000000001001ULL, AppletId_LibraryAppletAuth         },
+            { 0x0100000000001002ULL, AppletId_LibraryAppletCabinet      },
+            { 0x0100000000001003ULL, AppletId_LibraryAppletController   },
+            { 0x0100000000001004ULL, AppletId_LibraryAppletDataErase    },
+            { 0x0100000000001005ULL, AppletId_LibraryAppletError        },
+            { 0x0100000000001006ULL, AppletId_LibraryAppletNetConnect   },
+            { 0x0100000000001007ULL, AppletId_LibraryAppletPlayerSelect },
+            { 0x0100000000001008ULL, AppletId_LibraryAppletSwkbd        },
+            { 0x0100000000001009ULL, AppletId_LibraryAppletMiiEdit      },
+            { 0x010000000000100AULL, AppletId_LibraryAppletWeb          },
+            { 0x010000000000100BULL, AppletId_LibraryAppletShop         },
+            { 0x0100000000001042ULL, AppletId_LibraryAppletShop         },
+            { 0x010000000000100DULL, AppletId_LibraryAppletPhotoViewer  },
+            { 0x010000000000100EULL, AppletId_LibraryAppletSet          },
+            { 0x010000000000100FULL, AppletId_LibraryAppletOfflineWeb   },
+            { 0x0100000000001010ULL, AppletId_LibraryAppletLoginShare   },
+            { 0x0100000000001011ULL, AppletId_LibraryAppletWifiWebAuth  },
+            { 0x0100000000001013ULL, AppletId_LibraryAppletMyPage       },
+        };
+        for (const auto &e : Table)
+            if (e.program_id == program_id) return e.applet_id;
+        return AppletId_None;
     }
 
     Result UnregisterExternalContent(u64 program_id) {

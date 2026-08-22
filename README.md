@@ -80,6 +80,21 @@ Requires devkitPro (devkitA64 + libnx + the switch SDL2 stack) and a built
 **libstratosphere** (Atmosphere 1.11.2). On Linux/WSL2:
 
 ```sh
+# one-time on Arch: devkitPro ships its own repos, signed with their key
+sudo pacman-key --recv-keys BC26F752D25B92CE272E0F44F7FD5492264BB9D0 --keyserver keyserver.ubuntu.com
+sudo pacman-key --lsign-key BC26F752D25B92CE272E0F44F7FD5492264BB9D0
+sudo pacman -U https://pkg.devkitpro.org/devkitpro-keyring.pkg.tar.xz
+# add to /etc/pacman.conf:
+#   [dkp-libs]
+#   Server = https://pkg.devkitpro.org/packages
+#   [dkp-linux]
+#   Server = https://pkg.devkitpro.org/packages/linux/$arch
+sudo pacman -Sy switch-dev switch-sdl2 switch-sdl2_ttf switch-sdl2_image \
+               switch-sdl2_mixer switch-curl switch-mbedtls
+# devkitPro's profile script exports DEVKITPRO but not the compiler's own bin
+# dir, which the Makefiles need on PATH:
+#   export DEVKITA64=$DEVKITPRO/devkitA64; export PATH=$DEVKITA64/bin:$PATH
+
 export DEVKITPRO=/opt/devkitpro
 # one-time: build libstratosphere into $DEVKITPRO/AtmosphereLibs
 git clone --depth=1 --branch 1.11.2 https://github.com/Atmosphere-NX/Atmosphere /opt/atmosphere
@@ -118,6 +133,32 @@ faulting module and offset; `aarch64-none-elf-nm -SCn` on the matching
 
 **Recovery:** delete `atmosphere/contents/0100000000001000/` from the SD to
 return to the stock HOME Menu.
+
+## Firmware
+
+Developed and tested on 18.x; 9.0.0 and up is the range it tries to support.
+
+The menu is not a program of its own - it is served into a library-applet slot,
+and *which program a slot launches* is decided by a table inside `am` that is
+not the same on every firmware. The shop slot (the one sLaunch takes over,
+because web applets get the largest applet heap) launches `010000000000100B`
+on older firmware and `0100000000001042` on newer. There is no way to read that
+table, so the daemon registers its exefs for **both** ids and lets the firmware
+launch whichever one it believes in.
+
+If the menu still never appears, the daemon notices - a slot that opens and
+closes without the menu ever saying a word twice in a row means the firmware
+launched its own applet - and falls through to the `offlineWeb` slot, writing
+every step to `slaunch/daemon.log`. To pin a slot by hand, put a program id in
+`slaunch/config/takeover.txt`:
+
+```
+0x010000000000100B
+```
+
+The daemon then tries that slot first, and only drops back to the built-in
+list if it never brings the menu up. Taking over a slot costs you whatever that
+applet did, so prefer one the menu has no entry for.
 
 ## Credits
 

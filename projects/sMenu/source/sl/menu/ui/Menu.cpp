@@ -24,7 +24,7 @@ namespace sl::menu::ui {
     // untappable.
     namespace {
         enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-               TH_IconPack, TH_ShelfVert, TH_TileCols, TH_TileRows,
+               TH_IconPack, TH_Antialias, TH_ShelfVert, TH_TileCols, TH_TileRows,
                TH_SgdbKey, TH_FlowSet, TH_Wrap,
                TH_Hints, TH_Counter, TH_Fonts,
                TH_Language, TH_Music,
@@ -99,6 +99,7 @@ namespace sl::menu::ui {
             { "en",   "English"   },
             { "de",   "German"    },
             { "es",   "Spanish"   },
+            { "fr",   "French"    },
             { "ru",   "Russian"   },
             { "ja",   "Japanese"  },
             { "zh",   "Chinese"   },
@@ -981,6 +982,8 @@ namespace sl::menu::ui {
             else if (sscanf(line, "ui_mode=%d", &v) == 1 &&
                      v >= 0 && v < (int)UiMode::Count)
                 m_ui_mode = (UiMode)v;
+            else if (sscanf(line, "antialias=%d", &v) == 1)
+                m_antialias = (v != 0);
             else if (sscanf(line, "tile_cols=%d", &v) == 1)
                 m_tile_cols = std::min(std::max(kTileColsMin, v), kTileColsMax);
             else if (sscanf(line, "tile_rows=%d", &v) == 1)
@@ -1029,6 +1032,7 @@ namespace sl::menu::ui {
         if (!fp) return;
         fprintf(fp, "align=%d\n", (int)m_align);
         fprintf(fp, "ui_mode=%d\n", (int)m_ui_mode);
+        fprintf(fp, "antialias=%d\n", m_antialias ? 1 : 0);
         fprintf(fp, "tile_cols=%d\n", m_tile_cols);
         fprintf(fp, "tile_rows=%d\n", m_tile_rows);
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
@@ -3267,6 +3271,12 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         const LogLine kChangelog[] = {
+            { true,  "v1.1.0" },
+            { false, "Anti-aliasing option (Theming) - smoother edges everywhere" },
+            { false, "Flow layout presets: Coverflow, Flat, Arc, Wall, Showcase, Spiral" },
+            { false, "Flow boxes are rounder - faces are drawn in finer strips" },
+            { false, "French translation" },
+            { false, "Works on older firmware - the menu finds its applet slot" },
             { true,  "v1.0.0" },
             { false, "Grid is now a wall of tiles, in three sizes" },
             { false, "Any tile can be given a colour of its own" },
@@ -3455,6 +3465,17 @@ namespace sl::menu::ui {
             toggleListIcons();
         if (m_theming_cursor == TH_IconPack && (b == Btn::Left || b == Btn::Right))
             cycleIconPack(b == Btn::Right ? +1 : -1);
+        // Applies when the menu is next opened: the renderer is built around it
+        // at start-up, and rebuilding it here would throw away every texture the
+        // menu is currently holding.
+        auto toggleAA = [&]() {
+            m_antialias = !m_antialias;
+            SaveSettings();
+            SetStatus(m_antialias ? "Anti-aliasing on next time the menu opens"
+                                  : "Anti-aliasing off next time the menu opens");
+        };
+        if (m_theming_cursor == TH_Antialias && (b == Btn::Left || b == Btn::Right))
+            toggleAA();
         if (m_theming_cursor == TH_ShelfVert && (b == Btn::Left || b == Btn::Right))
             toggleShelfVert();
         // Left/Right step the wall shape, which is what every other numeric row
@@ -3492,6 +3513,7 @@ namespace sl::menu::ui {
                 case TH_Entries:     m_screen = Screen::SysEntries;   m_sys_cursor = 0; m_sub_scroll = 0; break;
                 case TH_IconPack:    cycleIconPack(+1); break;
                 case TH_Language:    cycleLanguage(+1); break;
+                case TH_Antialias:   toggleAA(); break;
                 case TH_ShelfVert:   toggleShelfVert(); break;
                 case TH_TileCols:
                 case TH_TileRows:    stepWall(+1); break;
@@ -5368,7 +5390,8 @@ namespace sl::menu::ui {
                                          T("PSP/PS3 cross-media bar"),
                                          T("A 3D coverflow shelf") };
                 std::vector<std::string> labels, values;
-                for (int i = 0; i < 7; i++) { labels.push_back(names[i]); values.emplace_back(); }
+                for (int i = 0; i < (int)UiMode::Count; i++)
+                    { labels.push_back(names[i]); values.emplace_back(); }
 
                 const int cur = (int)m_ui_mode;
                 DrawCarouselXmb(labels, values, cur, m_sub_scroll, colA);
@@ -7193,6 +7216,42 @@ namespace sl::menu::ui {
             0.34f, 0.030f, 0.70f, 0.14f, 0.60f, 0.10f, 2.35f, 0.38f, 0.30f, 0.12f,
         };
 
+        // Named arrangements of the ten numbers above, in the spirit of the
+        // Aurora coverflow layout packs. Everything a layout can express is
+        // already in that table - how far apart the cases sit, how hard they
+        // turn, how fast they fall away from the camera - so a layout is a row
+        // of values rather than a second renderer. Tuning one afterwards still
+        // works; the row simply reads Custom once it no longer matches any.
+        struct FlowLayout { const char *name; float v[kFlowParamN]; };
+        const FlowLayout kFlowLayouts[] = {
+            // name          w      d       sp     gap    turn   tstep  cam    drop   dstep  y
+            { "Coverflow", { 0.34f, 0.030f, 0.70f, 0.14f, 0.60f, 0.10f, 2.35f, 0.38f, 0.30f, 0.12f } },
+            // Face-on, evenly spaced, nothing turned: a plain shelf.
+            { "Flat",      { 0.34f, 0.030f, 0.75f, 0.00f, 0.00f, 0.00f, 2.35f, 0.00f, 0.00f, 0.12f } },
+            // Barely turned, but each step falls sharply back, so the row bows.
+            { "Arc",       { 0.34f, 0.030f, 0.62f, 0.10f, 0.25f, 0.04f, 2.60f, 0.10f, 0.55f, 0.12f } },
+            // Small and tight - as many cases on screen as the row will carry.
+            { "Wall",      { 0.26f, 0.020f, 0.48f, 0.06f, 0.35f, 0.06f, 2.10f, 0.20f, 0.12f, 0.10f } },
+            // One big case held out front, the rest turned hard out of the way.
+            { "Showcase",  { 0.42f, 0.040f, 0.95f, 0.34f, 1.05f, 0.16f, 2.60f, 0.55f, 0.34f, 0.14f } },
+            // Turn keeps accumulating along the row, so it winds away from you.
+            { "Spiral",    { 0.32f, 0.030f, 0.66f, 0.12f, 0.50f, 0.28f, 2.45f, 0.40f, 0.40f, 0.12f } },
+        };
+        constexpr int kFlowLayoutN = (int)(sizeof(kFlowLayouts) / sizeof(kFlowLayouts[0]));
+
+        // Which layout the current numbers correspond to, or -1 once they have
+        // been tuned away from all of them.
+        int FlowLayoutMatch() {
+            for (int i = 0; i < kFlowLayoutN; i++) {
+                bool same = true;
+                for (int k = 0; k < kFlowParamN && same; k++)
+                    if (fabsf(*kFlowParams[k].value - kFlowLayouts[i].v[k]) > 0.0005f)
+                        same = false;
+                if (same) return i;
+            }
+            return -1;
+        }
+
         // Wrap a row index into the list. With an endless row the drawn range
         // runs past both ends and every index is folded back, which is what lets
         // the shelf carry on into a second lap instead of stopping at the last
@@ -7988,7 +8047,7 @@ namespace sl::menu::ui {
         const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
         const int panel_w = 520, panel_x = W - panel_w - 40;
         const int row_h = 40, top = 96;
-        const int rows = kFlowParamN + 2;   // + Reset + Back
+        const int rows = kFlowParamN + 3;   // Layout + params + Reset + Back
 
         m_gfx->FillRect(panel_x - 16, top - 24, panel_w + 32,
                         rows * row_h + 56, SDL_Color{ 0, 0, 0, 190 });
@@ -7998,18 +8057,27 @@ namespace sl::menu::ui {
             const int  y   = top + i * row_h;
             const SDL_Color c = sel ? t.accent : t.fg;
 
-            const char *label = (i < kFlowParamN) ? T(kFlowParams[i].label)
-                              : (i == kFlowParamN ? T("Reset to defaults") : T("Back"));
+            const int   pi    = i - 1;   // index into the parameter table
+            const char *label = (i == 0) ? T("Layout")
+                              : (pi < kFlowParamN) ? T(kFlowParams[pi].label)
+                              : (pi == kFlowParamN ? T("Reset to defaults") : T("Back"));
             if (sel) m_gfx->Text(FontSize::Normal, panel_x - 22, y, t.accent, ">");
             m_gfx->Text(FontSize::Normal, panel_x, y, c, label);
 
-            if (i < kFlowParamN) {
-                const FlowParam &pr = kFlowParams[i];
-                char val[24];
+            char val[32];
+            val[0] = '\0';
+            if (i == 0) {
+                const int m = FlowLayoutMatch();
+                snprintf(val, sizeof(val), "%s",
+                         (m >= 0) ? T(kFlowLayouts[m].name) : T("Custom"));
+            } else if (pi < kFlowParamN) {
+                const FlowParam &pr = kFlowParams[pi];
                 if (pr.degrees)
                     snprintf(val, sizeof(val), "%.0f deg", *pr.value * 57.2958f);
                 else
                     snprintf(val, sizeof(val), "%.3f", *pr.value);
+            }
+            if (val[0]) {
                 const int vw = m_gfx->TextWidth(FontSize::Normal, val);
                 m_gfx->Text(FontSize::Normal, panel_x + panel_w - vw, y, c, val);
             }
@@ -8019,24 +8087,42 @@ namespace sl::menu::ui {
     }
 
     Menu::Action Menu::OnButtonFlowSettings(Btn b) {
-        const int rows = kFlowParamN + 2;
+        const int rows = kFlowParamN + 3;
         if (b == Btn::B) { SaveFlowConfig(); m_screen = Screen::Main; return Action::None; }
         if (b == Btn::Down) m_flowset_cursor = (m_flowset_cursor + 1) % rows;
         if (b == Btn::Up)   m_flowset_cursor = (m_flowset_cursor + rows - 1) % rows;
 
-        if (m_flowset_cursor < kFlowParamN && (b == Btn::Left || b == Btn::Right)) {
-            const FlowParam &pr = kFlowParams[m_flowset_cursor];
+        // Row 0 is the layout; the parameter table starts one below it.
+        auto applyLayout = [&](int dir) {
+            int m = FlowLayoutMatch();
+            // Tuned away from all of them: step onto the first or the last
+            // rather than jumping somewhere arbitrary.
+            if (m < 0) m = (dir > 0) ? -1 : 0;
+            m = (m + dir + kFlowLayoutN) % kFlowLayoutN;
+            for (int k = 0; k < kFlowParamN; k++)
+                *kFlowParams[k].value = kFlowLayouts[m].v[k];
+            SetStatus(kFlowLayouts[m].name);
+        };
+
+        if (m_flowset_cursor == 0 && (b == Btn::Left || b == Btn::Right))
+            applyLayout(b == Btn::Right ? +1 : -1);
+
+        const int pi = m_flowset_cursor - 1;
+        if (pi >= 0 && pi < kFlowParamN && (b == Btn::Left || b == Btn::Right)) {
+            const FlowParam &pr = kFlowParams[pi];
             float v = *pr.value + ((b == Btn::Right) ? pr.step : -pr.step);
             // Clamped, not wrapped: sliding off one end straight to the other is
             // never what you meant while you are tuning by eye.
             *pr.value = (v < pr.lo) ? pr.lo : (v > pr.hi ? pr.hi : v);
         }
         if (b == Btn::A) {
-            if (m_flowset_cursor == kFlowParamN) {
+            if (m_flowset_cursor == 0) {
+                applyLayout(+1);
+            } else if (pi == kFlowParamN) {
                 for (int i = 0; i < kFlowParamN; i++)
                     *kFlowParams[i].value = kFlowDefaults[i];
                 SetStatus("Reset");
-            } else if (m_flowset_cursor == kFlowParamN + 1) {
+            } else if (pi == kFlowParamN + 1) {
                 SaveFlowConfig();
                 m_screen = Screen::Main;
             }
@@ -8166,6 +8252,16 @@ namespace sl::menu::ui {
             // selection swept past during a scroll was two full decodes every
             // few frames.
             if (flow_settled) FlowBackShots(m_items[m_flow_items[sel]]);
+            // The running game turns by itself, so its back swings into view
+            // whether or not it is the entry you are on. Without this the only
+            // box that is guaranteed to show you its back is the only one whose
+            // back art was never decoded, and it came round blank every time.
+            if (flow_settled && m_suspended != 0) {
+                for (int idx : m_flow_items) {
+                    const MenuItem &ri = m_items[idx];
+                    if (ri.app_id == m_suspended) { FlowBackShots(ri); break; }
+                }
+            }
         }
 
         for (int row : order) {
@@ -8191,9 +8287,6 @@ namespace sl::menu::ui {
             if (it.app_id != 0 && it.app_id == m_suspended)
                 angle += flow_now * kFlowRunSpin;
 
-            // Past a quarter turn we are looking at the back of the case.
-            const float ca_face = cosf(angle);
-            const bool  showing_back = (ca_face < 0.0f);
 
             // Launch bounce: the chosen case dips and then springs toward you.
             // Scaling the corners in world space lets the perspective do the
@@ -8257,6 +8350,25 @@ namespace sl::menu::ui {
                      half_w, 2.0f * depth,
                     -half_w, 2.0f * depth,
                      half_h, back);
+
+            auto mid_z = [](const float f[4][3]) {
+                return 0.25f * (f[0][2] + f[1][2] + f[2][2] + f[3][2]);
+            };
+
+            // Which way round the case is, taken from the geometry rather than
+            // from cosf(angle).
+            //
+            // The face sort below was moved off the angle for exactly this
+            // reason and this test was left behind on it: the boxes sit well off
+            // to either side, so perspective swings a face toward or away from
+            // the camera at rotations the cosine knows nothing about. Off-centre,
+            // the angle would call the back "showing" while the front was still
+            // the nearer face - and the front's printing is skipped when that is
+            // set, so the case went blank while you were looking straight at its
+            // cover. The nearer of the two faces is the one you are looking at,
+            // which is the same rule the sort uses and agrees with it by
+            // construction.
+            const bool showing_back = mid_z(back) < mid_z(corners);
 
             // Takes the face already built, because the draw order below needs
             // every face's geometry before it can decide what to paint first.
@@ -8368,10 +8480,6 @@ namespace sl::menu::ui {
             side_face(-half_w, face_l);
             side_face( half_w, face_r);
 
-            auto mid_z = [](const float f[4][3]) {
-                return 0.25f * (f[0][2] + f[1][2] + f[2][2] + f[3][2]);
-            };
-
             struct FaceOrder { float z; int which; };   // 0 front 1 back 2 left 3 right
             FaceOrder faces[4] = {
                 { mid_z(corners), 0 },
@@ -8397,12 +8505,21 @@ namespace sl::menu::ui {
             // Reflection. Mirroring only the front face left the box floating on
             // a reflection narrower than itself; every face the box is built from
             // gets mirrored, so the reflection has the same silhouette.
+            //
+            // Mirrored about the box's OWN bottom edge, not about a fixed floor.
+            // kFlowFloor is the bottom of an unscaled case, so while the launch
+            // bounce grows the selected one its base hung below that line and the
+            // reflection - still folded about the old one - rode up over the box
+            // it was supposed to be sitting on. Taking the plane from the scaled
+            // half-height keeps the two exactly edge to edge at every size, and
+            // is identical to the constant for every box that is not bouncing.
+            const float floor_y = gFlowY - half_h;
             auto mirror = [&](const float src[4][3], float out[4][3]) {
                 for (int k = 0; k < 4; k++) {
                     const int j = (k == 0) ? 3 : (k == 1) ? 2 : (k == 2) ? 1 : 0;
                     out[k][0] = src[j][0];
                     out[k][2] = src[j][2];
-                    out[k][1] = 2.0f * (gFlowY + kFlowFloor) - src[j][1];
+                    out[k][1] = 2.0f * floor_y - src[j][1];
                 }
             };
             {
@@ -8566,11 +8683,13 @@ namespace sl::menu::ui {
 
     void Menu::DrawTheming() {
         DrawTopBar("Theming");
-        const char *modes[7]  = { T("List"), T("Line"), T("Grid"), T("Cover"), T("Shelf"), T("XMB"), T("Flow") };
+        const char *modes[7]  = { T("List"), T("Line"), T("Grid"), T("Cover"),
+                                  T("Shelf"), T("XMB"), T("Flow") };
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("Vertical covers"), T("Columns"), T("Rows"),
+            T("Icon pack"), T("Anti-aliasing"), T("Vertical covers"),
+            T("Columns"), T("Rows"),
             T("SteamGridDB key"), T("Flow layout"),
             T("Wrap around"), T("Button hints"), T("Position counter"),
             T("Fonts"), T("Language"),
@@ -8586,6 +8705,7 @@ namespace sl::menu::ui {
         values[TH_IconPack]    = (m_icon_pack_idx > 0 &&
                                   m_icon_pack_idx <= (int)m_icon_packs.size())
                                ? m_icon_packs[m_icon_pack_idx - 1] : T("Built-in");
+        values[TH_Antialias]   = m_antialias ? T("On") : T("Off");
         values[TH_ShelfVert]   = m_shelf_vertical ? T("On") : T("Off");
         {
             char c[16];

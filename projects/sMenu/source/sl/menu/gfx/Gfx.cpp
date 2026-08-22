@@ -18,6 +18,18 @@ namespace sl::menu::gfx {
     }
 
     bool Gfx::Init() {
+        // Linear sampling, set before anything is created because SDL2 captures
+        // the scale mode into each texture AT CREATION - a hint set later leaves
+        // every existing texture on the old mode.
+        //
+        // The default is nearest, which point-samples: fine for an axis-aligned
+        // blit landing on whole pixels, but Flow's box faces go through
+        // SDL_RenderGeometry with the quad rotated, so every screen pixel snapped
+        // to the nearest texel and the art came apart into stair-steps that
+        // crawled as the box turned. It cleans up the scaled draws everywhere
+        // else too - tile icons come out of a 192px cache into a ~126px box.
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
             GfxLog("SDL_Init"); fatalThrow(MAKERESULT(360, 31));
         }
@@ -25,10 +37,38 @@ namespace sl::menu::gfx {
         // SDL_WINDOW_OPENGL makes SDL load the GLES/EGL library before creating
         // the window; the switch port's CreateWindow requires egl_data to exist
         // (otherwise "EGL not initialized" -> failure).
+        // Anti-aliasing: render into a larger surface and let the display
+        // filter it down. 1920x1080 rather than twice 720p, because that is the
+        // most the console's display accepts.
+        //
+        // This used to draw into an offscreen texture and blit it down instead,
+        // to avoid asking the display for anything. On hardware that produced a
+        // black screen - the menu ran, drew and presented every frame quite
+        // happily, but the copy back to the window never appeared - and it
+        // could not be caught in the simulator, which has a PC GPU behind it.
+        // Doing it through the window and the renderer's logical size uses only
+        // the path the simulator has always run on, and nothing is drawn
+        // anywhere the display cannot see.
+        int win_w = Width * m_ss, win_h = Height * m_ss;
+        if (m_aa && m_ss == 1) {
+            win_w = 1920; win_h = 1080;
+            m_ss  = 2;              // glyphs rasterised finer to suit
+            m_aa_on = true;
+        }
+
         m_window = SDL_CreateWindow(m_title, SDL_WINDOWPOS_CENTERED,
                                     SDL_WINDOWPOS_CENTERED,
-                                    Width * m_ss, Height * m_ss,
-                                    SDL_WINDOW_OPENGL);
+                                    win_w, win_h, SDL_WINDOW_OPENGL);
+        if (!m_window && m_aa_on) {
+            // The display would not take it: carry on at native size rather
+            // than refusing to start.
+            GfxLog("aa window");
+            m_aa_on = false;
+            m_ss    = 1;
+            m_window = SDL_CreateWindow(m_title, SDL_WINDOWPOS_CENTERED,
+                                        SDL_WINDOWPOS_CENTERED,
+                                        Width, Height, SDL_WINDOW_OPENGL);
+        }
         if (!m_window) { GfxLog("SDL_CreateWindow"); fatalThrow(MAKERESULT(360, 32)); }
 
         m_renderer = SDL_CreateRenderer(
@@ -41,7 +81,7 @@ namespace sl::menu::gfx {
         // what keeps every existing coordinate correct without touching a
         // single call site. The scale is an exact integer, so the mapping lands
         // on whole pixels rather than blurring across them.
-        if (m_ss != 1)
+        if (m_aa_on || m_ss != 1)
             SDL_RenderSetLogicalSize(m_renderer, Width, Height);
 
         if (TTF_Init() != 0) fatalThrow(MAKERESULT(360, 34)); // TTF_Init
@@ -288,8 +328,59 @@ namespace sl::menu::gfx {
         }
 
         // corners: 0 = TL, 1 = TR, 2 = BR, 3 = BL
-        SDL_Vertex v[32 * 6];
-        int n = 0;
+        //
+        // Subdivided in BOTH directions, not just across.
+        //
+        // Strips alone fix the horizontal squeeze and leave the vertical error
+        // untouched, and the vertical error is the one you actually see: inside
+        // a strip the two triangles interpolate v affinely across a trapezoid
+        // whose near edge is taller than its far edge, so a horizontal line in
+        // the texture is pulled off true by an amount that grows to the middle
+        // of the strip and returns to zero at each seam. Repeated across the
+        // strips that is a sawtooth - every straight line on the printed wrap
+        // came out as a regular wave, most obvious there because the wrap is
+        // flat artwork full of straight edges.
+        //
+        // Splitting each strip into rows as well makes every cell close to a
+        // parallelogram, where affine and projective agree, and the error falls
+        // away with the square of the cell size.
+        // Seam placement across the quad, by perspective rather than by even
+        // steps along the edge in 3D. Stepping the 3D parameter evenly spends
+        // the subdivision in the wrong place: the near half of a turned face
+        // covers far more of the screen than the far half, so its cells were
+        // several times wider and carried several times the error. For a
+        // fraction u across the projected face the object-space parameter is
+        //     t = (u/zR) / ((1-u)/zL + u/zR)
+        // which is the standard perspective-correct inverse - interpolate 1/z
+        // linearly in screen space, then divide it back out.
+        const float zL = 0.5f * (c[0][2] + c[3][2]);
+        const float zR = 0.5f * (c[1][2] + c[2][2]);
+        auto param = [zL, zR](float u) {
+            const float l = (zL > 0.001f) ? zL : 0.001f;
+            const float r = (zR > 0.001f) ? zR : 0.001f;
+            const float iz = (1.0f - u) / l + u / r;
+            if (iz <= 0.000001f) return u;
+            return (u / r) / iz;
+        };
+
+        const float zT = 0.5f * (c[0][2] + c[1][2]);
+        const float zB = 0.5f * (c[3][2] + c[2][2]);
+        const float zmin = std::min(std::min(zL, zR), std::min(zT, zB));
+        const float zmax = std::max(std::max(zL, zR), std::max(zT, zB));
+
+        // A quad square-on to the camera has no projective error to correct, so
+        // it stays a single row and costs nothing; the more its depth varies,
+        // the finer it is cut.
+        int rows = 1;
+        if (zmin > 0.001f) {
+            const float bend = (zmax / zmin) - 1.0f;
+            rows = (int)ceilf(bend * 40.0f);
+            if (rows < 1)  rows = 1;
+            if (rows > 16) rows = 16;
+        }
+
+        m_geom.clear();
+        m_geom.reserve((size_t)strips * rows * 6);
 
         // u/vtex arrive as 0..1 across the quad and are mapped into the sub-rect.
         auto vert = [&](const float p[3], float u, float vtex, Uint8 a) {
@@ -298,53 +389,55 @@ namespace sl::menu::gfx {
             out.color = SDL_Color{ tint.r, tint.g, tint.b, a };
             const float vv = flip_v ? 1.0f - vtex : vtex;
             out.tex_coord = SDL_FPoint{ u0 + (u1 - u0) * u, v0 + (v1 - v0) * vv };
-            v[n++] = out;
+            m_geom.push_back(out);
         };
 
-        float top0[3], bot0[3], top1[3], bot1[3];
-        for (int s = 0; s < strips; s++) {
-            const float t0 = (float)s / (float)strips;
-            const float t1 = (float)(s + 1) / (float)strips;
+        auto fade = [&](float b) {
+            return (Uint8)(alpha_top + (int)((float)alpha_bottom - (float)alpha_top) * b);
+        };
 
-            // Interpolate along the top and bottom edges in 3D, then project -
-            // this is the step that keeps the mapping honest.
-            for (int k = 0; k < 3; k++) {
-                top0[k] = c[0][k] + (c[1][k] - c[0][k]) * t0;
-                top1[k] = c[0][k] + (c[1][k] - c[0][k]) * t1;
-                bot0[k] = c[3][k] + (c[2][k] - c[3][k]) * t0;
-                bot1[k] = c[3][k] + (c[2][k] - c[3][k]) * t1;
+        for (int ry = 0; ry < rows; ry++) {
+            const float b0 = (float)ry / (float)rows;
+            const float b1 = (float)(ry + 1) / (float)rows;
+            const Uint8 a0 = fade(b0), a1 = fade(b1);
+
+            for (int s = 0; s < strips; s++) {
+                const float t0 = param((float)s / (float)strips);
+                const float t1 = param((float)(s + 1) / (float)strips);
+
+                // The cell's four corners, bilinear in 3D. Four coplanar points
+                // interpolate to a coplanar point, so every cell stays on the
+                // face - this is the step that keeps the mapping honest.
+                float p00[3], p10[3], p11[3], p01[3];
+                for (int k = 0; k < 3; k++) {
+                    const float topA = c[0][k] + (c[1][k] - c[0][k]) * t0;
+                    const float topB = c[0][k] + (c[1][k] - c[0][k]) * t1;
+                    const float botA = c[3][k] + (c[2][k] - c[3][k]) * t0;
+                    const float botB = c[3][k] + (c[2][k] - c[3][k]) * t1;
+                    p00[k] = topA + (botA - topA) * b0;
+                    p01[k] = topA + (botA - topA) * b1;
+                    p10[k] = topB + (botB - topB) * b0;
+                    p11[k] = topB + (botB - topB) * b1;
+                }
+
+                vert(p00, t0, b0, a0);
+                vert(p10, t1, b0, a0);
+                vert(p11, t1, b1, a1);
+
+                vert(p00, t0, b0, a0);
+                vert(p11, t1, b1, a1);
+                vert(p01, t0, b1, a1);
             }
-
-            vert(top0, t0, 0.0f, alpha_top);
-            vert(top1, t1, 0.0f, alpha_top);
-            vert(bot1, t1, 1.0f, alpha_bottom);
-
-            vert(top0, t0, 0.0f, alpha_top);
-            vert(bot1, t1, 1.0f, alpha_bottom);
-            vert(bot0, t0, 1.0f, alpha_bottom);
         }
 
-        SDL_RenderGeometry(m_renderer, tex, v, n, nullptr, 0);
+        SDL_RenderGeometry(m_renderer, tex, m_geom.data(), (int)m_geom.size(),
+                           nullptr, 0);
     }
 
     SDL_Texture *Gfx::LoadImage(const char *path) {
         return IMG_LoadTexture(m_renderer, path);
     }
 
-    // Downscale on the CPU, through surfaces, and only touch the renderer to
-    // upload the finished result.
-    //
-    // This used to downscale on the GPU by creating a render-target texture and
-    // pointing the renderer at it. That works, but switching render target
-    // flushes whatever render pass is in flight - and every caller of this runs
-    // while the menu is drawing, so each load tore the frame in half. With a
-    // handful of loads a frame that is most of a frame's budget spent on
-    // pipeline flushes rather than on drawing, which is what made the menu
-    // stutter for a second after it appeared and while scrolling.
-    //
-    // SDL_BlitScaled is a cheaper filter than the GPU's bilinear sample, but
-    // these images are drawn far smaller than they are stored and sampled
-    // bilinearly again at draw time, so it does not show.
     SDL_Texture *Gfx::LoadImageScaled(const char *path, int w, int h) {
         SDL_Surface *raw = IMG_Load(path);
         if (!raw) return nullptr;

@@ -338,6 +338,10 @@ namespace sl::menu::ui {
         int  TileRowsOf(int h) const;
         void SetTileCols(int n);
         void SetTileRows(int n);
+        // Anti-aliasing. Read by main() straight from the config before Gfx is
+        // created, because it decides how the renderer is built; the copy here
+        // is only so Theming can show and change it.
+        bool m_antialias = false;
         int  m_tile_cols = 9;
         int  m_tile_rows = 4;
 

@@ -264,8 +264,49 @@ int main(int argc, char **argv) {
         printf("[sim] card: %s/%s\n", root.c_str(), card);
     }
 
+    static const char *kAaMarker = "sdmc:/slaunch/config/aa_pending";
+    bool aa_confirmed = false;
     sl::menu::gfx::Gfx gfx;
     gfx.SetSupersample(scale);
+
+    // Same start-up the console does, so the marker guard is exercised here
+    // rather than only on hardware. At --scale 1 the anti-aliasing setting is
+    // read from the card and armed exactly as main.cpp arms it; the marker is
+    // cleared further down once a frame has been presented.
+    if (scale == 1) {
+        bool want_aa = false;
+        if (FILE *fp = fopen("sdmc:/slaunch/config/settings.txt", "r")) {
+            char line[128];
+            while (fgets(line, sizeof(line), fp)) {
+                int v = 0;
+                if (sscanf(line, "antialias=%d", &v) == 1) { want_aa = (v != 0); break; }
+            }
+            fclose(fp);
+        }
+        if (want_aa) {
+            struct stat st;
+            if (stat(kAaMarker, &st) == 0) {
+                printf("[sim] anti-aliasing disarmed (last run drew no frame)\n");
+                want_aa = false;
+                remove(kAaMarker);
+                // Same as the console: make the disarm stick.
+                if (FILE *cf = fopen("sdmc:/slaunch/config/settings.txt", "r")) {
+                    std::string all; char ln[192];
+                    while (fgets(ln, sizeof(ln), cf))
+                        all += (strncmp(ln, "antialias=", 10) == 0) ? "antialias=0\n" : ln;
+                    fclose(cf);
+                    if ((cf = fopen("sdmc:/slaunch/config/settings.txt", "w"))) {
+                        fwrite(all.data(), 1, all.size(), cf); fclose(cf);
+                    }
+                }
+            } else if (FILE *m = fopen(kAaMarker, "w")) {
+                fputs("1\n", m);
+                fclose(m);
+            }
+        }
+        gfx.SetAntialias(want_aa);
+        printf("[sim] anti-aliasing %s\n", want_aa ? "on" : "off");
+    }
     gfx.SetWindowTitle("sLaunch simulator");
     if (!gfx.Init()) { fprintf(stderr, "[sim] gfx.Init failed\n"); return 1; }
     printf("[sim] font: %s\n", simsw::FontPath());
@@ -475,6 +516,8 @@ int main(int argc, char **argv) {
             }
 
             ui.Render();
+            // A frame has reached the screen, so the renderer came up fine.
+            if (!aa_confirmed) { aa_confirmed = true; remove(kAaMarker); }
             // Actions the menu deferred in order to animate first; see
             // Menu::TakePendingAction.
             {

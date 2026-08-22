@@ -1,5 +1,6 @@
 #pragma once
 #include <SDL2/SDL.h>
+#include <vector>
 #include <SDL2/SDL_ttf.h>
 #include <string>
 #include <unordered_map>
@@ -81,7 +82,7 @@ namespace sl::menu::gfx {
         // into separate textures or compositing a new one per title.
         void DrawQuad3D(SDL_Texture *tex, const float corners[4][3],
                         SDL_Color tint, Uint8 alpha_top, Uint8 alpha_bottom,
-                        bool flip_v = false, int strips = 12,
+                        bool flip_v = false, int strips = 20,
                         const float uv[4] = nullptr);
         // Project a view-space point to screen coordinates. Exposed so layout
         // and touch hit-testing can agree with what was drawn.
@@ -116,6 +117,15 @@ namespace sl::menu::gfx {
         // Must be called before Init(). The console always runs at 1.
         void SetSupersample(int n) { m_ss = (n < 1) ? 1 : (n > 4 ? 4 : n); }
         int  Supersample() const { return m_ss; }
+
+        // Anti-aliasing, by drawing the whole frame into an offscreen surface
+        // twice the size and letting the filtered copy-down average it. Must be
+        // set BEFORE Init - it decides how text is rasterised and whether the
+        // offscreen surface is made at all. Ignored when SetSupersample has
+        // already asked for a larger window (the simulator), which is the same
+        // thing done a different way.
+        void SetAntialias(bool on) { m_aa = on; }
+        bool Antialias() const { return m_aa_on; }
         // Open a window (simulator) instead of the console's single fullscreen
         // surface. No effect on hardware, where SDL has one window anyway.
         void SetWindowTitle(const char *title) { m_title = title; }
@@ -127,7 +137,12 @@ namespace sl::menu::gfx {
         TTF_Font     *m_altFonts[(int)FontSize::Count] = {}; // selected content font
         bool          m_altLoaded  = false;
         bool          m_useDefault = false;
-        int           m_ss         = 1;        // supersample factor, 1 on console
+        int           m_ss         = 1;        // content scale (text raster, layout)
+        bool          m_aa         = false;    // requested before Init
+        bool          m_aa_on      = false;    // the larger window was created
+        // Scratch for DrawQuad3D's subdivision. A member so a face split into
+        // a few hundred cells does not allocate every frame.
+        std::vector<SDL_Vertex> m_geom;
         const char   *m_title      = "sLaunch";
 
         // Content-font sizes are opened on first use, not all at once.

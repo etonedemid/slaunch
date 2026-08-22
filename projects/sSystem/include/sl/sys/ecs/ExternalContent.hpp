@@ -11,12 +11,47 @@
 
 namespace sl::sys::ecs {
 
-    // We take over the "shop" applet slot. On current firmware libnx's
-    // AppletId_LibraryAppletShop launches program 0x...1042 (systemWeb, the
-    // web-based shop) -- confirmed empirically -- so the ECS program id and the
-    // applet's NPDM (sMenu.json) must both be 0x...1042 for our menu to be served.
-    constexpr AppletId MenuAppletId  = AppletId_LibraryAppletShop;
-    constexpr u64      MenuProgramId = 0x0100000000001042ULL;
+    // We take over the "shop" applet slot. Which *program* that slot launches
+    // is decided by a table inside `am`, and that table is not the same on
+    // every firmware: the shop applet is 0x...100B ("ShopN") up to [16.x] and
+    // 0x...1042 ("systemWeb", the web-based eShop) on newer firmware -- the
+    // latter confirmed empirically on 18.x. Nothing lets us read that table, so
+    // we register our exefs for *every* program id the slot is known to resolve
+    // to and let the firmware launch whichever one it believes in. Registering
+    // an id this firmware never launches costs one ldr:shel session and nothing
+    // else. (The NPDM's own program id does not have to match -- uLaunch serves
+    // uMenu, whose NPDM says 0x...FFFF, into whatever slot it is configured for.)
+    struct MenuSlot {
+        AppletId    applet_id;
+        const char *name;
+        u64         program_ids[2];
+        u8          program_id_count;
+    };
+
+    // Tried in order, first to last. The shop slot is preferred because web
+    // applets get the largest library-applet heap, which is what the menu's
+    // wallpapers and covers live in; offlineWeb is another web-applet slot with
+    // a comparable reservation, and unlike album/myPage the menu has no entry
+    // that opens it, so taking it over costs the user nothing. The daemon falls
+    // through to it only when the shop slot never brings the menu up.
+    constexpr MenuSlot MenuSlots[] = {
+        { AppletId_LibraryAppletShop,       "shop",
+          { 0x0100000000001042ULL, 0x010000000000100BULL }, 2 },
+        { AppletId_LibraryAppletOfflineWeb, "offlineWeb",
+          { 0x010000000000100FULL, 0 },                     1 },
+    };
+    constexpr size_t MenuSlotCount = sizeof(MenuSlots) / sizeof(MenuSlots[0]);
+
+    // One line holding a program id ("0x010000000000100B"), for a console whose
+    // firmware maps the slots differently again: the daemon serves the menu into
+    // that program's slot first, and only drops back to the list above if that
+    // slot never brings the menu up (a typo here must not cost a console).
+    constexpr const char *MenuSlotOverridePath = "sdmc:/slaunch/config/takeover.txt";
+
+    // The applet slot `am` launches program_id from, or AppletId_None if it is
+    // not a library-applet program.
+    AppletId AppletIdForProgramId(u64 program_id);
+
     // SD path (relative to the SD root) of sMenu's exefs folder.
     constexpr const char *MenuExefsDir = "/slaunch/bin/sMenu";
 

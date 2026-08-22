@@ -56,6 +56,8 @@ static volatile bool                g_LoadNoChange = false; // list unchanged ->
 static bool                         g_LoadRunning = false;
 
 static constexpr const char *SetupMarker = "sdmc:/slaunch/config/setup_done";
+// Dropped while anti-aliasing is being brought up, cleared once a frame lands.
+static constexpr const char *AaMarker = "sdmc:/slaunch/config/aa_pending";
 
 static u64 g_BootTick0 = 0;   // set at the top of __appInit; boot.log is ms-stamped
 
@@ -74,6 +76,25 @@ static void BootLog(const char *fmt, ...) {
     va_end(ap);
     fputc('\n', fp);
     fclose(fp);
+}
+
+// Rewrite antialias=1 to antialias=0 in the settings file. Used when the
+// setting has just been disarmed: without it a renderer that fails every time
+// would alternate - black screen, recover, black screen - because the stored
+// setting still asks for it. Turning it off for real means the menu comes back
+// and Theming shows the true state, and the user can arm it again deliberately.
+static void DisableAntialiasSetting() {
+    const char *path = "sdmc:/slaunch/config/settings.txt";
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+    std::string all;
+    char line[192];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "antialias=", 10) == 0) all += "antialias=0\n";
+        else                                      all += line;
+    }
+    fclose(fp);
+    if ((fp = fopen(path, "w"))) { fwrite(all.data(), 1, all.size(), fp); fclose(fp); }
 }
 
 static bool IsFirstRun() {
@@ -439,6 +460,42 @@ int main() {
     menu::ui::g_sd_ok = true; // applet NPDM grants SD access
 
     menu::gfx::Gfx gfx;
+    // Read straight from the config rather than through Menu: the renderer has
+    // to be built with this already decided, and Menu is not constructed until
+    // after Gfx is up.
+    //
+    // Guarded by a marker file, because this setting changes how the renderer
+    // itself is built and a renderer that comes up wrong takes the whole menu
+    // with it - and the menu is the only way to turn the setting back off. The
+    // marker is dropped before the attempt and removed once a frame has
+    // actually reached the screen; finding one still there means the last run
+    // never got that far, so the setting disarms itself rather than leaving a
+    // console that can only be recovered by editing the SD card on a PC.
+    {
+        bool want_aa = false;
+        FILE *fp = fopen("sdmc:/slaunch/config/settings.txt", "r");
+        if (fp) {
+            char line[128];
+            while (fgets(line, sizeof(line), fp)) {
+                int v = 0;
+                if (sscanf(line, "antialias=%d", &v) == 1) { want_aa = (v != 0); break; }
+            }
+            fclose(fp);
+        }
+        if (want_aa) {
+            struct stat st;
+            if (stat(AaMarker, &st) == 0) {
+                BootLog("applet: anti-aliasing disarmed (last run drew no frame)");
+                want_aa = false;
+                remove(AaMarker);
+                DisableAntialiasSetting();
+            } else {
+                mkdir("sdmc:/slaunch/config", 0777);
+                if (FILE *m = fopen(AaMarker, "w")) { fputs("1\n", m); fclose(m); }
+            }
+        }
+        gfx.SetAntialias(want_aa);
+    }
     if (!gfx.Init()) {
         BootLog("applet: gfx.Init FAILED: %s", SDL_GetError());
         return 0; // sSystem will relaunch us
@@ -503,6 +560,7 @@ int main() {
 
     u64 g_NextVerify = armGetSystemTick();   // periodic app-list re-verify
     bool first_frame_logged = false;
+    bool aa_confirmed = false;
 
     while (g_Running && appletMainLoop()) {
         // Re-verify the installed set every ~2s: the daemon doesn't push gamecard
@@ -654,6 +712,10 @@ int main() {
             run(ui.TakePendingAction(pending_id), pending_id);
         }
         if (!first_frame_logged) { first_frame_logged = true; BootLog("applet: first frame drawn"); }
+        // A frame has reached the screen, so whatever the renderer was built
+        // with works. Clearing the marker is what lets anti-aliasing stay on
+        // across runs; leaving it would disarm the setting every time.
+        if (!aa_confirmed) { aa_confirmed = true; remove(AaMarker); }
         // First frame is up; now do the heavier init (widgets) off the hot path.
         ui.InitDeferred();
     }

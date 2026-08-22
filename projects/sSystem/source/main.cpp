@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>
 #include <sys/stat.h>
 
 #include <sl/smi/Protocol.hpp>
@@ -47,6 +48,23 @@ static char    g_PendingPayload[FS_MAX_PATH] = {};
 // While an NRO runs as an application in a donor's slot, this is the donor id so
 // we can unregister the ECS override (restore the game) once it exits.
 static u64     g_HbOverrideDonor = 0;
+
+// Which applet slot the menu is served into. Firmware decides which program a
+// slot launches (see ecs::MenuSlots), so the working slot is not the same on
+// every console: we start with the preferred one and fall through the rest if
+// the menu never actually comes up.
+static size_t        g_MenuSlot       = 0;      // index into ecs::MenuSlots
+static ecs::MenuSlot g_MenuSlotForced = {};     // from takeover.txt, if any
+static bool          g_MenuSlotIsForced = false;
+static bool          g_MenuSlotsExhausted = false;
+
+// Set as soon as the running menu sends its first SMI command: proof that what
+// the slot launched is really sMenu and not the firmware's own applet.
+static bool g_MenuTalked     = false;
+static u64  g_MenuLaunchTick = 0;
+// A menu that exits this fast without ever talking to us did not come up.
+static constexpr u64 MenuFastExitMs = 3000;
+static int  g_MenuFastExits  = 0;
 
 static void LaunchMenu();   // defined below
 
@@ -393,6 +411,7 @@ static void DrainSMIQueue() {
         appletStorageClose(&st);
 
         if (hdr.magic == Magic) {
+            g_MenuTalked = true;   // whatever is in the slot really is sMenu
             DispatchCommand(static_cast<SystemMessage>(hdr.val), &payload);
         }
     }
@@ -473,23 +492,126 @@ static void PumpAppletMessages() {
 }
 
 // ---------------------------------------------------------------------------
+// Menu slot: where sMenu is served, and what to do when it does not come up.
+
+// sdmc:/slaunch/config/takeover.txt -- one program id, e.g. "0x010000000000100B".
+// Read once at boot: that slot is tried before the built-in list.
+static void LoadMenuSlotOverride() {
+    FILE *fp = fopen(ecs::MenuSlotOverridePath, "r");
+    if (!fp) return;
+    char line[64] = {};
+    const bool got = fgets(line, sizeof(line), fp) != nullptr;
+    fclose(fp);
+    if (!got) return;
+
+    const u64 program_id = strtoull(line, nullptr, 16);   // "0x..." or bare hex
+    const AppletId applet_id = ecs::AppletIdForProgramId(program_id);
+    if (applet_id == AppletId_None) {
+        DaemonLog("menu: takeover.txt names 0x%016lx, which is not a known applet"
+                  " program -- ignoring", program_id);
+        return;
+    }
+    g_MenuSlotForced   = { applet_id, "takeover.txt", { program_id, 0 }, 1 };
+    g_MenuSlotIsForced = true;
+    DaemonLog("menu: takeover.txt forces program 0x%016lx (applet 0x%x)",
+              program_id, (int)applet_id);
+}
+
+static const ecs::MenuSlot &CurrentMenuSlot() {
+    if (g_MenuSlotIsForced) return g_MenuSlotForced;
+    return ecs::MenuSlots[g_MenuSlot];
+}
+
+// Move to the next candidate slot. Returns false when there is nothing left to
+// try, in which case the caller keeps using the current slot -- retrying
+// forever beats a console that is stuck on black.
+static bool AdvanceMenuSlot(const char *why) {
+    // A slot pinned by hand gets the first go, but a typo in takeover.txt must
+    // not cost the user their console: drop back to the built-in list.
+    if (g_MenuSlotIsForced) {
+        g_MenuSlotIsForced = false;
+        g_MenuSlot         = 0;
+        g_MenuFastExits    = 0;
+        DaemonLog("menu: %s -- ignoring takeover.txt and going back to the"
+                  " built-in slot list ('%s')", why, ecs::MenuSlots[0].name);
+        return true;
+    }
+    if (g_MenuSlot + 1 >= ecs::MenuSlotCount) {
+        if (!g_MenuSlotsExhausted) {
+            g_MenuSlotsExhausted = true;
+            DaemonLog("menu: %s, and no applet slot is left to try -- the menu"
+                      " will keep retrying on '%s'. Put a program id in %s to"
+                      " point it at a different slot.",
+                      why, CurrentMenuSlot().name, ecs::MenuSlotOverridePath);
+        }
+        return false;
+    }
+    g_MenuSlot++;
+    g_MenuFastExits = 0;
+    DaemonLog("menu: %s -> falling back to the '%s' slot",
+              why, ecs::MenuSlots[g_MenuSlot].name);
+    return true;
+}
+
+// The menu applet closed. If it never sent a single command and was only up for
+// an instant, the slot launched the firmware's own applet instead of sMenu (our
+// ECS override was registered for a program id this firmware does not map that
+// slot to) -- that applet opens and closes immediately. Two in a row and we try
+// the next slot instead of relaunching the same nothing forever.
+static void NoteMenuExited() {
+    if (g_MenuTalked) { g_MenuFastExits = 0; return; }
+
+    const u64 alive_ms = (armGetSystemTick() - g_MenuLaunchTick) * 1000
+                       / armGetSystemTickFreq();
+    if (alive_ms >= MenuFastExitMs) { g_MenuFastExits = 0; return; }
+
+    g_MenuFastExits++;
+    DaemonLog("menu: slot '%s' exited after %llums without a word (%d in a row)"
+              " -- either this firmware launches a different program from that"
+              " slot, or sMenu crashed on startup",
+              CurrentMenuSlot().name, (unsigned long long)alive_ms, g_MenuFastExits);
+    if (g_MenuFastExits >= 2 && !AdvanceMenuSlot("menu never came up")) {
+        // Nothing left to switch to, so the relaunch below is a retry of what
+        // just failed. Pace it: without this the daemon spins the applet (and
+        // the log) as fast as the firmware can open and close it.
+        svcSleepThread(1'000'000'000ULL);
+    }
+}
+
 static void LaunchMenu() {
     SystemStatus status = {};
     status.selected_user     = g_SelectedUser;
     status.suspended_app_id  = app::g_AppId;
     status.has_suspended_app = app::g_AppRunning;
 
-    // Serve sMenu's SD exefs folder into the eShop applet slot, then launch it
+    const ecs::MenuSlot &slot = CurrentMenuSlot();
+
+    // Serve sMenu's SD exefs folder into every program id this slot is known to
+    // resolve to (the mapping differs between firmwares), then launch the slot
     // as a library applet with the status blob as input data.
-    Result ecs_rc = ecs::RegisterExternalContent(ecs::MenuProgramId, ecs::MenuExefsDir);
-    DaemonLog("RegisterExternalContent(0x%016lx, %s) rc=0x%x",
-              ecs::MenuProgramId, ecs::MenuExefsDir, ecs_rc);
+    for (u8 i = 0; i < slot.program_id_count; i++) {
+        Result ecs_rc = ecs::RegisterExternalContent(slot.program_ids[i], ecs::MenuExefsDir);
+        DaemonLog("RegisterExternalContent(0x%016lx, %s) rc=0x%x",
+                  slot.program_ids[i], ecs::MenuExefsDir, ecs_rc);
+    }
 
-    Result la_rc = la::LaunchMenu(ecs::MenuAppletId, &status, sizeof(status));
-    DaemonLog("LaunchMenu(applet=0x%x) rc=0x%x", (int)ecs::MenuAppletId, la_rc);
+    Result la_rc = la::LaunchMenu(slot.applet_id, &status, sizeof(status));
+    DaemonLog("LaunchMenu(slot=%s applet=0x%x) rc=0x%x",
+              slot.name, (int)slot.applet_id, la_rc);
 
-    if (R_FAILED(la_rc))
+    g_MenuTalked     = false;
+    g_MenuLaunchTick = armGetSystemTick();
+
+    if (R_FAILED(la_rc)) {
+        // The slot would not start at all (its program is not installed on this
+        // firmware, am refused it, ...). Try the next candidate before giving
+        // up: a fatal at least names an error, but only the log explains it.
+        if (AdvanceMenuSlot("slot would not start")) {
+            LaunchMenu();
+            return;
+        }
         fatalThrow(MAKERESULT(Module_Libnx, LibnxError_NotFound));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -511,6 +633,28 @@ namespace {
     alignas(ams::os::MemoryPageSize) constinit u8 g_LibnxHeap[LibnxHeapSize];
 }
 
+// Service init results, kept until the SD card is mounted: DaemonLog needs
+// sdmc:, and everything below it runs before that exists. Without this a
+// service the firmware refuses is a fatal on a black screen with nothing
+// written down anywhere; with it the log names the service and its rc.
+namespace {
+
+    struct InitStep {
+        const char *name;
+        Result      rc;
+        bool        critical;   // the daemon cannot be the HOME Menu without it
+    };
+    InitStep g_InitSteps[16] = {};
+    size_t   g_InitStepCount = 0;
+
+    Result RecordInit(const char *name, Result rc, bool critical) {
+        if (g_InitStepCount < sizeof(g_InitSteps) / sizeof(g_InitSteps[0]))
+            g_InitSteps[g_InitStepCount++] = { name, rc, critical };
+        return rc;
+    }
+
+}
+
 namespace ams {
 
     namespace init {
@@ -519,26 +663,64 @@ namespace ams {
             __nx_applet_type     = AppletType_SystemApplet;
             __nx_fs_num_sessions = 3;
 
+            // sm and fs come first and are not survivable: without them there
+            // is no SD card, so not even a log to say what went wrong.
             R_ABORT_UNLESS(sm::Initialize());
             R_ABORT_UNLESS(fsInitialize());
-            R_ABORT_UNLESS(appletInitialize());
-            R_ABORT_UNLESS(hidInitialize());
-            R_ABORT_UNLESS(accountInitialize(AccountServiceType_System));
-            R_ABORT_UNLESS(nsInitialize());
-            R_ABORT_UNLESS(psmInitialize());
-            R_ABORT_UNLESS(nifmInitialize(NifmServiceType_User));
-            R_ABORT_UNLESS(setsysInitialize());
-            SetSysFirmwareVersion fw = {};
-            if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw)))
-            hosversionSet(MAKEHOSVERSION(fw.major, fw.minor, fw.micro) | BIT(31));
-            R_ABORT_UNLESS(setInitialize());
-            R_ABORT_UNLESS(timeInitialize());
-            R_ABORT_UNLESS(ldrShellInitialize());
-            R_ABORT_UNLESS(pmshellInitialize());
-            
+
+            // Firmware version FIRST. Every libnx service init below picks its
+            // command ids and structure layouts from it, and with the version
+            // still unset they all take the 1.0.0 path -- which is not what any
+            // console we support actually speaks. libstratosphere may already
+            // have set it during startup, so only fill it in when it is empty.
+            RecordInit("setsys", setsysInitialize(), true);
+            if (hosversionGet() == 0) {
+                SetSysFirmwareVersion fw = {};
+                if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw)))
+                    hosversionSet(MAKEHOSVERSION(fw.major, fw.minor, fw.micro) | BIT(31));
+            }
+
+            RecordInit("applet",   appletInitialize(), true);
+            RecordInit("hid",      hidInitialize(), true);
+            RecordInit("account",  accountInitialize(AccountServiceType_System), true);
+            RecordInit("ns",       nsInitialize(), true);
+            RecordInit("set",      setInitialize(), true);
+            RecordInit("ldr:shel", ldrShellInitialize(), true);  // no ECS -> no menu
+
+            // Nothing the menu cannot live without: the daemon only reads a
+            // battery level / network state / clock through these, so a
+            // firmware that will not hand one over gets a working menu and a
+            // line in the log rather than a fatal on a black screen.
+            RecordInit("psm",     psmInitialize(), false);
+            RecordInit("nifm",    nifmInitialize(NifmServiceType_User), false);
+            RecordInit("time",    timeInitialize(), false);
+            RecordInit("pmshell", pmshellInitialize(), false);
 
             // SD last: it is not always ready before the other services init.
             R_ABORT_UNLESS(fsdevMountSdmc());
+
+            // The log exists from here. Write down what happened above before
+            // acting on it, so a console that cannot boot the menu still leaves
+            // a readable reason on the card.
+            remove("sdmc:/slaunch/daemon.log");
+            const u32 ver = hosversionGet();
+            DaemonLog("daemon: firmware %u.%u.%u", HOSVER_MAJOR(ver),
+                      HOSVER_MINOR(ver), HOSVER_MICRO(ver));
+            if (ver == 0)
+                DaemonLog("daemon: WARNING firmware version unknown -- libnx will"
+                          " speak 1.0.0 to every service");
+            else if (hosversionBefore(9, 0, 0))
+                DaemonLog("daemon: WARNING firmware is below 9.0.0, which is untested");
+
+            for (size_t i = 0; i < g_InitStepCount; i++) {
+                if (R_SUCCEEDED(g_InitSteps[i].rc)) continue;
+                DaemonLog("daemon: %s init failed rc=0x%x%s", g_InitSteps[i].name,
+                          g_InitSteps[i].rc,
+                          g_InitSteps[i].critical ? " (fatal)" : " -- continuing without it");
+            }
+            for (size_t i = 0; i < g_InitStepCount; i++)
+                if (g_InitSteps[i].critical)
+                    R_ABORT_UNLESS(g_InitSteps[i].rc);
         }
 
         void FinalizeSystemModule() {
@@ -559,8 +741,9 @@ namespace ams {
     }
 
     void Main() {
-        remove("sdmc:/slaunch/daemon.log");
         DaemonLog("daemon: Main enter (stratosphere sysmodule, qlaunch)");
+
+        LoadMenuSlotOverride();
 
         // Required system-applet startup: apply the idle/power policy. Without
         // this qlaunch is not fully "the home menu", and the library applets it
@@ -615,6 +798,7 @@ namespace ams {
             // The menu applet closed -> carry out whatever it asked for.
             if (la::g_MenuRunning && !la::IsMenuAlive()) {
                 la::StopMenu();
+                NoteMenuExited();   // may switch slots if it never came up
                 RunPendingAction();
             }
 
