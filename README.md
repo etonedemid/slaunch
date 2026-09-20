@@ -1,16 +1,8 @@
+<img width="64" height="64" alt="icon" src="https://github.com/user-attachments/assets/0a70ab24-5098-4e7b-b6ce-dba046e9230e"/>  for the Nintendo Switch
 
-# sLaunch
-
-A fast, clean, **SDL2-based HOME Menu replacement** for the Nintendo Switch
-(Atmosphere CFW). Themes with wallpapers, custom fonts, Lua widgets, icon packs,
-translations, and lots of UI modes.
+slaunch is a home replacement that supports theming, widgets, bg music, several UI modes and more.
 
 [Discord](https://discord.gg/dv28MgtaNn)
-
-<img width="640" height="360" alt="2026081514233500-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/60f9b2ec-b202-4646-9ff6-8addbf3f8498" />
-<img width="640" height="360" alt="2026081514223900-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/2d65d40b-23a2-40d9-921f-2de83a317440" />
-<img width="640" height="360" alt="2026081701534700-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/07c247c4-70d0-45fa-86c7-d4f151f8de20" />
-<img width="640" height="360" alt="2026081514234500-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/759afbcb-6e1e-4b69-ac33-3649acd45737" />
 
 ## Architecture
 
@@ -101,67 +93,6 @@ menu inherits the old `slaunch/config/` files, including its first-run setup, so
 that account sees exactly what it saw before. The originals are copied rather
 than moved, so downgrading still finds them. Any other account starts on the
 defaults and goes through first-run setup once, as a new account should.
-
-### Deck layout
-
-**Theming > UI mode > Deck** is the SteamOS gamepad layout. The game you last
-played gets a wide tile; the rest of the library follows it as upright tiles of
-the same height, and under both is a row of cards:
-
-| Tab | What it shows |
-|---|---|
-| What's new | Steam's news for the selected game, matched by name |
-| Nintendo | the front page of nintendo.com/us/whatsnew |
-| Widgets | your Lua widgets, one per card |
-
-`A` on a card opens the story in a reader, `Y` opens the whole library as a grid
-with tabs (all / favourites / recent / game card / homebrew), and `-` (or the
-**HOME** button) opens a side menu holding everything that is not a game -
-Theming, homebrew, Album, music, network, power.
-
-Both feeds are keyless and cached on the card (`slaunch/cache/news/`), so the
-menu opens on the last set of stories rather than waiting for the network -
-Nintendo is refetched after six hours, a game's Steam news after a day. Box art
-is the same SteamGridDB fetch Flow uses, so **Theming > SteamGridDB key** is
-worth setting for this layout too.
-
-### Homebrew that launches homebrew
-
-An .nro handing over to another one (hbmenu opening something, an installer
-restarting you into what it just installed) works the way it always has:
-`envSetNextLoad`, and hbloader loads the next .nro in the same process.
-
-What that cannot do is change the terms it runs under. Homebrew started from
-the Homebrew menu lives in an applet slot with a small heap, and no process can
-promote itself to a full-RAM application - that means serving hbloader into a
-donor game's slot, which only the daemon can do. So the daemon watches a drop
-box:
-
-```
-sdmc:/slaunch/hb_queue/<name>.req      mode=app | nro=... | argv=... | donor=...
-```
-
-Any homebrew can write one with plain stdio (format and a ready-made writer:
-`libs/sCommon/include/sl/sys/HbLaunchRequest.hpp`). The daemon takes it at the
-moment the homebrew that queued it exits - never while it is still on screen -
-and chains straight into the next launch instead of bouncing through the menu.
-`donor=` may be left out, in which case the donor set in **Homebrew > Set
-donor** is used; if none is set, it runs as an applet and says so in
-`daemon.log`. Requests are one-shot and deleted as they are taken, valid or
-not, so a bad one costs a launch rather than a boot loop, and the path must be
-an .nro that exists on the card.
-
-To get this for homebrew that knows nothing about sLaunch, create
-
-```
-sdmc:/slaunch/config/hb_chain_app.txt     containing: 1
-```
-
-and hbloader will hand *every* chainload out of an applet slot to the daemon,
-so what hbmenu opens runs with full RAM. It is opt-in because it changes where
-those launches happen: the homebrew you chainloaded from is gone (you return to
-sLaunch rather than to it), and starting a donor title takes longer than
-loading an .nro in place.
 
 ### Content filter
 
