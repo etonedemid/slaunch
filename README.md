@@ -4,6 +4,15 @@ slaunch is a home replacement that supports theming, widgets, bg music, several 
 
 [Discord](https://discord.gg/dv28MgtaNn)
 
+<img width="1280" height="720" alt="2026092401121200-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/fc5fcfc0-1348-454c-a057-2459c590818a" />
+<img width="1280" height="720" alt="2026092323471800-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/a70ddc69-c610-4c96-9c30-7dcecc787b1d" />
+
+<img width="1280" height="720" alt="2026092323492100-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/8bb60ac8-9c7f-4063-a435-9d5e31cc17e0" />
+<img width="1280" height="720" alt="2026092323512500-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/ee98c207-121e-4938-857b-cbbd519c0d7d" />
+
+<img width="1280" height="720" alt="2026092323472900-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/301dde03-aaad-4990-9e10-1253490fdafe" />
+
+
 ## Architecture
 
 sLaunch follows the same split as [uLaunch](https://github.com/Xortroll/uLaunch):
