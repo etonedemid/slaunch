@@ -1,0 +1,50 @@
+diff --git a/bootloader/hos/hos.c b/bootloader/hos/hos.c
+index c734489..009df0d 100644
+--- a/bootloader/hos/hos.c
++++ b/bootloader/hos/hos.c
+@@ -1037,6 +1037,12 @@ void hos_launch(ini_sec_t *cfg)
+ 
+ 	gfx_printf("Rebuilt & loaded pkg2\n\n%kBooting...%k\n", TXT_CLR_GREENISH, TXT_CLR_DEFAULT);
+ 
++	// sLaunch: cover the boot log with the package3-embedded splash, if any,
++	// right before the point of no return - same spot fusee-primary used to
++	// show it, before this hos_launch() replaced that as the pkg3 loader.
++	if (ctxt.pkg3_bmp && ctxt.pkg3_bmp_size >= (720 * 1280 * 4))
++		gfx_render_bmp_argb((u32 *)ctxt.pkg3_bmp, 720, 1280, 0, 0);
++
+ 	// Clear pkg1/pkg2 keys.
+ 	se_aes_key_clear(8);
+ 	se_aes_key_clear(11);
+diff --git a/bootloader/hos/hos.h b/bootloader/hos/hos.h
+index a9ab15d..ade4b94 100644
+--- a/bootloader/hos/hos.h
++++ b/bootloader/hos/hos.h
+@@ -119,6 +119,12 @@ typedef struct _launch_ctxt_t
+ 	u32   pkg3_hosver;
+ 	bool  patch_krn_proc_id;
+ 
++	// sLaunch: package3-embedded boot splash (CNT_TYPE_BMP), 720x1280 32bpp
++	// ARGB, bottom-up (same layout gfx_render_bmp_argb already expects from
++	// a logopath BMP). Just a pointer into ctxt->pkg3 - not separately freed.
++	void *pkg3_bmp;
++	u32   pkg3_bmp_size;
++
+ 	int ucid;
+ 
+ 	exo_ctxt_t exo_ctx;
+diff --git a/bootloader/hos/pkg3.c b/bootloader/hos/pkg3.c
+index 5190794..6dc0ee8 100644
+--- a/bootloader/hos/pkg3.c
++++ b/bootloader/hos/pkg3.c
+@@ -249,6 +249,11 @@ int parse_pkg3(launch_ctxt_t *ctxt, const char *path)
+ 				ctxt->warmboot = content;
+ 				break;
+ 
++			case CNT_TYPE_BMP:
++				ctxt->pkg3_bmp_size = curr_pkg3_cnt[i].size;
++				ctxt->pkg3_bmp = content;
++				break;
++
+ 			default:
+ 				continue;
+ 			}

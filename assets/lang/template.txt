@@ -152,7 +152,6 @@ No games to pick from=No games to pick from
 No payloads found in sdmc:/payloads=No payloads found in sdmc:/payloads
 No music found=No music found
 No .nro found in sdmc:/switch=No .nro found in sdmc:/switch
-No screenshots found=No screenshots found
 No widgets found=No widgets found
 Close running application?=Close running application?
 Yes=Yes
@@ -304,6 +303,89 @@ Loading...=Loading...
 Played=Played
 Never played=Never played
 
+# --- v1.4.0 (album clips, music art, GPU backgrounds, search) ---
+(unused)=(unused)
+Aurora=Aurora
+B: Clear search    Y: Search again=B: Clear search    Y: Search again
+Camera height=Camera height
+Could not play that clip=Could not play that clip
+Curtain width=Curtain width
+Curtains=Curtains
+Effect colour=Effect colour
+Effect colour 2=Effect colour 2
+Flare size=Flare size
+Grid lines=Grid lines
+Hem height=Hem height
+Hills=Hills
+Horizon=Horizon
+Icon colour=Icon colour
+Line width=Line width
+No matches=No matches
+No screenshots or clips found=No screenshots or clips found
+Ocean=Ocean
+Play=Play
+Reflection=Reflection
+Retrowave=Retrowave
+Ribbon glow=Ribbon glow
+Save & back=Save & back
+Scroll speed=Scroll speed
+Search=Search
+Search cleared=Search cleared
+Shortcuts everywhere=Shortcuts everywhere
+Sky=Sky
+Softness=Softness
+Speed=Speed
+Star density=Star density
+Star size=Star size
+Stars=Stars
+Sun X=Sun X
+Sun size=Sun size
+Sway=Sway
+Swell=Swell
+Twinkle speed=Twinkle speed
+Wave density=Wave density
+
+# --- v1.4.0 (music and album players) ---
+Pause=Pause
+Seek=Seek
+Repeat=Repeat
+Repeat all=Repeat all
+Repeat one=Repeat one
+Repeat off=Repeat off
+Previous / next=Previous / next
+Slideshow=Slideshow
+Slideshow on=Slideshow on
+Slideshow off=Slideshow off
+Info=Info
+View=View
+A: Launch   X: Pin to menu   B: Back=A: Launch   X: Pin to menu   B: Back
+A: Run as app   Y: Applet mode   X: Pin   B: Back=A: Run as app   Y: Applet mode   X: Pin   B: Back
+Added to Favourites=Added to Favourites
+Removed from Favourites=Removed from Favourites
+Anti-aliasing on next time the menu opens=Anti-aliasing on next time the menu opens
+Anti-aliasing off next time the menu opens=Anti-aliasing off next time the menu opens
+Homebrew donor cleared=Homebrew donor cleared
+Pinned to menu=Pinned to menu
+Unpinned=Unpinned
+
+# --- v1.4.0 (setup wizard, RetroArch toggle) ---
+Welcome to sLaunch=Welcome to sLaunch
+A clean HOME Menu replacement. Let's set it up - it only takes a moment.=A clean HOME Menu replacement. Let's set it up - it only takes a moment.
+How your games are laid out. You can change it any time in Theming.=How your games are laid out. You can change it any time in Theming.
+Applied as you browse. Make your own later in Theming > Themes.=Applied as you browse. Make your own later in Theming > Themes.
+A few things worth knowing before you start.=A few things worth knowing before you start.
+Everything here can be changed later in Theming.=Everything here can be changed later in Theming.
+A simple scrolling list=A simple scrolling list
+A carousel of covers=A carousel of covers
+A wall of tiles=A wall of tiles
+One big cover at a time=One big cover at a time
+A shelf of covers with details=A shelf of covers with details
+The PlayStation cross-media bar=The PlayStation cross-media bar
+3D game cases on a mirrored floor=3D game cases on a mirrored floor
+RetroArch games=RetroArch games
+RetroArch games (beta)=RetroArch games (beta)
+Heya! this feature is beta and really unstable! If you have over a thousand ROMs in your library be aware that the system may crash sometimes!=Heya! this feature is beta and really unstable! If you have over a thousand ROMs in your library be aware that the system may crash sometimes!
+
 # --- button hint icons (A/B/X/Y/L/R/+/-/D-pad/stick prompts) ---
 Adjust=Adjust
 Adjust value=Adjust value
@@ -325,7 +407,6 @@ Edit=Edit
 Edit color=Edit color
 Edit/Toggle=Edit/Toggle
 Finish=Finish
-Fullscreen=Fullscreen
 Get started=Get started
 Jump=Jump
 Launch=Launch
@@ -348,4 +429,55 @@ Toggle=Toggle
 Toggle effect=Toggle effect
 Type=Type
 Use this=Use this
-Windowed=Windowed
+
+# --- v1.4.0 (GameTDB, layout gallery) ---
+Homebrew donor set (browser Y: run as app)=Homebrew donor set (browser Y: run as app)
+Box art region=Box art region
+Recommended=Recommended
+recommended=recommended
+
+# --- v1.4.0 (file manager) ---
+A folder cannot go inside itself=A folder cannot go inside itself
+Actions=Actions
+Cancelled=Cancelled
+Copied=Copied
+Copy=Copy
+Copying=Copying
+Could not create the folder=Could not create the folder
+Could not open that picture=Could not open that picture
+Could not rename=Could not rename
+Could not start=Could not start
+Cut=Cut
+Delete=Delete
+Delete this?=Delete this?
+Deleting=Deleting
+Files=Files
+Moving=Moving
+New folder=New folder
+Not a valid name=Not a valid name
+Nothing here opens this kind of file=Nothing here opens this kind of file
+Page=Page
+Paste here=Paste here
+Something went wrong - nothing was lost=Something went wrong - nothing was lost
+That is gone=That is gone
+That name is taken=That name is taken
+This folder is empty=This folder is empty
+and everything in it=and everything in it
+
+# --- v1.4.0 (box art status) ---
+SteamGridDB=SteamGridDB
+Looking up=Looking up
+Updating the game list=Updating the game list
+Downloading box art=Downloading box art
+Saving=Saving
+Screenshots=Screenshots
+Box art added=Box art added
+No box art found=No box art found
+Could not download=Could not download
+
+# --- USB file transfer ---
+Receiving=Receiving
+Sending=Sending
+USB transfer done=USB transfer done
+%u received, %u sent, %u deleted=%u received, %u sent, %u deleted
+Connected to a computer: SD card open for file transfer=Connected to a computer: SD card open for file transfer

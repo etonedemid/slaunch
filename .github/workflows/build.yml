@@ -27,7 +27,8 @@ jobs:
             switch-mbedtls \
             switch-zlib
 
-      # Atmosphere libstratosphere (needed by sSystem for ECS)
+      # Atmosphere libstratosphere (needed by sSystem for ECS); sMenu also
+      # builds haze (USB file transfer) against its libvapours headers.
       # Clone a pinned Atmosphere release tag and build just libstratosphere.
       - name: Setup Atmosphere libs
         run: |
@@ -38,6 +39,12 @@ jobs:
           mkdir -p $DEVKITPRO/AtmosphereLibs/include $DEVKITPRO/AtmosphereLibs/lib
           cp -r include/. $DEVKITPRO/AtmosphereLibs/include/
           find . -name "*.a" -exec cp {} $DEVKITPRO/AtmosphereLibs/lib/ \;
+
+      # Trimmed static FFmpeg (H.264 decode + nvtegra NVDEC hwaccel only) for
+      # sMenu's video wallpapers. See scripts/build-ffmpeg.sh and
+      # THIRDPARTY.md.
+      - name: Setup FFmpeg libs
+        run: scripts/build-ffmpeg.sh
 
       - name: Build sMenu
         run: make smenu

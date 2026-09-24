@@ -548,6 +548,13 @@ int main(int argc, char **argv) {
                    (unsigned long long)(ft_count - 1));
         }
 
+        {
+            const auto ts = gfx.Textures();
+            printf("[sim] textures: %ld created, %ld pool slots, "
+                   "%ld cached (%.1f MB)\n",
+                   ts.creates, ts.slots, ts.cached, ts.cached_bytes / 1048576.0);
+        }
+
         if (joy) SDL_JoystickClose(joy);
     }
 

@@ -24,6 +24,11 @@ namespace sl::menu::dbg {
         int items      = 0;   // entries in the current menu list
         int widgets    = 0;   // loaded Lua widgets
         int ui_mode    = 0;   // active UiMode, as a number
+        long   tex_created  = 0;  // textures asked of the driver since start
+        long   tex_failures = 0;  // ...of which it refused
+        long   tex_slots    = 0;  // live pool slots
+        long   tex_cached   = 0;
+        size_t tex_bytes    = 0;
     };
 
     class Overlay {

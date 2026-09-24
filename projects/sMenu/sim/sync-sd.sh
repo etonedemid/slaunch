@@ -33,9 +33,8 @@ echo "simulator: $DEST"
 mkdir -p "$DEST/slaunch"
 
 # Everything the menu reads, minus three things:
-#   cache/blur  - keyed on each wallpaper's size and mtime, both of which change
-#                 when the file is copied, so every entry would miss anyway. It
-#                 rebuilds itself on first draw.
+#   cache/blur  - left behind by older builds, which blurred wallpapers on
+#                 the CPU; the blur is done on the GPU now and never read.
 #   *.log       - the console's own boot/cover logs; the simulator writes its
 #                 own and mixing them makes both useless.
 #   config/kb_* - keyboard handoff to a daemon that does not exist here.

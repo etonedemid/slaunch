@@ -209,6 +209,13 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
             g_Pending = Pending::LaunchHomebrewApp;
             strncpy(g_PendingHbPath, hb->nro_path, sizeof(g_PendingHbPath) - 1);
             g_PendingHbPath[sizeof(g_PendingHbPath) - 1] = '\0';
+            // Never copied here before, so WriteHbTarget below handed this
+            // launch whatever argv the *previous* one left in the buffer. It
+            // went unnoticed while every .nro was passed only its own path and
+            // the two were the same string; a shortcut that carries real
+            // arguments would have been launched with the last one's.
+            strncpy(g_PendingHbArgv, hb->argv, sizeof(g_PendingHbArgv) - 1);
+            g_PendingHbArgv[sizeof(g_PendingHbArgv) - 1] = '\0';
             g_PendingDonorId = hb->donor_id;
             break;
         }

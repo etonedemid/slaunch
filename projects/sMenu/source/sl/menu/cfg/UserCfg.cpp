@@ -36,6 +36,7 @@ namespace sl::menu::cfg {
             "favourites.txt",
             "hb_favourites.txt",
             "homebrew.txt",       // pinned .nro
+            "shortcuts.txt",      // launcher shortcuts (.nro + argv)
             "music.txt",          // menu music: on/off, volume, track
             "widget_pos.txt",     // where the floating widgets sit
             "widget_enabled.txt", // which of them are on

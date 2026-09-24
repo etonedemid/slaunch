@@ -441,8 +441,8 @@ namespace sl::menu::news {
                           UrlEncode(q, "");
         if (!net::Get(url.c_str(), body, 10)) return;
 
-        const std::string appid = Field(body, "appid", 0, body.size());
-        if (appid.empty()) return;
+        const std::string appid = net::SteamAppFor(body, m_job_name);
+        if (appid.empty()) return;   // not on Steam: no news beats someone else's
 
         char nurl[192];
         snprintf(nurl, sizeof(nurl),

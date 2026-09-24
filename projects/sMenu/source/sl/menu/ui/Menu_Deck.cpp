@@ -90,51 +90,10 @@ namespace sl::menu::ui {
     // source is 3.1:1 and the tile is 16:9, nowhere close enough to just blit.
     SDL_Texture *Menu::HeroArt(const MenuItem &it) {
         if (it.kind != ItemKind::Game || it.app_id == 0) return nullptr;
-
         auto f = m_hero_art.find(it.app_id);
         if (f != m_hero_art.end()) return f->second;   // nullptr is cached too
-
-        char path[96];
-        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_hero.jpg",
-                 (unsigned long long)it.app_id);
-        if (m_cover_budget <= 0) return nullptr;
-
-        struct stat src {};
-        if (stat(path, &src) != 0) {           // no hero art for this title
-            m_hero_art[it.app_id] = nullptr;
-            return nullptr;
-        }
-
-        const u64 t_cov0 = armGetSystemTick();
-        char key[32];
-        snprintf(key, sizeof(key), "%016llX_hero", (unsigned long long)it.app_id);
-        const std::string cpath = TexCachePath(key);
-        if (SDL_Texture *hit = ReadCoverTex(m_gfx->Renderer(), cpath.c_str(), src,
-                                            kDeckHeroW, kDeckRowH)) {
-            m_cover_budget--;
-            m_hero_art[it.app_id] = hit;
-            g_cover_hits++;
-            g_cover_ms += (unsigned)((armGetSystemTick() - t_cov0) * 1000
-                                     / armGetSystemTickFreq());
-            return hit;
-        }
-
-        if (m_decode_budget <= 0) return nullptr;
-        m_decode_budget--;
-        m_cache_msg_tick = armGetSystemTick();
-        m_cache_built++;
-
-        SDL_Texture *tex = nullptr;
-        if (SDL_Surface *surf = DecodeCoverSurfaceCropped(path, kDeckHeroW, kDeckRowH, 0.5f)) {
-            WriteCoverTex(cpath.c_str(), src, surf);
-            tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), surf);
-            SDL_FreeSurface(surf);
-        }
-        m_hero_art[it.app_id] = tex;
-        g_cover_miss++;
-        g_cover_ms += (unsigned)((armGetSystemTick() - t_cov0) * 1000
-                                 / armGetSystemTickFreq());
-        return tex;
+        QueueArt(Art_Hero, it.app_id);                 // see PollArt, Menu_Flow.cpp
+        return nullptr;
     }
     void Menu::DeckFreeArt() {
         for (auto &kv : m_news_art)
@@ -205,6 +164,7 @@ namespace sl::menu::ui {
         // below), and a rect matching the row exactly would clip that border
         // off top and bottom. Only the right edge needs holding back.
         const SDL_Rect deckRowClip{0, 0, gfx::Gfx::Width - kDeckRowRight, gfx::Gfx::Height};
+        m_gfx->FxClose();   // SDL is used directly below
         SDL_RenderSetClipRect(m_gfx->Renderer(), &deckRowClip);
         for (int i = 0; i < rn; i++) {
             const int w = (i == 0) ? kDeckHeroW : kDeckTileW;
@@ -268,6 +228,12 @@ namespace sl::menu::ui {
                 // The frame is what says the row has focus: when the cards or
                 // the tabs have it, the selection is still marked but quietly.
                 const SDL_Color fr = row_games ? t.accent : WithAlpha(t.fg, 90);
+                // A halo under the frame while this row has focus, so the
+                // selected tile lifts off the row instead of being marked only
+                // by a hairline. Additive, so it reads as light rather than as
+                // a second border.
+                if (row_games)
+                    m_gfx->GlowRect(x, kDeckRowY, w, kDeckRowH, t.accent, 14);
                 const int fw = row_games ? 3 : 2;
                 m_gfx->FillRect(x - fw, kDeckRowY - fw, w + fw * 2, fw, fr);
                 m_gfx->FillRect(x - fw, kDeckRowY + kDeckRowH, w + fw * 2, fw, fr);
@@ -275,6 +241,7 @@ namespace sl::menu::ui {
                 m_gfx->FillRect(x + w, kDeckRowY, fw, kDeckRowH, fr);
             }
         }
+        m_gfx->FxClose();   // SDL is used directly below
         SDL_RenderSetClipRect(m_gfx->Renderer(), nullptr);
 
         // ---- name and play line, for whatever is selected --------------------
@@ -352,9 +319,11 @@ namespace sl::menu::ui {
                     m_gfx->FillRect(x + kDeckCardW, kDeckCardY, 2, kDeckCardH, t.accent);
                 }
                 SDL_Rect clip { x + 10, kDeckCardY + 8, kDeckCardW - 20, kDeckCardH - 16 };
+                m_gfx->FxClose();   // SDL is used directly below
                 if (ren) SDL_RenderSetClipRect(ren, &clip);
                 wd->Render(m_gfx, t, x + 12, kDeckCardY + 10, kDeckCardW - 24,
                            kDeckCardH - 20);
+                m_gfx->FxClose();   // SDL is used directly below
                 if (ren) SDL_RenderSetClipRect(ren, nullptr);
                 slot++;
             }
@@ -416,8 +385,11 @@ namespace sl::menu::ui {
         // Hint line: what the two buttons this layout adds actually do. Skipped
         // when this is being drawn as the side menu's backdrop, which prints a
         // hint of its own over the top.
-        if (!m_deck_backdrop)
+        if (!m_items.empty() && !ScrollBusy()) FetchArtFor(m_items[m_cursor]);
+        if (!m_deck_backdrop) {
+            DrawFetchStatus();
             DrawStatusHint({ {{"a"}, "Open"}, {{"y"}, "Library"}, {{"minus"}, "Menu"}, {{"x"}, "Options"} });
+        }
     }
     // Draw `s` word-wrapped into `w`, at most `max_lines` lines, ellipsising the
     // last one. Returns the number of lines drawn.
@@ -651,6 +623,7 @@ namespace sl::menu::ui {
         SDL_Renderer *ren = m_gfx->Renderer();
         SDL_Rect clip { 0, kDeckLibTop - 6, gfx::Gfx::Width,
                         kDeckLibBot - kDeckLibTop + 12 };
+        m_gfx->FxClose();   // SDL is used directly below
         if (ren) SDL_RenderSetClipRect(ren, &clip);
 
         for (int i = 0; i < n; i++) {
@@ -679,6 +652,7 @@ namespace sl::menu::ui {
             if (it.is_favourite)
                 m_gfx->Text(FontSize::Small, x + 8, y + 6, t.accent, "*");
         }
+        m_gfx->FxClose();   // SDL is used directly below
         if (ren) SDL_RenderSetClipRect(ren, nullptr);
 
         DrawHint({ {{"dpad"}, "Move"}, {{"a"}, "Launch"}, {{"l","r"}, "Tab"}, {{"b"}, "Back"} });
@@ -777,7 +751,12 @@ namespace sl::menu::ui {
         const Theme &t = m_theme.Current();
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height,
                         SDL_Color{ 0, 0, 0, dimAlpha });
-        m_gfx->FillRect(xoff, 0, kDeckMenuW, gfx::Gfx::Height, WithAlpha(t.bg_top, 246));
+        // Frosted: the panel samples the menu drawn behind it this frame, so it
+        // blurs whatever is actually back there - including the covers moving
+        // under it - rather than sitting on a flat block of colour. The tint on
+        // top is what keeps the text readable over it.
+        m_gfx->DrawSceneBlurred(xoff, 0, kDeckMenuW, gfx::Gfx::Height, 10);
+        m_gfx->FillRect(xoff, 0, kDeckMenuW, gfx::Gfx::Height, WithAlpha(t.bg_top, 205));
         m_gfx->FillRect(xoff + kDeckMenuW, 0, 2, gfx::Gfx::Height, WithAlpha(t.accent, 120));
 
         m_gfx->Text(FontSize::Large, 34 + xoff, 34, t.title, T("Menu"));
@@ -808,11 +787,13 @@ namespace sl::menu::ui {
             if (rows[i] < 0) {
                 label = T("Library");
                 // No item to take an icon from, so it draws its own: four tiles,
-                // which is what the screen it opens looks like.
+                // which is what the screen it opens looks like. Drawn in the
+                // icon colour rather than the text colour, so it matches the
+                // real glyphs sitting above and below it in this list.
                 m_gfx->FillRect(24 + xoff, y - 2, 36, 36, IconPlate(t, 255));
                 for (int q = 0; q < 4; q++)
                     m_gfx->FillRect(30 + xoff + (q % 2) * 13, y + 4 + (q / 2) * 13,
-                                    10, 10, sel ? t.accent : t.fg);
+                                    10, 10, sel ? t.accent : t.icon_fg);
             } else {
                 label = m_items[rows[i]].name.c_str();
                 DrawAppTile(m_items[rows[i]], 24 + xoff, y - 2, 36, false, 255);

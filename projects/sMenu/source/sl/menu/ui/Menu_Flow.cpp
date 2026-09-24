@@ -36,66 +36,313 @@ namespace sl::menu::ui {
     // wiring that up later needs no change here.
     SDL_Texture *Menu::FlowCover(const MenuItem &it) {
         if (it.kind != ItemKind::Game || it.app_id == 0) return nullptr;
-
         auto f = m_covers.find(it.app_id);
         if (f != m_covers.end()) return f->second;   // nullptr is cached too
-
-        char path[96];
-        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX.jpg",
-                 (unsigned long long)it.app_id);
-        // Nothing is recorded when a budget runs out, so the next frame simply
-        // retries. Hits and decodes draw on separate budgets: see below.
-        if (m_cover_budget <= 0) return nullptr;
-
-        // Downscaled to 480x720. A box is 185-260 px wide on screen and a grid
-        // is 600x900, so the full image is four times the resolution anyone can
-        // see and four times the memory. The tuning screen can grow the boxes,
-        // hence the headroom rather than matching the drawn size exactly.
-        //
-        // The finished pixels are cached (see above), so this decode happens
-        // once per cover rather than on every launch.
-        struct stat src {};
-        if (stat(path, &src) != 0) {           // no art for this title
-            m_covers[it.app_id] = nullptr;
-            return nullptr;
-        }
-
-        const u64 t_cov0 = armGetSystemTick();
-        char key[24];
-        snprintf(key, sizeof(key), "%016llX", (unsigned long long)it.app_id);
-        const std::string cpath = TexCachePath(key);
-        if (SDL_Texture *hit = ReadCoverTex(m_gfx->Renderer(), cpath.c_str(), src,
-                                            kCoverTexW, kCoverTexH)) {
-            m_cover_budget--;
-            m_covers[it.app_id] = hit;
-            g_cover_hits++;
-            g_cover_ms += (unsigned)((armGetSystemTick() - t_cov0) * 1000
-                                     / armGetSystemTickFreq());
-            return hit;
-        }
-
-        // A miss costs an order of magnitude more than a hit: a 600x900 PNG
-        // inflate, then a 691 KB write back to the card. Six of those in one
-        // frame - which is what sharing the hit budget allowed - is a two-second
-        // stall while scrolling. They come out of their own much smaller budget,
-        // which is zero while the row is moving.
-        if (m_decode_budget <= 0) return nullptr;
-        m_decode_budget--;
-        m_cache_msg_tick = armGetSystemTick();
-        m_cache_built++;
-
-        SDL_Texture *tex = nullptr;
-        if (SDL_Surface *surf = DecodeCoverSurface(path, kCoverTexW, kCoverTexH)) {
-            WriteCoverTex(cpath.c_str(), src, surf);
-            tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), surf);
-            SDL_FreeSurface(surf);
-        }
-        m_covers[it.app_id] = tex;
-        g_cover_miss++;
-        g_cover_ms += (unsigned)((armGetSystemTick() - t_cov0) * 1000
-                                 / armGetSystemTickFreq());
-        return tex;
+        QueueArt(Art_Cover, it.app_id);              // lands in a frame or two
+        return nullptr;
     }
+    SDL_Texture *Menu::GameWrap(const MenuItem &it) {
+        if (it.kind != ItemKind::Game || it.app_id == 0) return nullptr;
+        auto f = m_game_wraps.find(it.app_id);
+        if (f != m_game_wraps.end()) return f->second;   // nullptr is cached too
+        QueueArt(Art_Wrap, it.app_id);
+        return nullptr;
+    }
+
+    // ---- background art loader ----------------------------------------------
+    // Everything that touches the card or inflates an image runs here: the
+    // stat, the texture-cache read, and on a miss the decode and the write
+    // back. Only surfaces come out; textures need the renderer, so PollArt
+    // uploads them on the main thread.
+    void Menu::QueueArt(int kind, u64 id) {
+        if (!m_art_pending.insert({kind, id}).second) return;   // already asked
+        if (!m_art_started) {
+            // Core 1, away from the render thread on core 0: at a lower
+            // priority on the same core it only ever ran in the gaps between
+            // frames, which is why art trickled in. Core 0 if 1 is refused.
+            if (R_FAILED(threadCreate(&m_art_thread, &Menu::ArtTrampoline, this,
+                                      nullptr, 0x20000, 0x3B, 1)) &&
+                R_FAILED(threadCreate(&m_art_thread, &Menu::ArtTrampoline, this,
+                                      nullptr, 0x20000, 0x3B, -2))) {
+                m_art_pending.erase({kind, id});
+                return;
+            }
+            threadStart(&m_art_thread);
+            m_art_started = true;
+        }
+        std::lock_guard<std::mutex> lk(m_art_mx);
+        m_art_q.push_back(ArtJob{ id, kind, m_art_epoch, nullptr, false });
+        // Scrolling through a big library asks for far more than anyone will
+        // stop on. The oldest requests are the boxes already scrolled past, so
+        // they go; they are asked for again if they come back into view.
+        while (m_art_q.size() > 24) {
+            m_art_pending.erase({m_art_q.front().kind, m_art_q.front().id});
+            m_art_q.pop_front();
+        }
+        m_art_cv.notify_one();
+    }
+    void Menu::ArtTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        for (;;) {
+            ArtJob j;
+            {
+                std::unique_lock<std::mutex> lk(m->m_art_mx);
+                m->m_art_cv.wait(lk, [m] { return m->m_art_quit || !m->m_art_q.empty(); });
+                if (m->m_art_quit) return;
+                j = m->m_art_q.back();              // newest first: what is on screen now
+                m->m_art_q.pop_back();
+            }
+            static const char *const kSuffix[] = { ".jpg", "_wrap.png", "_hero.jpg" };
+            static const char *const kKey[]    = { "", "_wrap", "_hero" };
+            static const int kW[] = { kCoverTexW, 700, kDeckHeroW };
+            static const int kH[] = { kCoverTexH, 540, kDeckRowH };
+            char path[96], key[32];
+            snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX%s",
+                     (unsigned long long)j.id, kSuffix[j.kind]);
+            snprintf(key, sizeof(key), "%016llX%s", (unsigned long long)j.id, kKey[j.kind]);
+            struct stat src {};
+            if (stat(path, &src) == 0) {           // no file: a null result, remembered
+                const std::string cpath = TexCachePath(key);
+                const int w = kW[j.kind], h = kH[j.kind];
+                j.surf = ReadCoverSurf(cpath.c_str(), src, w, h);
+                if (!j.surf) {
+                    // Hero art is 3.1:1 and its tile 16:9, so it is cropped;
+                    // covers and box scans already have their tile's shape.
+                    j.surf = j.kind == Art_Hero ? DecodeCoverSurfaceCropped(path, w, h, 0.5f)
+                                                : DecodeCoverSurface(path, w, h);
+                    if (j.surf) { WriteCoverTex(cpath.c_str(), src, j.surf); j.built = true; }
+                }
+                // SDL's GLES2 renderer has no RGB565 texture, so uploading one
+                // converts it pixel by pixel on the main thread. Converting
+                // here leaves the upload a plain copy.
+                if (j.surf) {
+                    SDL_Surface *conv = SDL_ConvertSurfaceFormat(j.surf, SDL_PIXELFORMAT_ABGR8888, 0);
+                    if (conv) { SDL_FreeSurface(j.surf); j.surf = conv; }
+                }
+            }
+            std::lock_guard<std::mutex> lk(m->m_art_mx);
+            m->m_art_done.push_back(j);
+        }
+    }
+    void Menu::PollArt() {
+        std::vector<ArtJob> done;
+        {
+            std::lock_guard<std::mutex> lk(m_art_mx);
+            if (m_art_done.empty()) return;
+            // A few uploads a frame: each is a copy of a few hundred KB into
+            // the GPU, cheap alone but not ten at once.
+            const size_t n = std::min<size_t>(m_art_done.size(),
+                                              (size_t)std::max(m_cover_budget, 0) / 2);
+            done.assign(m_art_done.begin(), m_art_done.begin() + n);
+            m_art_done.erase(m_art_done.begin(), m_art_done.begin() + n);
+        }
+        for (ArtJob &j : done) {
+            m_art_pending.erase({j.kind, j.id});
+            // The art on the card changed while this was in flight (a fetch or
+            // the picker landed): drop it, and the next frame asks again.
+            if (j.epoch != m_art_epoch) { if (j.surf) SDL_FreeSurface(j.surf); continue; }
+            auto &map = j.kind == Art_Cover ? m_covers
+                      : j.kind == Art_Wrap  ? m_game_wraps : m_hero_art;
+            SDL_Texture *tex = nullptr;
+            if (j.surf) {
+                tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), j.surf);
+                SDL_FreeSurface(j.surf);
+            }
+            auto old = map.find(j.id);
+            if (old != map.end() && old->second) m_gfx->FreeImage(old->second);
+            map[j.id] = tex;
+            if (j.kind == Art_Cover) (j.built ? g_cover_miss : g_cover_hits)++;
+            if (j.built) { m_cache_msg_tick = armGetSystemTick(); m_cache_built++; }
+        }
+    }
+    void Menu::StopArt() {
+        if (!m_art_started) return;
+        {
+            std::lock_guard<std::mutex> lk(m_art_mx);
+            m_art_quit = true;
+            m_art_q.clear();
+        }
+        m_art_cv.notify_one();
+        threadWaitForExit(&m_art_thread);
+        threadClose(&m_art_thread);
+        m_art_started = false;
+        for (ArtJob &j : m_art_done)
+            if (j.surf) SDL_FreeSurface(j.surf);
+        m_art_done.clear();
+        m_art_pending.clear();
+    }
+    bool Menu::TdbFront(u64 app_id) {
+        auto f = m_tdb_front.find(app_id);
+        if (f != m_tdb_front.end()) return f->second;
+        char path[96];
+        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_tdb", (unsigned long long)app_id);
+        struct stat st {};
+        return m_tdb_front[app_id] = (stat(path, &st) == 0);
+    }
+
+    // Shelf and Deck show box art too: once the selection rests on a game
+    // whose cover was looked for and not found, fetch it the way Flow does.
+    void Menu::FetchArtFor(const MenuItem &it) {
+        if (it.kind != ItemKind::Game || it.app_id == 0) return;
+        const auto c = m_covers.find(it.app_id);
+        if (c != m_covers.end() && c->second == nullptr) StartCoverFetch(it.app_id, it.name);
+    }
+
+    // A small bar above the hints while box art is being fetched: which game,
+    // what step, how far a download has got. Once the worker finishes, the
+    // outcome stays up for a couple of seconds and fades.
+    void Menu::DrawFetchStatus() {
+        const auto stage = (FetchStage)m_fetch_stage.load();
+        if (stage == FetchStage::Idle) return;
+        float a = 1.0f;
+        const bool done = stage >= FetchStage::Added;
+        if (done) {
+            const u64 ms = (armGetSystemTick() - m_fetch_end_tick) * 1000 / armGetSystemTickFreq();
+            if (ms > 3000) { m_fetch_stage.store((int)FetchStage::Idle); return; }
+            if (ms > 2400) a = 1.0f - (ms - 2400) / 600.0f;
+        }
+        const Theme &t = m_theme.Current();
+        static const char *kText[] = { "", "Looking up", "Updating the game list", "Downloading box art",
+                                       "Saving", "SteamGridDB", "Screenshots",
+                                       "Box art added", "No box art found", "Could not download" };
+        const Uint8 A = (Uint8)(255 * a);
+        // In the middle of the top bar, which every main layout leaves free:
+        // one line - step, percentage, game - with a thin bar under it.
+        const int W = gfx::Gfx::Width, w = 460, x = (W - w) / 2, y = 14;
+        std::string line = std::string(T(kText[(int)stage]));
+        const u64 now = m_fetch_now.load(), total = m_fetch_total.load();
+        if (!done && total > 0) {
+            char pct[16];
+            snprintf(pct, sizeof(pct), " %d%%", (int)(now * 100 / total));
+            line += pct;
+        }
+        line += "  \xC2\xB7  " + m_fetch_title;
+        m_gfx->TextCentered(FontSize::Small, W / 2, y, WithAlpha(t.dim, A),
+                            Ellipsize(line, w, FontSize::Small).c_str());
+        // Progress: real when a download reports its size, otherwise a
+        // sliding block so it still reads as working.
+        if (done) return;
+        const int bx = x, by = y + m_gfx->LineHeight(FontSize::Small) + 4, bw = w;
+        m_gfx->FillRect(bx, by, bw, 2, WithAlpha(t.dim, (Uint8)(60 * a)));
+        if (total > 0) {
+            m_gfx->FillRect(bx, by, (int)(bw * std::min(1.0, (double)now / total)), 2, WithAlpha(t.accent, A));
+        } else {
+            const float ph = fmodf((float)armGetSystemTick() / armGetSystemTickFreq() * 0.8f, 1.0f);
+            const int seg = bw / 4, sx = bx + (int)((bw + seg) * ph) - seg;
+            const int x0 = std::max(bx, sx), x1 = std::min(bx + bw, sx + seg);
+            if (x1 > x0) m_gfx->FillRect(x0, by, x1 - x0, 2, WithAlpha(t.accent, A));
+        }
+    }
+
+    // ---- GameTDB box scans --------------------------------------------------
+    //
+    // GameTDB keeps scans of the whole printed insert of almost every boxed
+    // Switch game - back, spine and front in one image - with no key needed.
+    // It knows games by its own five-letter ids, not by title id, so the link
+    // is the name, matched strictly (net::TitlesMatch) against its title list.
+    // The scan is kept downscaled as covers/<id>_wrap.png, and its front is
+    // cropped out as the cover when the game has none yet.
+    namespace {
+        constexpr const char *kTdbIndex = "sdmc:/slaunch/cache/gametdb_switch.txt";
+        // Where a scan's panels sit across its width.
+        constexpr float kScanSpine0 = 0.476f, kScanSpine1 = 0.524f;
+
+        std::vector<std::string> TdbFind(const std::string &name) {
+            std::vector<std::string> ids;
+            FILE *fp = fopen(kTdbIndex, "r");
+            if (!fp) return ids;
+            char line[512];
+            while (fgets(line, sizeof(line), fp) && ids.size() < 4) {
+                char *eq = strstr(line, " = ");
+                if (!eq || eq - line != 5) continue;           // also skips the header
+                *eq = '\0';
+                std::string title = eq + 3;
+                while (!title.empty() && (title.back() == '\n' || title.back() == '\r'))
+                    title.pop_back();
+                if (net::TitlesMatch(title, name)) ids.emplace_back(line);
+            }
+            fclose(fp);
+            return ids;
+        }
+
+        // Returns true when a wrap was written; `cover_made` when the front
+        // was also saved as the game's cover.
+        bool FetchGameTdb(u64 app_id, const std::string &name, bool need_cover,
+                          int region, bool &cover_made, std::atomic<int> &stage,
+                          std::atomic<uint64_t> &dl_now, std::atomic<uint64_t> &dl_total) {
+            using Stage = FetchStage;
+            cover_made = false;
+            struct stat st {};
+            const time_t now = time(nullptr);
+            if (stat(kTdbIndex, &st) != 0 || (now > st.st_mtime && now - st.st_mtime > 14 * 86400)) {
+                mkdir("sdmc:/slaunch/cache", 0777);
+                stage.store((int)Stage::Index);
+                net::Download("https://www.gametdb.com/switchtdb.txt?LANG=EN", kTdbIndex, 40, &dl_now, &dl_total);
+                stage.store((int)Stage::Lookup);
+            }
+            const std::vector<std::string> ids = TdbFind(name);
+            if (ids.empty()) return false;
+
+            std::vector<std::string> regions{ kTdbRegions[std::clamp(region, 0, kTdbRegionCount - 1)] };
+            for (const char *r : { "US", "EN", "JA" })
+                if (regions[0] != r) regions.emplace_back(r);
+
+            const char *tmp = "sdmc:/slaunch/cache/gametdb_dl.jpg";
+            bool got = false;
+            for (const auto &id : ids) {
+                for (const auto &r : regions) {
+                    const std::string url = "https://art.gametdb.com/switch/coverfullHQ/" + r + "/" + id + ".jpg";
+                    stage.store((int)Stage::Scan);
+                    if (net::Download(url.c_str(), tmp, 40, &dl_now, &dl_total)) { got = true; break; }
+                }
+                if (got) break;
+            }
+            if (!got) return false;
+
+            stage.store((int)Stage::Save);
+            SDL_Surface *raw = IMG_Load(tmp);
+            remove(tmp);
+            if (!raw) return false;
+            SDL_Surface *src = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGB24, 0);
+            SDL_FreeSurface(raw);
+            if (!src || src->w < 100 || src->h < 100) { if (src) SDL_FreeSurface(src); return false; }
+
+            auto scaled = [&](const SDL_Rect *from, int w, int h) -> SDL_Surface * {
+                SDL_Surface *d = SDL_CreateRGBSurfaceWithFormat(0, w, h, 24, SDL_PIXELFORMAT_RGB24);
+                if (d) SDL_BlitScaled(src, from, d, nullptr);
+                return d;
+            };
+            char path[96];
+            bool ok = false;
+            const int ww = std::min(src->w, 1400), wh = src->h * ww / src->w;
+            if (SDL_Surface *w = scaled(nullptr, ww, wh)) {
+                // PNG, never IMG_SaveJPG: libjpeg's compressor errors on the
+                // console, and SDL_image's escape from a libjpeg error takes
+                // the whole menu down (see ImageLooksWhole in Http.cpp).
+                snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_wrap.png", (unsigned long long)app_id);
+                ok = IMG_SavePNG(w, path) == 0;
+                SDL_FreeSurface(w);
+            }
+            if (ok && need_cover) {
+                const int fx = (int)(src->w * kScanSpine1);
+                const SDL_Rect front{ fx, 0, src->w - fx, src->h };
+                if (SDL_Surface *c = scaled(&front, 600, 900)) {
+                    // Named .jpg because that is where every layout looks for a
+                    // cover; the loader goes by the file's contents, not its name.
+                    snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX.jpg", (unsigned long long)app_id);
+                    cover_made = IMG_SavePNG(c, path) == 0;
+                    SDL_FreeSurface(c);
+                    if (cover_made) {
+                        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_tdb", (unsigned long long)app_id);
+                        if (FILE *f = fopen(path, "w")) fclose(f);
+                    }
+                }
+            }
+            SDL_FreeSurface(src);
+            return ok;
+        }
+    }
+
     // ---- SteamGridDB cover fetch --------------------------------------------
     //
     // Switch control data carries a square icon and nothing else, so box art has
@@ -143,6 +390,31 @@ namespace sl::menu::ui {
         }
         m->m_cover_state.store((int)CoverState::Searching, std::memory_order_release);
         CoverState end = CoverState::Failed;
+
+        // GameTDB first: keyless, and a real box scan beats everything else.
+        // With one, the back of the case is printed already, so Steam's
+        // screenshots are not needed either.
+        m->m_wrap_ok = false;
+        {
+            char probe[96];
+            struct stat st {};
+            snprintf(probe, sizeof(probe), "sdmc:/slaunch/covers/%016llX_wrap.png",
+                     (unsigned long long)m->m_cover_id);
+            bool have_wrap = (stat(probe, &st) == 0);
+            if (!have_wrap && !net::ContentFilter::ShouldFilterGameByName(m->m_cover_name)) {
+                bool cover_made = false;
+                have_wrap = FetchGameTdb(m->m_cover_id, m->m_cover_name, need_cover,
+                                         m->m_tdb_region, cover_made, m->m_fetch_stage,
+                                         m->m_fetch_now, m->m_fetch_total);
+                m->m_wrap_ok = have_wrap;
+                if (cover_made) { m->m_cover_ok = true; need_cover = false; end = CoverState::Got; }
+            }
+            if (have_wrap) need_shots = false;
+        }
+        // SteamGridDB only when the user turned it on and gave it a key;
+        // otherwise only the keyless Steam screenshots remain to look for.
+        if (!m->m_sgdb_enabled || m->m_sgdb_key.empty()) { need_cover = false; need_hero = false; }
+        if (need_cover || need_hero) m->m_fetch_stage.store((int)FetchStage::Sgdb);
 
         do {
             const std::string auth = "Bearer " + m->m_sgdb_key;
@@ -267,6 +539,7 @@ namespace sl::menu::ui {
 
         shots:
             if (!need_shots) break;
+            m->m_fetch_stage.store((int)FetchStage::Shots);
 
             // The two panels on the back of the case.
             //
@@ -293,9 +566,10 @@ namespace sl::menu::ui {
                 logline("steam-search", http, rc, body.size());
                 if (!oka && (http == 0 || http >= 500)) m->m_steam_dead = true;
 
-                // The search returns an array; the first appid is the best
-                // match. It is a string in this response, not a number.
-                const std::string appid = oka ? JsonStr(body, "appid") : std::string();
+                // Only a result that is really this game: Steam's search always
+                // returns something, and the first hit for a title that is not
+                // on Steam is some other game (see net::SteamAppFor).
+                const std::string appid = oka ? net::SteamAppFor(body, m->m_cover_name) : std::string();
 
                 if (!appid.empty()) {
                     snprintf(url_s, sizeof(url_s),
@@ -339,21 +613,26 @@ namespace sl::menu::ui {
         } while (false);
 
         m->m_cover_state.store((int)end, std::memory_order_release);
+        // The outcome, for the status bar: something new landed, nothing was
+        // found, or the network let us down.
+        m->m_fetch_stage.store((int)(m->m_cover_ok || m->m_wrap_ok || m->m_shots_ok || m->m_hero_ok
+                                     ? FetchStage::Added
+                                     : (end == CoverState::Failed ? FetchStage::Failed : FetchStage::NotFound)));
         m->m_cover_done.store(true, std::memory_order_release);
     }
     void Menu::StartCoverFetch(u64 app_id, const std::string &name) {
         if (m_cover_running || app_id == 0 || name.empty()) return;
 
-        if (!SgdbKeyPresent()) {
-            m_cover_state.store((int)CoverState::NoKey, std::memory_order_release);
-            return;                        // no key: feature stays off entirely
-        }
-
+        // No key is no longer the end of it: GameTDB and Steam need none.
+        SgdbKeyPresent();                  // loads the key, if there is one
         if (m_cover_tried.count(app_id))  return;
 
         m_cover_tried[app_id] = true;
         m_cover_id   = app_id;
         m_cover_name = name;
+        m_fetch_title = name;
+        m_fetch_now.store(0); m_fetch_total.store(0);
+        m_fetch_stage.store((int)FetchStage::Lookup);
         m_cover_done.store(false, std::memory_order_release);
         if (R_SUCCEEDED(threadCreate(&m_cover_thread, &Menu::CoverFetchTrampoline,
                                      this, nullptr, 0x20000, 0x3B, -2))) {
@@ -366,6 +645,7 @@ namespace sl::menu::ui {
         threadWaitForExit(&m_cover_thread);
         threadClose(&m_cover_thread);
         m_cover_running = false;
+        m_fetch_end_tick = armGetSystemTick();   // the outcome shows for a moment
 
         // Screenshots arrived: drop the recorded "none" so they decode.
         if (m_shots_ok) {
@@ -375,6 +655,18 @@ namespace sl::menu::ui {
                 if (g->second.b) m_gfx->FreeImage(g->second.b);
                 m_shots.erase(g);
             }
+        }
+
+        if (m_wrap_ok || m_hero_ok || m_cover_ok) m_art_epoch++;
+        // A box scan arrived: drop what was cached for this game so the wrap
+        // (and a cover cut from it) are picked up.
+        if (m_wrap_ok) {
+            auto w = m_game_wraps.find(m_cover_id);
+            if (w != m_game_wraps.end()) {
+                if (w->second) m_gfx->FreeImage(w->second);
+                m_game_wraps.erase(w);
+            }
+            m_tdb_front.erase(m_cover_id);
         }
 
         // Hero art arrived: same, for HeroArt's own cache.
@@ -825,12 +1117,8 @@ namespace sl::menu::ui {
             // Cached covers keep loading while you scroll - they are cheap - but
             // decoding a new one is not, so that waits until the row has come to
             // rest. Building the cache mid-scroll is what made scrolling stall.
-            if (!flow_settled) m_decode_budget = 0;
-
-            for (int row : order) {
-                if (m_cover_budget <= 0 && m_decode_budget <= 0) break;
+            for (int row : order)
                 FlowCover(m_items[m_flow_items[FlowWrap(row, n)]]);
-            }
             // Back panels are far more expensive - a hero is 1920x620 - and are
             // only wanted once you have stopped somewhere. Loading them as the
             // selection swept past during a scroll was two full decodes every
@@ -845,6 +1133,18 @@ namespace sl::menu::ui {
                     const MenuItem &ri = m_items[idx];
                     if (ri.app_id == m_suspended) { FlowBackShots(ri); break; }
                 }
+            }
+        }
+
+        // Box scans are big: keep only those of the boxes near the selection.
+        if (m_game_wraps.size() > 8) {
+            std::unordered_set<u64> keep;
+            for (int d = -2; d <= 2; d++)
+                keep.insert(m_items[m_flow_items[FlowWrap(sel + d, n)]].app_id);
+            for (auto w = m_game_wraps.begin(); w != m_game_wraps.end(); ) {
+                if (keep.count(w->first)) { ++w; continue; }
+                if (w->second) m_gfx->FreeImage(w->second);
+                w = m_game_wraps.erase(w);
             }
         }
 
@@ -956,9 +1256,19 @@ namespace sl::menu::ui {
 
             // Takes the face already built, because the draw order below needs
             // every face's geometry before it can decide what to paint first.
+            // This game's own box scan, when GameTDB had one: loaded for the
+            // boxes by the selection, used from cache for the rest.
+            SDL_Texture *gw = nullptr;
+            if (std::abs(p) <= 2.5f) gw = GameWrap(it);
+            else if (auto g = m_game_wraps.find(it.app_id); g != m_game_wraps.end()) gw = g->second;
+            const bool scan_front = gw && TdbFront(it.app_id);
+
             auto draw_side = [&](const float face[4][3], bool spine) {
                 m_gfx->DrawQuad3D(nullptr, face, side_col, 255, 255, false, 4);
-                if (spine && m_flow_wrap) {
+                if (spine && gw) {
+                    const float uv_spine[4] = { kScanSpine0, 0.0f, kScanSpine1, 1.0f };
+                    m_gfx->DrawQuad3D(gw, face, tint, 255, 255, false, 4, uv_spine);
+                } else if (spine && m_flow_wrap) {
                     const float uv_spine[4] = { kWrapSpine0, 0.0f, kWrapSpine1, 1.0f };
                     m_gfx->DrawQuad3D(m_flow_wrap, face, tint, 255, 255,
                                       false, 4, uv_spine);
@@ -966,6 +1276,11 @@ namespace sl::menu::ui {
             };
             auto draw_back = [&]() {
                 m_gfx->DrawQuad3D(nullptr, back, back_col, 255, 255, false, 4);
+                if (gw) {                   // the real back of the case
+                    const float uv_back[4] = { 0.0f, 0.0f, kScanSpine0, 1.0f };
+                    m_gfx->DrawQuad3D(gw, back, tint, 255, 255, false, 12, uv_back);
+                    return;
+                }
 
                 // Two panels across the top of the back, where a real case
                 // prints its screenshots. Drawn before the wrap so the printed
@@ -1027,6 +1342,10 @@ namespace sl::menu::ui {
                 if (showing_back) return;   // its printing faces away from us
                 if (cover) {
                     m_gfx->DrawQuad3D(cover, corners, tint, 255, 255);
+                } else if (gw) {
+                    const float uv_front[4] = { kScanSpine1, 0.0f, 1.0f, 1.0f };
+                    m_gfx->DrawQuad3D(gw, corners, tint, 255, 255, false, 12, uv_front);
+                    return;                 // printed already
                 } else if (icon) {
                     // Square icon inset on the face, leaving case above and below.
                     float inset[4][3];
@@ -1034,8 +1353,9 @@ namespace sl::menu::ui {
                     m_gfx->DrawQuad3D(icon, inset, tint, 255, 255);
                 }
                 // The printed wrap over the art is what makes this a boxed game
-                // rather than a picture on a slab.
-                if (m_flow_wrap) {
+                // rather than a picture on a slab - unless the art is a scan of
+                // the real thing, which has its own.
+                if (m_flow_wrap && !scan_front) {
                     const float uv_front[4] = { kWrapFront0, 0.0f, kWrapFront1, 1.0f };
                     m_gfx->DrawQuad3D(m_flow_wrap, corners, tint, 255, 255,
                                       false, 12, uv_front);
@@ -1210,8 +1530,11 @@ namespace sl::menu::ui {
             const auto sit = m_shots.find(cur.app_id);
             const bool shots_missing = (sit != m_shots.end()) &&
                                        !sit->second.a && !sit->second.b;
+            // ...and for a box scan: GameWrap looked and found none.
+            const auto wit = m_game_wraps.find(cur.app_id);
+            const bool wrap_missing = (wit != m_game_wraps.end()) && !wit->second;
             if (flow_settled && cur.kind == ItemKind::Game &&
-                ((!FlowCover(cur) && cover_missing) || shots_missing))
+                ((!FlowCover(cur) && cover_missing) || shots_missing || wrap_missing))
                 StartCoverFetch(cur.app_id, cur.name);
             const int ty = H - 132;
             m_gfx->TextCentered(FontSize::Large, W / 2, ty, t.title,
@@ -1225,6 +1548,7 @@ namespace sl::menu::ui {
                                 ty + m_gfx->LineHeight(FontSize::Large) + 4, t.dim, pos);
         }
 
+        DrawFetchStatus();
         DrawStatusHint({ {{"a"}, "Launch"}, {{"x"}, "Options"}, {{"minus"}, "Menu"}, {{"rstick"}, "Look/Turn"} });
     }
 } // namespace sl::menu::ui

@@ -1,7 +1,9 @@
 #include <switch.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -30,6 +32,7 @@
 #define OPT_IN_FILE  "sdmc:/slaunch/config/hb_chain_app.txt"
 #define QUEUE_DIR    "sdmc:/slaunch/hb_queue"
 #define QUEUE_TMP    "sdmc:/slaunch/hb_queue/pending.tmp"
+#define HB_LOG_FILE  "sdmc:/slaunch/hbloader.log"
 #define QUEUE_REQ    "sdmc:/slaunch/hb_queue/request.req"
 
 const char g_noticeText[] =
@@ -336,6 +339,36 @@ static void getCodeMemoryCapability(void)
     }
 }
 
+// sLaunch fork: a line per load decision. The daemon can only see that this
+// process exited, not why - whether the NRO it was told to chain to was never
+// named, or was named and could not be opened. Those need telling apart from
+// off-console, so they get written down. Assumes the SD is already mounted.
+static void HbLog(const char *fmt, ...)
+{
+    FILE *fp = fopen(HB_LOG_FILE, "a");
+    if (!fp) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+}
+
+// A path with no "device:" prefix is resolved against whatever newlib has as
+// the default device, which is not something this loader sets up. hbmenu always
+// passed fully qualified "sdmc:/..." paths so it never came up; Sphaira hands
+// over bare "/switch/foo.nro" (see its own playlog.ini), and an open() of that
+// is one unlucky default away from failing - which in target mode ends the
+// process and drops the user back in the menu.
+static void qualifyPath(char *path, size_t cap)
+{
+    if (!path[0] || path[0] != '/') return;      // already qualified, or empty
+    char tmp[FS_MAX_PATH];
+    snprintf(tmp, sizeof(tmp), "sdmc:%s", path);
+    snprintf(path, cap, "%s", tmp);
+}
+
 // Returns true when sdmc:/slaunch/config/hb_chain_app.txt holds a 1. Assumes
 // the SD card is already mounted.
 static bool chainToAppWanted(void)
@@ -466,6 +499,15 @@ void loadNro(void)
     }
     else
     {
+        if (R_SUCCEEDED(fsdevMountSdmc()))
+        {
+            qualifyPath(g_nextNroPath, sizeof(g_nextNroPath));
+            HbLog("reload: app=%d target=%d next=\"%s\" argv=\"%s\"",
+                  (int)g_isApplication, (int)g_targetMode,
+                  g_nextNroPath, g_nextArgv);
+            fsdevUnmountAll();
+        }
+
         if (g_targetMode && g_nextNroPath[0] == '\0')
         {
             // Target NRO chain is done; terminate so sSystem sees the applet
@@ -513,6 +555,8 @@ void loadNro(void)
     int fd = open(g_nextNroPath, O_RDONLY);
     if (fd < 0)
     {
+        HbLog("open failed: \"%s\" (errno %d) - returning to the menu",
+              g_nextNroPath, errno);
         // sLaunch fork: a missing target NRO just hands control back to the
         // menu instead of hard-aborting the applet with a crash dialog.
         if (g_targetMode)

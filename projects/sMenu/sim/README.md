@@ -28,8 +28,15 @@ projects/sMenu/sim/sync-sd.sh /mnt/e
 cd projects/sMenu/sim && ./slaunch-sim
 ```
 
-Requires `sdl2`, `sdl2_image`, `sdl2_ttf`, `sdl2_mixer` and `libcurl` - all
-already present in this WSL image. A window needs WSLg, which works here.
+Requires `sdl2`, `sdl2_image`, `sdl2_ttf`, `sdl2_mixer`, `libcurl`,
+`libavformat`, `libavcodec` and `libavutil` (`apt install libavformat-dev
+libavcodec-dev libavutil-dev` if missing) - all but the last three already
+present in this WSL image. A window needs WSLg, which works here.
+
+Video wallpapers decode through the host's own FFmpeg here (software H.264 -
+there is no Tegra/NVDEC on a PC), the same `VideoPlayer` code the console
+build runs. See `THIRDPARTY.md` and the "Video wallpapers" section of the
+root `README.md`.
 
 ### Windows
 
@@ -47,14 +54,35 @@ The result lands in `dist-win/`: `slaunch-sim.exe` plus the four SDL DLLs. Copy
 that folder anywhere on the Windows side, put the card next to the exe as a
 plain `sdmc` folder, and run it.
 
-Both builds compile the identical list of menu sources - nothing is swapped out
-or reimplemented for Windows. The only difference is the card folder: it is
+Both builds compile the identical list of menu sources. The one exception is
+`Video.cpp`: the Windows build does not stage FFmpeg for MinGW, so it compiles
+to a stub there and video wallpapers do not preview on Windows (the theme
+still applies everywhere else). Otherwise nothing is swapped out or
+reimplemented for Windows - the only difference is the card folder: it is
 `sdmc`, without the colon, because Windows does not allow a colon in a filename.
 The paths are rewritten on their way into the C library instead - see
 `include/sim_win_compat.h`, which also explains why `remove()` alone is
 redirected by the linker rather than by a macro.
 
 Audio works on Windows, where WSL usually has no device.
+
+## GPU effects need real SDL 2
+
+Arch's `sdl2` package is sdl2-compat (SDL2's API on SDL3), and its
+`SDL_GL_BindTexture` binds nothing. The menu detects that and draws Flow's 3D
+boxes and the rounded cards with their CPU fallbacks, which is not what the
+console shows. Build the console's SDL version once and the simulator links
+it automatically (the Makefile adds a runpath when it exists):
+
+```bash
+curl -LO https://github.com/libsdl-org/SDL/releases/download/release-2.28.5/SDL2-2.28.5.tar.gz
+tar xzf SDL2-2.28.5.tar.gz && cd SDL2-2.28.5
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSDL_PIPEWIRE=OFF -DSDL_WAYLAND=OFF \
+      -DSDL_TEST=OFF -DSDL_STATIC=OFF -DCMAKE_INSTALL_PREFIX=$HOME/.local/share/slaunch-sim-sdl2
+cmake --build build -j && cmake --install build
+```
+
+Then `make clean && make` here.
 
 ## Controls
 
@@ -114,8 +142,8 @@ from the Linux filesystem than over the interop mount. Override with
 `SLAUNCH_SIM_ROOT` or `--sd`.
 
 `sync-sd.sh` only ever reads the card. It copies `slaunch/` whole, minus the
-blur cache (keyed on each wallpaper's mtime, which copying changes, so every
-entry would miss anyway - it rebuilds itself) and the console's own logs.
+console's own logs (and any `cache/blur` left by older builds, which blurred
+wallpapers on the CPU and cached the result there).
 
 **Homebrew entries without the homebrew.** The menu lists `.nro` files by
 walking `sdmc:/switch`, but takes each one's name and icon from

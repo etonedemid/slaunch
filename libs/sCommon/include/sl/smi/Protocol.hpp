@@ -111,6 +111,9 @@ namespace sl::smi {
         Kb_AuroraSend,    // legacy
         Kb_WidgetOption,  // editing a Lua widget's exposed string option
         Kb_SteamGridKey,  // SteamGridDB API key, for coverflow art
+        Kb_Search,        // filter the main list by name
+        Kb_FileRename,    // file manager: rename the selected file
+        Kb_NewFolder,     // file manager: name a new folder
     };
     constexpr const char *KbRequestPath = "sdmc:/slaunch/config/kb_req.txt";
     constexpr const char *KbResultPath  = "sdmc:/slaunch/config/kb_result.txt";

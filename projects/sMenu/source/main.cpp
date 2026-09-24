@@ -21,6 +21,8 @@
 #include <sl/menu/smi/MessageHandler.hpp>
 #include <sl/menu/gfx/Gfx.hpp>
 #include <sl/menu/ui/Menu.hpp>
+#include <sl/menu/ui/Locale.hpp>
+#include <sl/menu/usb/Mtp.hpp>
 
 using namespace sl;
 using menu::ui::Menu;
@@ -421,11 +423,13 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
         case Menu::Action::OpenControllers:  menu::smi::OpenControllers();  g_Running = false; break;
         case Menu::Action::OpenHomebrewMenu: menu::smi::OpenHomebrewMenu(); g_Running = false; break;
         case Menu::Action::LaunchHomebrew:
-            menu::smi::OpenHomebrew(g_UI->HomebrewPath().c_str());
+            menu::smi::OpenHomebrew(g_UI->HomebrewPath().c_str(),
+                                    g_UI->HomebrewArgv().c_str());
             g_Running = false;
             break;
         case Menu::Action::LaunchHomebrewApp:
-            menu::smi::LaunchHomebrewApp(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str());
+            menu::smi::LaunchHomebrewApp(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str(),
+                                         g_UI->HomebrewArgv().c_str());
             g_Running = false;
             break;
         // Sleep is instant and the menu is still there when the console wakes.
@@ -598,6 +602,8 @@ int main() {
     u64 g_NextVerify = armGetSystemTick();   // periodic app-list re-verify
     bool first_frame_logged = false;
     bool aa_confirmed = false;
+    u64  next_usb_check = 0;
+    bool usb_connected  = false;
 
     while (g_Running && appletMainLoop()) {
         // Re-verify the installed set every ~2s: the daemon doesn't push gamecard
@@ -764,7 +770,22 @@ int main() {
             u64 pending_id = 0;
             run(ui.TakePendingAction(pending_id), pending_id);
         }
-        if (!first_frame_logged) { first_frame_logged = true; BootLog("applet: first frame drawn"); }
+        if (!first_frame_logged) {
+            first_frame_logged = true;
+            BootLog("applet: first frame drawn");
+            menu::usb::MtpStart();   // USB file transfer, for as long as the menu is up
+        }
+        // A computer plugged in: say so once, and keep the console awake while
+        // it stays connected so a long copy is not cut off by auto-sleep.
+        if (armGetSystemTick() >= next_usb_check) {
+            next_usb_check = armGetSystemTick() + armGetSystemTickFreq();
+            const bool usb = menu::usb::MtpConnected();
+            if (usb != usb_connected) {
+                usb_connected = usb;
+                appletSetAutoSleepDisabled(usb);
+                if (usb) ui.SetStatus(menu::ui::T("Connected to a computer: SD card open for file transfer"));
+            }
+        }
         // A frame has reached the screen, so whatever the renderer was built
         // with works. Clearing the marker is what lets anti-aliasing stay on
         // across runs; leaving it would disarm the setting every time.
@@ -772,6 +793,10 @@ int main() {
         // First frame is up; now do the heavier init (widgets) off the hot path.
         ui.InitDeferred();
     }
+    // Let go of USB before handing off: whatever runs next (homebrew like DBI
+    // or Goldleaf especially) may want it for itself.
+    menu::usb::MtpStop();
+    if (usb_connected) appletSetAutoSleepDisabled(false);
     } // ui destroyed here, before gfx.Exit(), so its textures free cleanly
 
     if (joy) SDL_JoystickClose(joy);

@@ -16,87 +16,120 @@
 
 namespace sl::menu::ui {
 
-    // Shelf mode: an Xbox-360 "My Games" style row of uniform covers. The selected
-    // cover is anchored near the left inside a highlight card that shows its name
-    // and platform; the rest of the row scrolls behind it. Unselected covers carry
-    // a small caption underneath.
+    // Shelf mode: the Xbox 360 dashboard's game library (the 2008 "New Xbox
+    // Experience"). The selected game stands large at the front left; the rest
+    // of the row runs away into the distance to the right, each one further
+    // back, smaller and dimmer, and the ones already passed slide out to the
+    // left. Every tile stands on a glossy floor that reflects it.
+    //
+    // Drawn as 3D quads (Gfx::DrawQuad3D - on the GPU, perspective-correct)
+    // with the camera Flow uses. Box art in vertical mode, the square icon
+    // otherwise; system entries are their glyph on the theme's plate.
     void Menu::DrawMainShelf() {
         const Theme &t = m_theme.Current();
         m_icons.SetScale(0);
+        DrawSelectionBackdrop();
         DrawTopBar(nullptr);
 
         if (m_items.empty()) { DrawMainEmpty(); return; }
 
         if (!ScrollBusy())   // a finger or a throw owns the scroll instead
-            m_scroll_pos += (m_cursor - m_scroll_pos) * 0.30f;
-        if (std::abs(m_cursor - m_scroll_pos) < 0.01f) m_scroll_pos = (float)m_cursor;
+            m_scroll_pos += (m_cursor - m_scroll_pos) * 0.22f;
+        if (std::abs(m_cursor - m_scroll_pos) < 0.005f) m_scroll_pos = (float)m_cursor;
 
         const int total = (int)m_items.size();
-        const int tile  = ShelfTileW();      // tile width
-        const int tileH = ShelfTileH();      // ...and height, which differ in
-        const int top   = kShelfTop;         // vertical mode
-        const int pitch = ShelfPitch();
+        const bool tall = m_shelf_vertical;
+        // Half extents in world units: a 2:3 case, or a square.
+        const float hh = tall ? 0.66f : 0.52f;
+        const float hw = tall ? hh * 2.0f / 3.0f : hh;
 
-        auto ellipsize = [&](const std::string &s, int maxw, gfx::FontSize fs) {
-            return Ellipsize(s, maxw, fs);
+        // Where row position d (0 = selected, negative = already passed) sits.
+        auto place = [&](float d, float &x, float &y, float &z, float &a) {
+            if (d >= 0.0f) {
+                x = -1.45f + d * 0.78f;
+                y =  0.30f + d * 0.12f;
+                z =  3.60f + d * 1.00f;
+                a = std::max(0.0f, 1.0f - d * 0.16f);
+            } else {                                   // sliding out to the left
+                x = -1.45f + d * 1.90f;
+                y =  0.30f;
+                z =  3.60f + d * 0.30f;
+                a = std::max(0.0f, 1.0f + d * 1.2f);
+            }
         };
 
-        // Header row below the top bar: sort on the left, position on the right.
-        m_gfx->Text(FontSize::Small,  kShelfAnchorX, 64, t.dim, T("sort"));
-        m_gfx->Text(FontSize::Normal, kShelfAnchorX, 82, t.fg,  SortLabel());
-        {
-            char cnt[32];
-            snprintf(cnt, sizeof(cnt), "%d / %d", m_cursor + 1, total);
-            // Position counters are optional; blanking the string here keeps
-            // the layout arithmetic below untouched.
-            if (!m_show_counter) cnt[0] = '\0';
-            const int cw = m_gfx->TextWidth(FontSize::Large, cnt);
-            m_gfx->Text(FontSize::Large, gfx::Gfx::Width - 44 - cw, 70, t.dim, cnt);
-        }
+        const int centre = (int)lroundf(m_scroll_pos);
+        int first = std::max(0, centre - 2), last = std::min(total - 1, centre + 7);
+        // Far to near: the row recedes to the right, so the last is farthest.
+        for (int idx = last; idx >= first; idx--) {
+            const MenuItem &it = m_items[idx];
+            const float d = (float)idx - m_scroll_pos;
+            float x, y, z, a;
+            place(d, x, y, z, a);
+            if (a <= 0.01f) continue;
+            const bool sel = (idx == m_cursor);
 
-        // Highlight card behind the anchored (selected) cover.
-        const int pad   = 14;
-        const int infoH = 104;
-        m_gfx->FillRect(kShelfAnchorX - pad, top - pad,
-                        tile + pad * 2, tileH + pad + infoH, WithAlpha(t.fg, 20));
+            const bool game = it.kind == ItemKind::Game, hb = it.kind == ItemKind::Homebrew;
+            SDL_Texture *cov  = (tall && game) ? FlowCover(it) : nullptr;
+            SDL_Texture *icon = game ? m_icons.Get(it.app_id)
+                              : hb   ? m_hb_icons.Get(it.hb_icon)
+                              : SystemIcon(it.kind);
+            SDL_Texture *art  = cov ? cov : icon;
+            const bool glyph  = !cov && icon && !game && !hb;
 
-        // Covers, painted right-to-left so the selected one lands on top of its
-        // neighbours during a slide.
-        int firstv = (int)m_scroll_pos - 1;
-        if (firstv < 0) firstv = 0;
-        int lastv = (int)m_scroll_pos + (gfx::Gfx::Width - kShelfAnchorX) / pitch + 2;
-        if (lastv > total - 1) lastv = total - 1;
-        for (int idx = lastv; idx >= firstv; idx--) {
-            const int x = kShelfAnchorX + (int)((idx - m_scroll_pos) * pitch);
-            if (x + tile < 0 || x > gfx::Gfx::Width) continue;
-            const bool selg = (idx == m_cursor);
-            // Vertical mode prefers real box art and falls back to the square
-            // icon, drawn on a plate so a 1:1 image is letterboxed rather than
-            // stretched onto a 2:3 tile.
-            SDL_Texture *cov = m_shelf_vertical ? FlowCover(m_items[idx]) : nullptr;
-            if (cov) {
-                const Uint8 a = selg ? 255 : 225;
-                m_gfx->FillRect(x, top, tile, tileH, WithAlpha(t.bg_bottom, a));
-                m_gfx->DrawImage(cov, x, top, tile, tileH, a);
-            } else if (m_shelf_vertical) {
-                m_gfx->FillRect(x, top, tile, tileH, WithAlpha(t.bg_bottom, selg ? 255 : 225));
-                const int s2 = (tile < tileH ? tile : tileH) - 16;
-                DrawAppTile(m_items[idx], x + (tile - s2) / 2, top + (tileH - s2) / 2,
-                            s2, selg, selg ? 255 : 225);
-            } else {
-                DrawAppTile(m_items[idx], x, top, tile, selg, selg ? 255 : 225);
+            const float quad[4][3] = { { x - hw, y + hh, z }, { x + hw, y + hh, z },
+                                       { x + hw, y - hh, z }, { x - hw, y - hh, z } };
+            // The floor under each tile, and the tile mirrored in it.
+            const float floor_y = y - hh - 0.04f;
+            const float refl[4][3] = { { x - hw, floor_y, z }, { x + hw, floor_y, z },
+                                       { x + hw, floor_y - 2 * hh, z }, { x - hw, floor_y - 2 * hh, z } };
+
+            const Uint8 lit = (Uint8)(150 + 105 * std::max(0.0f, 1.0f - std::abs(d)));
+            const SDL_Color tint{ lit, lit, lit, 255 };
+            const Uint8 A = (Uint8)(255 * a);
+
+            auto face = [&](const float q[4][3], bool mirror, Uint8 top, Uint8 bottom) {
+                if (!art || glyph) {                   // the plate behind a glyph
+                    const SDL_Color plate = glyph ? IconPlate(t, 255) : WithAlpha(t.bg_bottom, 255);
+                    SDL_Color pc = plate;
+                    pc.a = 255;
+                    m_gfx->DrawQuad3D(nullptr, q, pc, glyph ? (Uint8)(top * t.icon_bg_alpha / 255) : top,
+                                      glyph ? (Uint8)(bottom * t.icon_bg_alpha / 255) : bottom, mirror, 4);
+                }
+                if (art) {
+                    const SDL_Color c = glyph ? IconTint(t, 255) : tint;
+                    m_gfx->DrawQuad3D(art, q, c, top, bottom, mirror, 12);
+                }
+            };
+            face(refl, true, (Uint8)(A * 0.22f), 0);
+            face(quad, false, A, A);
+
+            if (!art) {                                // no picture at all: its initial
+                float sx, sy;
+                const float c[3] = { x, y, z };
+                m_gfx->Project3D(c, sx, sy);
+                char initial[2] = { it.name.empty() ? '?' : (char)toupper((unsigned char)it.name[0]), 0 };
+                m_gfx->TextCentered(FontSize::Title, (int)sx, (int)sy - 26, WithAlpha(t.dim, A), initial);
             }
-            if (!selg)
-                m_gfx->Text(FontSize::Small, x, top + tileH + 12, t.dim,
-                            ellipsize(m_items[idx].name, tile, FontSize::Small).c_str());
+            if (sel) {                                 // the 360's bright frame
+                float x0, y0, x1, y1;
+                m_gfx->Project3D(quad[0], x0, y0);
+                m_gfx->Project3D(quad[2], x1, y1);
+                const SDL_Color f = WithAlpha(t.accent, (Uint8)(A * SelectionGlow()));
+                const int ix0 = (int)x0 - 4, iy0 = (int)y0 - 4, iw = (int)(x1 - x0) + 8, ih = (int)(y1 - y0) + 8;
+                m_gfx->FillRect(ix0, iy0, iw, 3, f);
+                m_gfx->FillRect(ix0, iy0 + ih - 3, iw, 3, f);
+                m_gfx->FillRect(ix0, iy0, 3, ih, f);
+                m_gfx->FillRect(ix0 + iw - 3, iy0, 3, ih, f);
+            }
         }
 
         // Release covers well outside the visible run. The shelf shares Flow's
         // cover cache, and leaving it unbounded is what previously starved the
         // rest of the menu of memory.
-        if (m_shelf_vertical) {
-            const int keep_lo = std::max(0, firstv - 4);
-            const int keep_hi = std::min(total - 1, lastv + 4);
+        if (tall) {
+            const int keep_lo = std::max(0, first - 4);
+            const int keep_hi = std::min(total - 1, last + 4);
             for (auto it2 = m_covers.begin(); it2 != m_covers.end(); ) {
                 bool keep = false;
                 for (int i = keep_lo; i <= keep_hi && !keep; i++)
@@ -107,26 +140,42 @@ namespace sl::menu::ui {
             }
         }
 
-        // Selected item's info block inside the card.
+        // Title and details under the selected game, where the 360 put them.
         const MenuItem &sel = m_items[m_cursor];
-        m_gfx->Text(FontSize::Normal, kShelfAnchorX, top + tileH + 12, t.title,
-                    ellipsize(sel.name, tile, FontSize::Normal).c_str());
-        const char *sub = sel.is_gamecard ? T("Game card")
-                        : (sel.kind == ItemKind::Game ? T("Nintendo Switch") : "");
-        if (sub[0])
-            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tileH + 54, t.dim, sub);
-        // Last line of the card: the running badge, or how much this game has been
-        // played (blank until the pdm worker lands, and for never-played titles).
-        if (sel.app_id == m_suspended && m_suspended != 0) {
-            m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tileH + 76, t.accent, T("Running"));
-        } else if (const play::PlayInfo *pi = Play(sel.app_id)) {
-            if (pi->seconds > 0) {
-                const std::string line = play::FormatPlaytime(pi->seconds) + "   " +
-                                         play::FormatLastPlayed(pi->last_played);
-                m_gfx->Text(FontSize::Small, kShelfAnchorX, top + tileH + 76, t.dim, line.c_str());
-            }
+        float sx, sy;
+        {
+            const float foot[3] = { -1.45f - hw, 0.30f - hh, 3.60f };
+            m_gfx->Project3D(foot, sx, sy);
         }
+        const int tx = std::max(40, (int)sx);
+        const int ty = (int)sy + (int)(hh * 2 * 900.0f / 3.6f * 0.30f) + 14;
+        m_gfx->Text(FontSize::Large, tx, ty, t.title,
+                    Ellipsize(sel.name, gfx::Gfx::Width - tx - 60, FontSize::Large).c_str());
+        const int lh = m_gfx->LineHeight(FontSize::Large);
+        std::string sub = sel.is_gamecard ? T("Game card")
+                        : (sel.kind == ItemKind::Game ? T("Nintendo Switch") : "");
+        if (sel.app_id == m_suspended && m_suspended != 0) {
+            sub = T("Running");
+        } else if (const play::PlayInfo *pi = Play(sel.app_id)) {
+            if (pi->seconds > 0)
+                sub += (sub.empty() ? "" : "   ") + play::FormatPlaytime(pi->seconds) + "   " +
+                       play::FormatLastPlayed(pi->last_played);
+        }
+        if (!sub.empty())
+            m_gfx->Text(FontSize::Small, tx, ty + lh + 2, t.dim, sub.c_str());
 
+        // Position, top right, as the 360 counted its library.
+        if (m_show_counter) {
+            char cnt[32];
+            snprintf(cnt, sizeof(cnt), "%d / %d", m_cursor + 1, total);
+            const int cw = m_gfx->TextWidth(FontSize::Normal, cnt);
+            m_gfx->Text(FontSize::Normal, gfx::Gfx::Width - 44 - cw, 70, t.dim, cnt);
+        }
+        m_gfx->Text(FontSize::Small,  44, 64, t.dim, T("sort"));
+        m_gfx->Text(FontSize::Normal, 44, 82, t.fg,  SortLabel());
+
+        if (tall && m_scroll_pos == (float)m_cursor) FetchArtFor(m_items[m_cursor]);
+        DrawFetchStatus();
         DrawStatusHint({ {{"a"}, "Launch"}, {{"x"}, "Options"} });
     }
 } // namespace sl::menu::ui

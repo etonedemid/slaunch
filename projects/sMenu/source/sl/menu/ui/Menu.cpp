@@ -10,19 +10,57 @@
 #include <cmath>
 #include <ctime>
 #include <algorithm>
-#include <dirent.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "Menu_Internal.hpp"
 
 namespace sl::menu::ui {
+
+    // One-time cleanup: Steam news and back-of-case screenshots fetched before
+    // net::SteamAppFor took whichever game Steam's search listed first, so a
+    // title that is not on Steam could be carrying another game's. Dropping
+    // them makes the next visit fetch again, matched properly. A marker file
+    // keeps this to a single pass.
+    static void ForgetUnmatchedSteamArt() {
+        const char *marker = "sdmc:/slaunch/cache/steam_match_v2";   // v2: sequels no longer match
+        struct stat st {};
+        if (!g_sd_ok || stat(marker, &st) == 0) return;
+        auto sweep = [](const char *dir, auto match) {
+            DIR *d = opendir(dir);
+            if (!d) return;
+            while (struct dirent *e = readdir(d))
+                if (match(std::string(e->d_name)))
+                    remove((std::string(dir) + "/" + e->d_name).c_str());
+            closedir(d);
+        };
+        auto ends = [](const std::string &n, const char *suf) {
+            const size_t k = strlen(suf);
+            return n.size() > k && n.compare(n.size() - k, k, suf) == 0;
+        };
+        sweep("sdmc:/slaunch/covers", [&](const std::string &n) {
+            return ends(n, "_s0.jpg") || ends(n, "_s1.jpg");
+        });
+        sweep("sdmc:/slaunch/cache/news", [](const std::string &n) {
+            return n.compare(0, 6, "steam_") == 0;
+        });
+        if (FILE *f = fopen(marker, "w")) fclose(f);
+    }
 
     void Menu::Init(gfx::Gfx *gfx, AccountUid user, u64 suspended_app_id, bool start_oobe) {
         PhaseReset();
         m_gfx       = gfx;
         m_user      = user;
         m_suspended = suspended_app_id;
+        ForgetUnmatchedSteamArt();
         m_icons.Init(gfx);
         m_hb_icons.Init(gfx, hb::IconDir);
+        // Shortcut art is RetroArch's thumbnail folder, not anything sLaunch
+        // extracted, so those keys resolve to a path of their own. Any other
+        // key returns empty and falls back to the cache directory.
+        m_hb_icons.SetPathFn([this](u64 key) {
+            auto it = m_shortcut_art.find(key);
+            return it == m_shortcut_art.end() ? std::string() : it->second;
+        });
         LocaleInit();   // load the system-language locale (English is the fallback)
         Phase("locale");
 
@@ -70,6 +108,8 @@ namespace sl::menu::ui {
         LoadHbFavourites();
         LoadHbDonor();
         LoadSettings();
+        { struct stat st;
+          m_memtrace_on = (stat("sdmc:/slaunch/config/memtrace.txt", &st) == 0); }
         LoadSysEntries();
         LoadNames();
         Phase("config files");
@@ -212,6 +252,7 @@ namespace sl::menu::ui {
             threadClose(&m_cover_thread);
             m_cover_running = false;
         }
+        StopArt();   // holds surfaces too, and must not outlive the renderer
         // The hero decoder holds surfaces of its own, and outliving the renderer
         // would leak them at best.
         if (m_shot_running) {
@@ -238,14 +279,26 @@ namespace sl::menu::ui {
         DeckFreeArt();      // news card art, decoded on the render thread
         if (m_wallpaper)   { m_gfx->FreeImage(m_wallpaper);   m_wallpaper = nullptr; }
         if (m_wallpaper_blur) { m_gfx->FreeImage(m_wallpaper_blur); m_wallpaper_blur = nullptr; }
+        m_video_player.Close();
+        m_album_video.Close();   // album clip playback (if any) outlives the renderer
         FreeAlbumTexture();   // a capture is resident whenever the viewer is open
         if (m_flow_wrap) { m_gfx->FreeImage(m_flow_wrap); m_flow_wrap = nullptr; }
         FreeWidgetTileTextures();
         if (m_tile_pic)      { m_gfx->FreeImage(m_tile_pic);      m_tile_pic = nullptr; }
+        if (m_music_art)     { m_gfx->FreeImage(m_music_art);     m_music_art = nullptr; }
+        if (m_bd_cur)        { m_gfx->FreeImage(m_bd_cur);        m_bd_cur = nullptr; }
+        if (m_bd_old)        { m_gfx->FreeImage(m_bd_old);        m_bd_old = nullptr; }
+        if (m_fm_view)       { m_gfx->FreeImage(m_fm_view);       m_fm_view = nullptr; }
+        if (m_fm_running)    { m_fm_cancel.store(true); threadWaitForExit(&m_fm_thread);
+                               threadClose(&m_fm_thread); m_fm_running = false; }
+        FreeOobePreviews();
         if (m_tile_pic_next) { m_gfx->FreeImage(m_tile_pic_next); m_tile_pic_next = nullptr; }
         for (auto &kv : m_covers)
             if (kv.second) m_gfx->FreeImage(kv.second);
         m_covers.clear();
+        for (auto &kv : m_game_wraps)
+            if (kv.second) m_gfx->FreeImage(kv.second);
+        m_game_wraps.clear();
         for (auto &kv : m_hero_art)
             if (kv.second) m_gfx->FreeImage(kv.second);
         m_hero_art.clear();
@@ -369,6 +422,27 @@ namespace sl::menu::ui {
             }
         }
 
+        // Launcher shortcuts (RetroArch playlists, shortcuts.txt). XMB always
+        // takes them - a column each is the whole reason they exist - and the
+        // other layouts only on request, since a scanned ROM library is easily
+        // larger than everything else on this list put together.
+        //
+        // Appended in scan order, which ScanShortcuts already sorted by
+        // category then name, so XmbRebuild can group them by walking once.
+        if (m_retroarch && (m_ui_mode == UiMode::XMB || m_shortcuts_everywhere)) {
+            StartHbScan();   // same worker reads both; no-op once it has landed
+            for (const auto &sc : m_shortcuts) {
+                MenuItem it;
+                it.kind     = ItemKind::Homebrew;
+                it.hb_path  = sc.nro;
+                it.hb_argv  = sc.argv;
+                it.name     = sc.name;
+                it.category = sc.category;
+                it.hb_icon  = sc.icon_key;
+                m_items.push_back(std::move(it));
+            }
+        }
+
         // System shortcuts (hidden ones are skipped; Theming is never hideable).
         auto add = [&](ItemKind k, const char *name) {
             if (IsSysHidden(k)) return;
@@ -385,6 +459,7 @@ namespace sl::menu::ui {
         add(ItemKind::Wifi,         T("Network"));
         add(ItemKind::Power,        T("Power"));
         add(ItemKind::HomebrewMenu, T("Homebrew menu"));
+        add(ItemKind::FileManager,  T("Files"));
 
         // Widget tiles, sitting with the system shortcuts. They only exist once
         // the deferred worker has built the widgets, which is why RebuildItems
@@ -439,6 +514,23 @@ namespace sl::menu::ui {
             sorted.reserve(m_items.size());
             for (const auto &k : keyed) sorted.push_back(*k.second);
             m_items = std::move(sorted);
+        }
+
+        // Name filter. Applied here, after everything has been added, rather
+        // than at each push_back: one place to get right, and the sort and
+        // custom order above have already run on the full list so the matches
+        // keep the order they would have had.
+        //
+        // System entries drop out while a search is active - you are looking for
+        // something to play, and leaving Power and Theming in every result reads
+        // as the search having failed. B clears the search and brings them back.
+        if (!m_search.empty()) {
+            m_items.erase(std::remove_if(m_items.begin(), m_items.end(),
+                [&](const MenuItem &it) {
+                    if (it.kind != ItemKind::Game && it.kind != ItemKind::Homebrew)
+                        return true;
+                    return !ContainsFold(it.name, m_search);
+                }), m_items.end());
         }
 
         if (m_cursor >= (int)m_items.size())
@@ -521,6 +613,33 @@ namespace sl::menu::ui {
         fprintf(fp, "%d\n", (int)m_sort);
         fclose(fp);
     }
+    // Case-insensitive substring. ASCII folding only: a UTF-8 name passes
+    // through byte for byte, so an accented title still matches when typed the
+    // way it is spelled - which is all the built-in keyboard can produce.
+    bool Menu::ContainsFold(const std::string &hay, const std::string &needle) {
+        if (needle.empty()) return true;
+        if (hay.size() < needle.size()) return false;
+        auto lower = [](unsigned char c) {
+            return (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+        };
+        for (size_t i = 0; i + needle.size() <= hay.size(); i++) {
+            size_t k = 0;
+            while (k < needle.size() &&
+                   lower((unsigned char)hay[i + k]) == lower((unsigned char)needle[k])) k++;
+            if (k == needle.size()) return true;
+        }
+        return false;
+    }
+
+    // Search opens the menu's own keyboard - no applet round trip, so the list
+    // is still on screen behind it and coming back is a frame, not a relaunch.
+    void Menu::OpenSearch() {
+        m_kb_purpose = sl::smi::Kb_Search;
+        m_kb_text    = m_search;      // seeded, so refining beats retyping
+        m_kb_row = 0; m_kb_col = 0; m_kb_upper = false;
+        m_screen = Screen::Keyboard;
+    }
+
     // Stable per-entry key for the custom order: games by title id, homebrew by
     // .nro path, system shortcuts by kind. Kept text so order.txt is one key/line.
     std::string Menu::ItemKey(const MenuItem &it) const {
@@ -530,7 +649,11 @@ namespace sl::menu::ui {
                 snprintf(b, sizeof(b), "g%016llX", (unsigned long long)it.app_id);
                 return b;
             case ItemKind::Homebrew:
-                return "h" + it.hb_path;
+                // Every ROM in a playlist runs the same core, so the .nro alone
+                // would give a whole library one shared key - and with it one
+                // shared favourite, name and place in the custom order. The
+                // argv is what actually distinguishes them.
+                return "h" + (it.hb_argv.empty() ? it.hb_path : it.hb_argv);
             case ItemKind::WidgetTile:
                 return "w" + it.name;
             default:
@@ -645,6 +768,14 @@ namespace sl::menu::ui {
                 m_show_hints = (v != 0);
             else if (sscanf(line, "show_counter=%d", &v) == 1)
                 m_show_counter = (v != 0);
+            else if (sscanf(line, "shortcuts_everywhere=%d", &v) == 1)
+                m_shortcuts_everywhere = (v != 0);
+            else if (sscanf(line, "retroarch=%d", &v) == 1)
+                m_retroarch = (v != 0);
+            else if (sscanf(line, "sgdb=%d", &v) == 1)
+                m_sgdb_enabled = (v != 0);
+            else if (sscanf(line, "tdb_region=%d", &v) == 1)
+                m_tdb_region = std::clamp(v, 0, kTdbRegionCount - 1);
             else if (sscanf(line, "check_updates=%d", &v) == 1)
                 m_check_updates = (v != 0);
             else if (sscanf(line, "welcome=%d", &v) == 1)
@@ -686,7 +817,11 @@ namespace sl::menu::ui {
         fprintf(fp, "wrap_nav=%d\n", m_wrap_nav ? 1 : 0);
         fprintf(fp, "show_hints=%d\n", m_show_hints ? 1 : 0);
         fprintf(fp, "show_counter=%d\n", m_show_counter ? 1 : 0);
+        fprintf(fp, "shortcuts_everywhere=%d\n", m_shortcuts_everywhere ? 1 : 0);
+        fprintf(fp, "retroarch=%d\n", m_retroarch ? 1 : 0);
         fprintf(fp, "check_updates=%d\n", m_check_updates ? 1 : 0);
+        fprintf(fp, "tdb_region=%d\n", m_tdb_region);
+        fprintf(fp, "sgdb=%d\n", m_sgdb_enabled ? 1 : 0);
         fprintf(fp, "welcome=%d\n", m_welcome_enabled ? 1 : 0);
         fprintf(fp, "lang=%s\n", m_lang);
         fclose(fp);
@@ -854,6 +989,7 @@ namespace sl::menu::ui {
             case Screen::Music:         a = OnButtonMusic(b);         break;
             case Screen::Homebrew:      a = OnButtonHomebrew(b);      break;
             case Screen::Album:         a = OnButtonAlbum(b);         break;
+            case Screen::Files:         a = OnButtonFiles(b);         break;
             case Screen::FlowMenu:      a = OnButtonFlowMenu(b, out_app_id); break;
             case Screen::DeckMenu:      a = OnButtonDeckMenu(b, out_app_id); break;
             case Screen::DeckLibrary:   a = OnButtonDeckLibrary(b, out_app_id); break;
@@ -956,16 +1092,16 @@ namespace sl::menu::ui {
                 m_font_cursor = m_font_applied;
                 return Action::None;
             case ItemKind::Album:        OpenAlbumViewer(); return Action::None;
-            case ItemKind::MusicPlayer:
-                m_screen = Screen::Music; m_music_cursor = 0; m_sub_scroll = 0;
-                return Action::None;
+            case ItemKind::MusicPlayer:  OpenMusicPlayer(false); return Action::None;
             case ItemKind::UserPage:     return Action::OpenUserPage;
             case ItemKind::WebBrowser:   return Action::OpenWebBrowser;
             case ItemKind::MiiEdit:      return Action::OpenMiiEdit;
             case ItemKind::Controllers:  return Action::OpenControllers;
             case ItemKind::HomebrewMenu: OpenHomebrewBrowser(); return Action::None;
+            case ItemKind::FileManager:  OpenFileManager(); return Action::None;
             case ItemKind::Homebrew:
                 m_hb_launch_path = it.hb_path;
+                m_hb_launch_argv = it.hb_argv;
                 // Run as an application if a donor is set, else as an applet.
                 return m_hb_donor ? Action::LaunchHomebrewApp : Action::LaunchHomebrew;
             // Retired as an entry: Network does this in the menu instead
@@ -988,6 +1124,16 @@ namespace sl::menu::ui {
         if (m_launch_tick != 0) return Action::None;
         if (m_items.empty()) {
             if (b == Btn::Plus) EnterPower();
+            // A search that matched nothing empties the list, and every other
+            // way out of the main screen is an entry in it - so without these
+            // two the only thing left on the console is the power menu.
+            if (b == Btn::Y) OpenSearch();
+            if (b == Btn::B && !m_search.empty()) {
+                m_search.clear();
+                RebuildItems();
+                m_xmb_placed = false;
+                SetStatus(T("Search cleared"));
+            }
             return Action::None;
         }
         // Move mode: the D-pad reorders the held entry instead of navigating.
@@ -1065,6 +1211,17 @@ namespace sl::menu::ui {
                 return Action::None;
             }
         } else if (m_ui_mode == UiMode::XMB) {
+            // Y searches, B clears an active search. A thousand-entry column is
+            // not something you scroll to the end of, and the letter jump only
+            // helps if you know the first letter.
+            if (b == Btn::Y) { OpenSearch(); return Action::None; }
+            if (b == Btn::B && !m_search.empty()) {
+                m_search.clear();
+                RebuildItems();
+                m_xmb_placed = false;      // reopen on Games, as a fresh bar does
+                SetStatus(T("Search cleared"));
+                return Action::None;
+            }
             // Cross-media bar: left/right rides the category bar, up/down walks
             // the selected category's column. Both keep m_cursor pointing at the
             // same entry, so A/X and the options overlay need no special case.
@@ -1105,9 +1262,20 @@ namespace sl::menu::ui {
                 XmbApplyCursor();
                 return Action::None;
             }
-            // Shoulders page through the column, matching the other layouts.
+            // Shoulders page by five everywhere except a shortcut category,
+            // where they jump by initial instead. Paging five is useless in a
+            // scanned ROM library - reaching the S's from the A's is four
+            // hundred presses - but it is the right thing everywhere else: a
+            // letter jump only means something in a list that is ordered by
+            // name, and Games follows whatever sort mode is set while the
+            // system column is a handful of entries in no alphabetical order
+            // at all. A non-empty label is exactly "this column is a shortcut
+            // category", which is the only list built name-sorted.
             if (b == Btn::R || b == Btn::L) {
-                m_xmb_item = std::min(std::max(0, m_xmb_item + (b == Btn::R ? 5 : -5)), ncur - 1);
+                const int dir = (b == Btn::R) ? +1 : -1;
+                m_xmb_item = m_xmb_cols[m_xmb_col].label.empty()
+                           ? std::min(std::max(0, m_xmb_item + dir * 5), ncur - 1)
+                           : XmbLetterJump(dir);
                 XmbApplyCursor();
                 return Action::None;
             }
@@ -1322,7 +1490,7 @@ namespace sl::menu::ui {
             case OptSetDonor:
                 m_hb_donor = (m_hb_donor == sel_id) ? 0 : sel_id;   // toggle
                 SaveHbDonor();
-                SetStatus(m_hb_donor ? "Homebrew donor set (browser Y = run as app)"
+                SetStatus(m_hb_donor ? "Homebrew donor set (browser Y: run as app)"
                                      : "Homebrew donor cleared");
                 m_options_open = false;
                 return Action::None;
@@ -1357,7 +1525,7 @@ namespace sl::menu::ui {
                 if (!c.has_color) { c.color = TileColor(m_cursor); c.has_color = true; }
                 m_pick_tile = true;
                 // No theme preview: this colour is not part of the theme, and
-                // re-selecting the theme would only throw away the blur cache.
+                // re-selecting the theme would only rebuild the wallpaper blur.
                 OpenColorPicker(&c.color, Screen::Main, false);
                 m_options_open = false;
                 return Action::None;
@@ -1560,191 +1728,17 @@ namespace sl::menu::ui {
             if (!key.empty()) SelectByKey(key);
         }
     }
-    // CPU Gaussian blur -- reads an image file as SDL_Surface (CPU memory),
-    // applies a separable Gaussian convolution, uploads the result as a
-    // new texture.
-    //
-    // sigma is derived from wallpaper_blur_radius (2-32) as sigma = radius/2
-    // so sigma in [1 .. 16].  Kernel half-width = ceil(3*sigma) which covers
-    // +/-3sigma of the distribution.  The kernel is normalised to 2^16 so we use
-    // fixed-point arithmetic and shift right by 16 at the end -- no float
-    // math needed in the inner loop.
+    // The wallpaper, blurred on the GPU (Gfx::Blurred). The sharp copy is
+    // only a stepping stone and is freed again; if render targets are not
+    // available the sharp image is returned instead, which beats no wallpaper.
     SDL_Texture *Menu::BlurImage(const char *path) {
-        if (!path) return nullptr;
-
-        const Theme &t = m_theme.Current();
-        int radius = t.wallpaper_blur_radius;
-        if (radius < 2)  radius = 2;
-        if (radius > 32) radius = 32;
-
-        // Stat the source before anything else: the cache is keyed on the file
-        // as it is right now, and this has to be answered before deciding
-        // whether to decode it. A hit returns without ever touching IMG_Load,
-        // which is most of the win - the JPEG decode was never free either.
-        struct stat src {};
-        const bool have_src = g_sd_ok && stat(path, &src) == 0;
-        const std::string cache_path = have_src ? BlurCachePath(path)
-                                                : std::string();
-        if (have_src) {
-            if (SDL_Texture *hit = ReadBlurCache(m_gfx->Renderer(),
-                                                 cache_path.c_str(), radius, src))
-                return hit;
-        }
-
-        // Load as SDL_Surface -- always CPU-accessible, unlike SDL_Texture.
-        SDL_Surface *surface = IMG_Load(path);
-        if (!surface) return nullptr;
-
-        // Blur at a quarter of each axis and let the GPU scale the result back
-        // up when it is drawn.
-        //
-        // This is the single most expensive thing between a HOME press and the
-        // menu appearing. At full size and radius 32 it is a 99-tap kernel over
-        // 921,600 pixels twice, about 180 million multiply-adds on one ARM core.
-        // A sixteenth of the pixels with a quarter of the taps is roughly 64
-        // times less work, and the output is indistinguishable: it is a blurred
-        // image, so the detail being thrown away was about to be destroyed
-        // anyway.
-        {
-            const int dw = (surface->w + 3) / 4, dh = (surface->h + 3) / 4;
-            if (dw > 0 && dh > 0) {
-                SDL_Surface *small_s = SDL_CreateRGBSurfaceWithFormat(
-                        0, dw, dh, 32, SDL_PIXELFORMAT_RGBA8888);
-                if (small_s) {
-                    // SDL2 has no surface-level filter hint, so this is a plain
-                    // decimating blit. It does not matter: the Gaussian that
-                    // follows removes any aliasing the shrink introduces.
-                    if (SDL_BlitScaled(surface, nullptr, small_s, nullptr) == 0) {
-                        SDL_FreeSurface(surface);
-                        surface = small_s;
-                    } else {
-                        SDL_FreeSurface(small_s);
-                    }
-                }
-            }
-        }
-
-        int sw = surface->w;
-        int sh = surface->h;
-
-        // Sigma follows the image down, so the blur looks the same on screen.
-        float sigma = radius / 2.0f / 4.0f;
-        if (sigma < 0.5f) sigma = 0.5f;
-
-        // ---- Build Gaussian kernel (fixed-point, Q16) ----
-        // Normalise in floating point FIRST, then convert to Q16. Converting
-        // first and normalising afterwards overflows twice over: the centre
-        // weight is exactly 1.0 and 1.0 * 65536 does not fit in a uint16_t (it
-        // wraps to zero, deleting the most important tap), and re-scaling an
-        // already-Q16 value by 65536/sum wraps every remaining tap into noise.
-        int half = (int)lroundf(3.0f * sigma) + 1;  // +/-3sigma coverage
-        if (half < 1) half = 1;
-        const int kernel_size = 2 * half + 1;
-        std::vector<double> weight(kernel_size);
-        double sum = 0;
-        for (int i = -half; i <= half; i++) {
-            const double w = exp(-0.5 * i * i / ((double)sigma * sigma));
-            weight[i + half] = w;
-            sum += w;
-        }
-        std::vector<uint32_t> kernel(kernel_size);
-        int32_t total = 0;
-        for (int i = 0; i < kernel_size; i++) {
-            kernel[i] = (uint32_t)(weight[i] / sum * 65536.0 + 0.5);
-            total += (int32_t)kernel[i];
-        }
-        // Per-tap rounding leaves the total a few units off 65536, which would
-        // drift the image lighter or darker with the radius. Spread the
-        // difference one unit at a time outward from the centre; dumping all of
-        // it on the centre tap is enough, at some radii, to push that tap below
-        // its own neighbour and put a dimple in the middle of the kernel.
-        for (int32_t residual = 65536 - total, step = 0; residual != 0; step++) {
-            const int idx = half + ((step & 1) ? -(step + 1) / 2 : step / 2);
-            if (idx < 0 || idx >= kernel_size) break;
-            const int32_t d = (residual > 0) ? 1 : -1;
-            kernel[idx] = (uint32_t)((int32_t)kernel[idx] + d);
-            residual -= d;
-        }
-
-        // ---- Convert surface to RGBA8888 buffer ----
-        const int np = sw * sh;
-        std::vector<uint8_t> rgba(np * 4);
-        {
-            SDL_Surface *conv = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA8888, 0);
-            if (!conv) { SDL_FreeSurface(surface); return nullptr; }
-            // Copy row by row: a surface's pitch can carry padding past the last
-            // pixel, and the old blind memcpy of sh*pitch bytes into an sw*sh*4
-            // buffer overran the heap whenever it did.
-            for (int y = 0; y < sh; y++)
-                memcpy(&rgba[(size_t)y * sw * 4],
-                       (const uint8_t *)conv->pixels + (size_t)y * conv->pitch,
-                       (size_t)sw * 4);
-            SDL_FreeSurface(conv);
-        }
-        SDL_FreeSurface(surface);
-
-        // ---- Separable Gaussian convolution ----
-        // Q16 accumulator back down to a byte. Clamped rather than truncated:
-        // a rounding residual can push the brightest pixels a hair past 255,
-        // and a bare cast wraps those to black, which speckles a blurred
-        // highlight with dark pixels.
-        auto Q16ToByte = [](uint32_t acc) -> uint8_t {
-            const uint32_t v = acc >> 16;
-            return (uint8_t)(v > 255 ? 255 : v);
-        };
-        std::vector<uint8_t> tmp(np * 4);
-
-        // Horizontal pass: rgba -> tmp
-        for (int y = 0; y < sh; y++) {
-            for (int x = 0; x < sw; x++) {
-                uint32_t acc[4] = {0};
-                for (int k = -half; k <= half; k++) {
-                    int sx = x + k;
-                    if (sx < 0) sx = 0;
-                    if (sx >= sw) sx = sw - 1;
-                    uint16_t w = kernel[k + half];
-                    const uint8_t *px = &rgba[(y * sw + sx) * 4];
-                    acc[0] += px[0] * w;
-                    acc[1] += px[1] * w;
-                    acc[2] += px[2] * w;
-                    acc[3] += px[3] * w;
-                }
-                uint8_t *dst = &tmp[(y * sw + x) * 4];
-                for (int c = 0; c < 4; c++) dst[c] = Q16ToByte(acc[c]);
-            }
-        }
-
-        // Vertical pass: tmp -> rgba
-        for (int y = 0; y < sh; y++) {
-            for (int x = 0; x < sw; x++) {
-                uint32_t acc[4] = {0};
-                for (int k = -half; k <= half; k++) {
-                    int sy = y + k;
-                    if (sy < 0) sy = 0;
-                    if (sy >= sh) sy = sh - 1;
-                    uint16_t w = kernel[k + half];
-                    const uint8_t *px = &tmp[(sy * sw + x) * 4];
-                    acc[0] += px[0] * w;
-                    acc[1] += px[1] * w;
-                    acc[2] += px[2] * w;
-                    acc[3] += px[3] * w;
-                }
-                uint8_t *dst = &rgba[(y * sw + x) * 4];
-                for (int c = 0; c < 4; c++) dst[c] = Q16ToByte(acc[c]);
-            }
-        }
-
-        // ---- Cache and upload result ----
-        if (have_src)
-            WriteBlurCache(cache_path.c_str(), radius, src, sw, sh, rgba.data());
-
-        SDL_Renderer *rend = m_gfx->Renderer();
-        SDL_Texture *dst = SDL_CreateTexture(rend, SDL_PIXELFORMAT_RGBA8888,
-                                             SDL_TEXTUREACCESS_STATIC, sw, sh);
-        if (!dst) return nullptr;
-        SDL_UpdateTexture(dst, nullptr, rgba.data(), sw * 4);
-        SDL_SetTextureBlendMode(dst, SDL_BLENDMODE_BLEND);
-        return dst;
+        SDL_Texture *sharp = path ? m_gfx->LoadImage(path) : nullptr;
+        if (!sharp) return nullptr;
+        const int radius = std::clamp(m_theme.Current().wallpaper_blur_radius, 2, 32);
+        SDL_Texture *soft = m_gfx->Blurred(sharp, radius);
+        if (!soft) return sharp;
+        m_gfx->FreeImage(sharp);
+        return soft;
     }
     dbg::Counters Menu::DebugCounters() const {
         dbg::Counters dc;
@@ -1754,6 +1748,12 @@ namespace sl::menu::ui {
         dc.items     = (int)m_items.size();
         dc.widgets   = const_cast<widgets::Widgets &>(m_widgets).Count();
         dc.ui_mode   = (int)m_ui_mode;
+        const auto ts = m_gfx->Textures();
+        dc.tex_created  = ts.creates;
+        dc.tex_failures = ts.failures;
+        dc.tex_slots    = ts.slots;
+        dc.tex_cached   = ts.cached;
+        dc.tex_bytes    = ts.cached_bytes;
         return dc;
     }
     // Turning the overlay off snapshots the numbers to sdmc:/slaunch/debug.log,
@@ -1784,61 +1784,33 @@ namespace sl::menu::ui {
             if (m_wallpaper_blur) { m_gfx->FreeImage(m_wallpaper_blur); m_wallpaper_blur = nullptr; }
             m_wallpaper_path.clear();
             m_wallpaper_theme = idx;
-            m_video_frames.clear();
-            m_video_frame_idx = 0;
-            m_video_frame_tick = 0;
+            m_video_player.Close();
 
             if (g_sd_ok && t.wallpaper[0]) {
-                // Check if it's a directory (video frame sequence)
-                struct stat st;
-                if (stat(t.wallpaper, &st) == 0 && S_ISDIR(st.st_mode)) {
-                    DIR *d = opendir(t.wallpaper);
-                    if (d) {
-                        struct dirent *e;
-                        while ((e = readdir(d)) != nullptr) {
-                            const char *name = e->d_name;
-                            size_t len = strlen(name);
-                            if (len < 5) continue;
-                            const char *e4 = name + len - 4;
-                            const char *e5 = len >= 5 ? name + len - 5 : "";
-                            if (strcasecmp(e4, ".jpg") == 0 || strcasecmp(e4, ".png") == 0 ||
-                                strcasecmp(e4, ".bmp") == 0 || strcasecmp(e5, ".jpeg") == 0)
-                                m_video_frames.push_back(std::string(t.wallpaper) + "/" + name);
-                        }
-                        closedir(d);
-                        std::sort(m_video_frames.begin(), m_video_frames.end());
-                    }
-                }
-                // With blur on, the sharp wallpaper is never drawn - DrawBackground
-                // uses the blurred texture instead - so decoding it is a whole
-                // 1280x720 JPEG of pure waste on every single launch. The blur
-                // comes from the file on its own path, so nothing needs it.
-                const bool need_sharp = !t.wallpaper_blur;
-                if (m_video_frames.empty()) {
+                if (IsVideoPath(t.wallpaper)) {
+                    // Blur is not supported for video wallpapers (see
+                    // Menu_Screens.cpp's editor, which disables that toggle
+                    // when IsVideoPath is true) - re-blurring every decoded
+                    // frame live would be a real performance cost for a
+                    // cosmetic effect, so it is simply skipped here.
+                    m_video_player.Open(m_gfx, t.wallpaper);
+                    m_wallpaper_path = t.wallpaper;
+                } else {
+                    // With blur on, the sharp wallpaper is never drawn - DrawBackground
+                    // uses the blurred texture instead - so decoding it is a whole
+                    // 1280x720 JPEG of pure waste on every single launch. The blur
+                    // comes from the file on its own path, so nothing needs it.
+                    const bool need_sharp = !t.wallpaper_blur;
                     m_wallpaper_path = t.wallpaper;
                     if (need_sharp) m_wallpaper = m_gfx->LoadImage(t.wallpaper);
-                } else {
-                    m_wallpaper_path = m_video_frames[0];
-                    if (need_sharp) m_wallpaper = m_gfx->LoadImage(m_video_frames[0].c_str());
-                }
-                reloadBlur();
-            }
-        } else {
-            // Same theme - advance video frame if configured
-            if (!m_video_frames.empty()) {
-                const u64 now = armGetSystemTick();
-                const int fps = t.wallpaper_fps;
-                const u64 interval = armGetSystemTickFreq() / (fps > 0 ? fps : 10);
-                if (now - m_video_frame_tick >= interval) {
-                    m_video_frame_tick = now;
-                    m_video_frame_idx = (m_video_frame_idx + 1) % (int)m_video_frames.size();
-                    m_wallpaper_path = m_video_frames[m_video_frame_idx];
-                    if (m_wallpaper) { m_gfx->FreeImage(m_wallpaper); m_wallpaper = nullptr; }
-                    if (!t.wallpaper_blur)
-                        m_wallpaper = m_gfx->LoadImage(m_video_frames[m_video_frame_idx].c_str());
                     reloadBlur();
                 }
             }
+        } else {
+            // Same theme: advance the video decode (a no-op when the active
+            // wallpaper is a still image - GetTexture() stays null and
+            // Tick() returns immediately).
+            m_video_player.Tick();
         }
     }
     void Menu::DrawBackground() {
@@ -1848,12 +1820,17 @@ namespace sl::menu::ui {
         // Wallpaper first (when set), so ribbons draw on top.
         EnsureWallpaper();
         Phase("wallpaper");
-        if (m_wallpaper || m_wallpaper_blur) {
+        SDL_Texture *video_tex = m_video_player.GetTexture();
+        if (m_wallpaper || m_wallpaper_blur || video_tex) {
             const int W = gfx::Gfx::Width;
             const int H = gfx::Gfx::Height;
 
-            // Draw the wallpaper (blurred if that toggle is on).
-            if (t.wallpaper_blur && m_wallpaper_blur) {
+            // Draw the wallpaper. A video wallpaper never blurs (see
+            // EnsureWallpaper); a static image is blurred when that toggle
+            // is on and its pre-baked blur texture is ready.
+            if (video_tex) {
+                m_gfx->DrawCover(video_tex, 255);
+            } else if (t.wallpaper_blur && m_wallpaper_blur) {
                 m_gfx->DrawCover(m_wallpaper_blur, 255);
             } else {
                 m_gfx->DrawCover(m_wallpaper, 255);
@@ -1864,8 +1841,11 @@ namespace sl::menu::ui {
                 m_gfx->FillRect(0, 0, W, H, SDL_Color{0,0,0,90});
             }
 
-            // Snow overlay (independent toggle).
-            if (t.wallpaper_snow) {
+            // Snow overlay (independent toggle): on the GPU when it can be.
+            if (t.wallpaper_snow && m_gfx->FxBegin(m_gfx->FxProgram(kSnowVs, kSnowFs))) {
+                m_gfx->FxQuads(120);
+                m_gfx->FxEnd();
+            } else if (t.wallpaper_snow) {
                 const float elapsed = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
                 const int count = 120;
                 for (int i = 0; i < count; i++) {
@@ -1884,8 +1864,14 @@ namespace sl::menu::ui {
             }
         }
 
-        if (t.background_style == BackgroundStyle_Ribbon) {
-            DrawRibbonBackground(m_gfx, t);
+        switch (t.background_style) {
+            case BackgroundStyle_Ribbon: DrawRibbonBackground(m_gfx, t); break;
+            case BackgroundStyle_Stars:  DrawStarsBackground(m_gfx, t);  break;
+            case BackgroundStyle_Aurora: DrawAuroraBackground(m_gfx, t); break;
+            case BackgroundStyle_Grid:   DrawGridBackground(m_gfx, t);   break;
+            case BackgroundStyle_RibbonHD: DrawRibbonBackground(m_gfx, t, true); break;
+            case BackgroundStyle_Ocean:  DrawOceanBackground(m_gfx, t);  break;
+            default: break;   // Gradient: the gradient above is the whole of it
         }
     }
     // XMB header: title hard left on the title margin, clock and battery hard
@@ -1920,6 +1906,7 @@ namespace sl::menu::ui {
         const int hy = kXmbTitleTop + 10;
         m_gfx->Text(FontSize::Small, W - kXmbTitleLeft - bw, hy, t.fg, batt);
         m_gfx->Text(FontSize::Small, W - kXmbTitleLeft - bw - 24 - cw, hy, t.dim, clock);
+        DrawUsbTag(W - kXmbTitleLeft - bw - 24 - cw - 24, hy);
     }
     void Menu::DrawTopBar(const char *center_title) {
         const Theme &t = m_theme.Current();
@@ -1960,6 +1947,7 @@ namespace sl::menu::ui {
         const int edge = 40, gap = 24;
         m_gfx->Text(FontSize::Small, gfx::Gfx::Width - edge - bw, 16, t.fg, batt);
         m_gfx->Text(FontSize::Small, gfx::Gfx::Width - edge - bw - gap - nw, 16, t.dim, name);
+        DrawUsbTag(gfx::Gfx::Width - edge - bw - gap - nw - gap, 16);
 
         // Localized when it's a known UI title; user data (theme/widget names)
         // passes through T() unchanged.
@@ -2297,11 +2285,9 @@ namespace sl::menu::ui {
         const bool first_frame = !g_phase_done;
         m_icons.BeginFrame(first_frame ? 0 : 3);
         m_hb_icons.BeginFrame(first_frame ? 0 : 2);
-        // Six cached covers a frame, because a hit is only a read and an upload.
-        // Decodes are capped far lower, and DrawMainFlow drops them to zero
-        // while the row is moving: scrolling must never pay for cache building.
+        // Reading and decoding art happens on the art worker; this caps how
+        // many finished pictures are uploaded per frame (PollArt takes half).
         m_cover_budget  = first_frame ? 0 : 6;
-        m_decode_budget = first_frame ? 0 : 1;
 
         // Fold in the deferred worker the moment it lands, before anything below
         // reads what it built.
@@ -2311,6 +2297,7 @@ namespace sl::menu::ui {
             (armGetSystemTick() - g_frame1_tick) > armGetSystemTickFreq() * 3)
             CoverStatsFlush();
 
+        PollArt();          // covers, box scans, hero art decoded on the worker
         PollShotDecode();   // background hero panels, uploaded when they land
         PollCoverFetch();   // a fetched cover becomes visible on the next frame
         PollCoverPicker();  // ...and so does one chosen by hand
@@ -2378,6 +2365,7 @@ namespace sl::menu::ui {
             case Screen::Music:       DrawMusic(); break;
             case Screen::Homebrew:    DrawHomebrew(); break;
             case Screen::Album:       DrawAlbum();    break;
+            case Screen::Files:       DrawFiles();    break;
             case Screen::FlowMenu:    DrawFlowMenu(); break;
             case Screen::DeckMenu:    DrawDeckMenu(); break;
             case Screen::DeckLibrary: DrawDeckLibrary(); break;
@@ -2394,8 +2382,10 @@ namespace sl::menu::ui {
         // Touch-only "go back", on every screen a button-B would leave from.
         // Under the options overlay and any dialog on purpose - both already
         // have their own way out, and neither is what B does while they're up.
-        if (m_screen != Screen::Main && !m_options_open && m_dialog == Dialog::None)
+        if (m_screen != Screen::Main && m_screen != Screen::Oobe &&
+            !m_options_open && m_dialog == Dialog::None)
             DrawBackTap();
+        DrawUsbStatus();   // over the screen, under the options overlay and dialogs
         if (m_options_open) DrawOptions();
         Phase("draw screen");
         if (m_dialog != Dialog::None) DrawDialog();
@@ -2403,6 +2393,19 @@ namespace sl::menu::ui {
         // Last, so it sits over every screen including dialogs, and always in
         // the system font: a user-selected font may have no digits worth
         // reading, and the whole point of this panel is the numbers.
+        // Memory trace. Enabled only when sdmc:/slaunch/config/memtrace.txt
+        // exists, so it costs nothing normally. The crash we are chasing kills
+        // the process mid-frame, which means the only evidence that survives is
+        // what has already been written to the card - hence a periodic snapshot
+        // rather than a dump on exit.
+        if (m_memtrace_on) {
+            const u64 now = armGetSystemTick(), freq = armGetSystemTickFreq();
+            if (m_memtrace_tick == 0 || (now - m_memtrace_tick) > 2 * freq) {
+                m_memtrace_tick = now;
+                m_debug.Frame();                 // refresh the kernel counters
+                m_debug.Dump(DebugCounters());
+            }
+        }
         if (m_debug.Visible()) {
             m_debug.Frame();
             m_gfx->UseDefaultFont(true);
@@ -2547,7 +2550,16 @@ namespace sl::menu::ui {
     void Menu::DrawMainEmpty() {
         const Theme &t = m_theme.Current();
         m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, 340, t.dim,
-                            m_loading ? T("Loading games...") : T("No apps found"));
+                            m_loading   ? T("Loading games...")
+                          : !m_search.empty() ? T("No matches")
+                                          : T("No apps found"));
+        // Without this an empty result looks like a menu that lost everything.
+        if (!m_loading && !m_search.empty()) {
+            m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, 380, t.dim,
+                                ("\"" + m_search + "\"").c_str());
+            m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, 420, t.accent,
+                                T("B: Clear search    Y: Search again"));
+        }
 
         // Three dots, pulsing out of phase with each other - shared by every
         // UI mode, since they all fall back to this one placeholder while the
@@ -2667,6 +2679,7 @@ namespace sl::menu::ui {
             case ItemKind::Wifi:         file = "wifi";         break;
             case ItemKind::Power:        file = "power";        break;
             case ItemKind::HomebrewMenu: file = "homebrewmenu"; break;
+            case ItemKind::FileManager:  file = "filemanager";  break;
             default: break;
         }
         SDL_Texture *tex = nullptr;

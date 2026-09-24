@@ -1,5 +1,7 @@
 #pragma once
 #include <string>
+#include <atomic>
+#include <cstdint>
 
 // Tiny HTTPS GET helper built on libcurl (mbedTLS backend). Blocking, so call
 // it only from a background thread. Certificate verification is disabled: the
@@ -29,6 +31,21 @@ namespace sl::menu::net {
 
     // GET url straight to a file (streamed, so it isn't size-capped like Get).
     // Returns true on HTTP 2xx; a failed/partial download leaves no file.
-    bool Download(const char *url, const char *path, long timeout_s = 15);
+    // `now` / `total`, when given, follow the transfer in bytes (total stays
+    // 0 until the server says how big it is) - for progress bars.
+    bool Download(const char *url, const char *path, long timeout_s = 15,
+                  std::atomic<uint64_t> *now = nullptr, std::atomic<uint64_t> *total = nullptr);
+
+    // The appid of the entry in a steamcommunity SearchApps response whose
+    // name really is `title`, or "" when none is. Steam's search is fuzzy and
+    // always returns something - searching "Super Smash Bros. Ultimate", which
+    // is not on Steam, returns "Super Smash Gals" - so taking the first hit
+    // put another game's news and screenshots on the box. A match is the same
+    // words ignoring case, punctuation and (TM)/(R), with an edition suffix
+    // after ':' or " - " allowed on either side.
+    std::string SteamAppFor(const std::string &search_json, const std::string &title);
+
+    // The same rule on its own: is `candidate` the game called `title`?
+    bool TitlesMatch(const std::string &candidate, const std::string &title);
 
 } // namespace sl::menu::net

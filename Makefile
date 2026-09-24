@@ -59,11 +59,16 @@ assets: hbloader
 	       assets/widgets/quote.lua SdOut/slaunch/widgets/ 2>/dev/null || true
 	@# Locale template for translators (English is built in; no file = English).
 	@cp -f assets/lang/*.txt SdOut/slaunch/lang/ 2>/dev/null || true
+	@# Screenshots of each layout, for the setup wizard's layout gallery.
+	@mkdir -p SdOut/slaunch/previews
+	@cp -f assets/previews/*.jpg SdOut/slaunch/previews/ 2>/dev/null || true
 	@# Black/white icons for the system menu entries (List + Grid modes).
 	@mkdir -p SdOut/slaunch/icons
 	@cp -f assets/theming.png assets/controllers.png assets/album.png assets/user.png \
 	       assets/browser.png assets/mii.png assets/settings.png assets/power.png \
-	       assets/homebrewmenu.png assets/random.png SdOut/slaunch/icons/ 2>/dev/null || true
+	       assets/homebrewmenu.png assets/random.png assets/games.png \
+	       assets/filemanager.png assets/fm_folder.png \
+	       SdOut/slaunch/icons/ 2>/dev/null || true
 	@# Button-prompt glyphs (Xelu pack, see assets/icons/buttons/ATTRIBUTION.md)
 	@# for every hint bar's A/B/X/Y/L/R/+/-/D-pad/stick icons.
 	@mkdir -p SdOut/slaunch/icons/buttons

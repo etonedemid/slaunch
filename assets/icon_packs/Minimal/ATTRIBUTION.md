@@ -11,12 +11,19 @@ rescales them to 64x64 on load.
 
 ## Later additions (not by MeepCat55)
 
-`settings.png`, `music.png`, `games.png` and `homebrewmenu.png` were added
-afterwards to complete the set, and are **not** MeepCat55's work. They follow the
-same convention as the originals - a black circular plate of radius 110 centred
-in a 256x256 RGBA canvas, white artwork on top, transparent outside the plate -
-but they were generated rather than drawn in Inkscape, so they have no entry in
-`source-svgs/`.
+`settings.png`, `music.png` and `homebrewmenu.png` were added afterwards to
+complete the set, and are **not** MeepCat55's work. They follow the same
+convention as the originals - white artwork carried by the alpha channel on a
+256x256 RGBA canvas - but they were generated rather than drawn in Inkscape, so
+they have no entry in `source-svgs/`.
+
+`games.png` is RetroArch's, not ours: it is `core-input-remapping-options.png`
+from the monochrome XMB icon set in
+[libretro/retroarch-assets](https://github.com/libretro/retroarch-assets),
+used under **CC BY 4.0** (see that repository's `COPYING`). Recoloured to white
+and otherwise unmodified. The same artwork is the built-in set's
+`assets/games.png`, flattened to 64x64 white-on-black to match the rest of that
+set.
 
 The original `settings.png` in this pack was a wifi glyph (its source vector is
 still `source-svgs/settings.svg`, saved by Inkscape under the name `wifi.svg`),

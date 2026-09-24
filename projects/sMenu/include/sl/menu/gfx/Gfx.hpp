@@ -31,6 +31,22 @@ namespace sl::menu::gfx {
         // Primitives
         void FillRect(int x, int y, int w, int h, SDL_Color c);
         void FillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, SDL_Color c);
+
+        // Many rects, one colour, one draw call. The backgrounds build a shape
+        // out of hundreds of slivers; issued one at a time that is hundreds of
+        // calls a frame for a single line.
+        void FillRects(const SDL_Rect *r, int n, SDL_Color c);
+
+        // Same as FillRect but added to what is already there instead of
+        // blended over it, so overlapping draws build up light. This is what
+        // makes a glow look like light rather than like paint.
+        void FillRectAdd(int x, int y, int w, int h, SDL_Color c);
+
+        // Antialiased line, vertical-major. Coverage is split between the two
+        // pixels either side of the exact x for each row, which is what stops a
+        // near-vertical line from climbing in visible stair steps. Batched, so
+        // the whole line is one draw call.
+        void LineAA(float x0, float y0, float x1, float y1, SDL_Color c, float width = 1.0f);
         void GradientV(SDL_Color top, SDL_Color bottom);
 
         // Text
@@ -53,6 +69,11 @@ namespace sl::menu::gfx {
         // source (used for grid/line app icons). Falls back to the full image if
         // a render target can't be made.
         SDL_Texture *LoadImageScaled(const char *path, int w, int h);
+        // Same decode and rescale, left as an RGBA8888 surface for the caller
+        // to upload into a texture it already owns (IconCache's pool).
+        SDL_Surface *LoadSurfaceScaled(const char *path, int w, int h);
+        // Same, from an encoded image already in memory (e.g. embedded cover art).
+        SDL_Texture *LoadImageScaled(const void *data, size_t len, int w, int h);
         // Same job, scale-to-cover instead of LoadImageScaled's stretch-to-fit:
         // the larger of the two axis ratios is used, so the target is filled
         // with no border, and whichever axis overflows is centre-cropped - a
@@ -143,7 +164,95 @@ namespace sl::menu::gfx {
         // surface. No effect on hardware, where SDL has one window anyway.
         void SetWindowTitle(const char *title) { m_title = title; }
 
+        // ---- live effects ---------------------------------------------------
+        // The frame is drawn into a texture instead of straight to the screen,
+        // which is what makes these possible: they sample the menu as it is
+        // this frame, not a still prepared earlier. Costs one extra fullscreen
+        // blit per frame. If the GPU will not give us a render target the
+        // capture is skipped and everything below degrades to nothing drawn,
+        // never to a broken frame.
+
+        // Blur whatever has been drawn so far behind this rect, and draw it
+        // there - frosted glass over the live menu. downscale is the blur
+        // strength: the scene is sampled through a 1/n texture, so 8 is soft
+        // and 2 is barely there.
+        void DrawSceneBlurred(int x, int y, int w, int h, int downscale = 8,
+                              Uint8 alpha = 255);
+
+        // ---- GPU effects ------------------------------------------------------
+        // Shader programs drawn by talking to GL directly, between SDL draws
+        // (see the raw GL section of Gfx.cpp for how the two share a context).
+        // A program is a vertex + fragment body, compiled once and cached by
+        // the vs pointer - pass string literals. Positions are in 1280x720
+        // menu space via Clip(); fragment output is premultiplied, so
+        // vec4(rgb*a, a) blends and vec4(rgb, 0) adds.
+        //
+        // FxProgram returns -1 and FxBegin false whenever GL is unavailable,
+        // a shader fails to build, or sdmc:/slaunch/config/no_gpu_fx exists -
+        // callers keep their rect-drawn version for exactly that case.
+        int  FxProgram(const char *vs, const char *fs);
+        bool FxBegin(int prog);
+        void FxSet(const char *name, float a);
+        void FxSet(const char *name, float a, float b, float c, float d);
+        void FxSet(const char *name, SDL_Color c);   // rgba as 0..1
+        void FxStrip(int columns);   // aV.x = column 0..n-1, aV.y = 0 / 1 edge
+        void FxQuads(int count);     // aV.z = quad index, Corner() = 0..1 corner
+        void FxEnd();
+        // Bind a texture for the open program's `uTex` sampler (null = white).
+        // Its coordinates must be multiplied by `uTexScale.xy`.
+        void FxTexture(SDL_Texture *tex);
+        // End any open pass. Gfx's own SDL draws do this themselves; code that
+        // calls SDL directly (render targets, clip rects) must do it first.
+        void FxClose();
+
+        // A rounded card, drawn on the GPU in the open pass: image (or fill),
+        // anti-aliased corners, a soft drop shadow, a selection ring + glow
+        // and optionally a fading floor reflection. Returns false when the
+        // GPU path is unavailable, so the caller can draw its plain version.
+        struct CardStyle {
+            float     radius  = 14.0f;
+            float     shadow  = 18.0f;        // 0 = none
+            float     glow    = 0.0f;         // 0..1, selection
+            SDL_Color glow_col{ 255, 255, 255, 255 };
+            SDL_Color fill{ 0, 0, 0, 0 };     // under the image, or on its own
+            bool      glyph   = false;        // tex is a mask: paint it in `tint`
+            SDL_Color tint{ 255, 255, 255, 255 };
+            float     band    = 0.0f;         // darkened strip at the bottom, px
+            bool      reflect = false;
+        };
+        bool Card(SDL_Texture *tex, float x, float y, float w, float h,
+                  const CardStyle &style, Uint8 alpha = 255);
+        bool CardsOk();   // Card will draw (textured ones included)
+
+        // A blurred copy of src, made on the GPU (see Gfx.cpp); radius is in
+        // full-size pixels. nullptr if render targets are unavailable.
+        SDL_Texture *Blurred(SDL_Texture *src, int radius);
+
+        // Additive halo around a rect. No render target: concentric rects in
+        // ADD blending, which at this size reads the same as a real bloom and
+        // costs `spread` fills.
+        void GlowRect(int x, int y, int w, int h, SDL_Color c, int spread = 12);
+
     private:
+        SDL_Texture *ScaleToTexture(SDL_Surface *raw, int w, int h);   // frees raw
+        bool FxTexturesWork();
+        bool FxTextureSelfTest();
+        bool Quad3DGpu(SDL_Texture *tex, const float c[4][3], SDL_Color tint,
+                       Uint8 alpha_top, Uint8 alpha_bottom, bool flip_v, const float uv[4]);
+        SDL_Surface *ScaleSurface(SDL_Surface *raw, int w, int h);     // frees raw
+        void BeginScene();   // called by Clear
+        void EndScene();     // called by Present
+        bool ShaderFxInit();              // compile on first use; false = unavailable
+        unsigned m_fx_vbo = 0;
+        SDL_Texture *m_fx_tex = nullptr;   // bound by FxTexture in the open pass
+        bool m_fx_tex_ok = false;          // SDL_GL_BindTexture really binds
+        bool m_gles = false;               // SDL's GLES2 renderer (the console's)
+        int      m_fx_tried = 0;          // 0 not yet, 1 ready, -1 gave up
+
+        SDL_Texture *m_scene = nullptr;   // this frame, as a texture
+        SDL_Texture *m_small = nullptr;   // downscale scratch for the blur
+        int          m_small_div = 0;     // what m_small was built for
+
         SDL_Window   *m_window   = nullptr;
         SDL_Renderer *m_renderer = nullptr;
         TTF_Font     *m_sysFonts[(int)FontSize::Count] = {}; // system (pl) - default
@@ -174,9 +283,91 @@ namespace sl::menu::gfx {
         // per frame, so each unique (font,size,string) is rendered once (in
         // white) and reused; per-draw Color/alpha is applied with texture
         // Color/alpha modulation. Cleared when the active font changes.
-        struct CachedText { SDL_Texture *tex; int w; int h; };
+        // `used` is an LRU stamp. The cache is bounded by the GPU memory it
+        // holds rather than by entry count: a list of long names (a scanned ROM
+        // library) makes each texture several times the size of a short game
+        // title, so a count that was safe for one is not for the other.
+        // `w`/`h` are the text's own size. The texture behind it may be larger
+        // (a pool slot), so drawing always goes through a source rect rather
+        // than taking the whole texture.
+        struct CachedText { SDL_Texture *tex; int w; int h; uint64_t used; };
+
+        // ---- wide-label slot pool ------------------------------------------
+        // List labels are the only text that is both large and constantly
+        // changing: a scanned ROM library draws ~15 of them per frame, every
+        // one a different string, each 220-530 KB and every one a different
+        // width. Caching those as individual textures means a GPU allocation
+        // and a free per label per scroll step, at hundreds of distinct sizes -
+        // measured at 1207 allocations across 859 size classes over 600 frames
+        // of scrolling (scripts: see the churn harness in the commit message).
+        //
+        // The pool replaces that with a fixed set of identically sized slots,
+        // allocated once and then only ever re-uploaded: 24 allocations, one
+        // size, and nothing freed while drawing. Fragmentation and
+        // free-while-bound both stop being possible rather than becoming less
+        // likely, which matters because neither is reproducible off-console.
+        //
+        // Narrow text (the clock, hints, menu rows) keeps the ordinary cache -
+        // it is small, and there is not much of it.
+        // Two width classes, so a short name does not sit in a slot sized for
+        // the longest one. Anything narrower than the first class is left to
+        // the ordinary cache: the clock, the battery, a placeholder initial -
+        // small, few, and the same strings frame after frame.
+        // Anything taller than a slot (FontSize::Large titles) falls back too.
+        // Three width classes. Short strings are by far the most numerous (tile
+        // labels, hints, the clock), so they get the most slots at the least
+        // cost; only a full-width list label needs the big ones. Counts were
+        // picked by measuring until texture creation went flat while scrolling
+        // in every layout - see the sim's "[sim] textures:" line.
+        static constexpr int    kSlotH       = 96;    // tallest list line at 2x
+        static constexpr int    kClassCount  = 3;
+        static constexpr int    kClassW[3]   = { 256, 640, 1456 };
+        static constexpr int    kClassN[3]   = { 48, 24, 20 };   // ~21 MB total
+        struct TextSlot {
+            SDL_Texture *tex = nullptr;
+            std::string  key;
+            int          w = 0, h = 0;
+            int          cls = 0;     // width class this slot was made for
+            uint64_t     used  = 0;
+            uint64_t     frame = 0;   // last frame drawn; never reused inside one
+        };
+        std::vector<TextSlot> m_slots;
+        std::unordered_map<std::string, int> m_slotOf;
+        uint64_t m_frame = 0;
+        // Returns the slot index for `key`, uploading `surf` into it, or -1 when
+        // every slot is already spoken for this frame.
+        // Texture accounting, for the debug overlay and the sim. `creates` is
+        // the number the menu has asked the driver for since start: it should
+        // go flat once the pool is warm, whatever the list is doing.
+        struct TexStats { long creates; long failures; long slots; long cached; size_t cached_bytes; };
+    public:
+        TexStats Textures() const {
+            return { m_texCreates, m_texFailures, (long)m_slots.size(),
+                     (long)m_textCache.size(), m_textBytes };
+        }
+    private:
+        long m_texCreates = 0;
+        long m_texFailures = 0;   // creations the driver refused
+        int  AcquireSlot(const std::string &key, SDL_Surface *surf);
+        void FreeSlots();
+        CachedText m_pooledRet {};   // GetText returns a reference; pooled hits use this
         std::unordered_map<std::string, CachedText> m_textCache;
+        std::unordered_map<std::string, int> m_widthCache;   // TextWidth memo
+        uint64_t m_textClock = 0;
+        size_t   m_textBytes = 0;
+        // Only a screenful of labels is ever on screen; this is several times
+        // that, and still a small fraction of what an applet slot has to spare.
+        static constexpr size_t kTextCacheBudget = 6u * 1024 * 1024;
+        // Evicted textures wait here and are destroyed in Present(), never
+        // mid-frame. Freeing one while Mesa still has it bound leaves a buffer
+        // object in its context pointing at released memory, and the next
+        // draw's pushbuf_validate walks that list and dereferences the null.
+        // That is the crash; SDL only flushes its own pending command queue on
+        // destroy, which does not cover a binding Mesa is still holding.
+        std::vector<SDL_Texture *> m_textGraveyard;
         const CachedText &GetText(FontSize s, const char *text);
+        void EvictText(size_t want_free);   // retire least-recently-used entries
+        void ReapTextures();                // destroy the retired ones (Present only)
         void ClearTextCache();
 
         // --- Gradient background cache ------------------------------------

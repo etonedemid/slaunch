@@ -2,7 +2,9 @@
 
 slaunch is a home replacement that supports theming, widgets, bg music, several UI modes and more.
 
-[Discord](https://discord.gg/dv28MgtaNn)
+[Discord](https://discord.gg/dv28MgtaNn) · Licensed under **GPL-3.0** (see
+`LICENSE`) — required by the hardware video decoder ported into sMenu; see
+`THIRDPARTY.md`.
 
 <img width="1280" height="720" alt="2026092401121200-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/fc5fcfc0-1348-454c-a057-2459c590818a" />
 <img width="1280" height="720" alt="2026092323471800-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/a70ddc69-c610-4c96-9c30-7dcecc787b1d" />
@@ -52,7 +54,7 @@ slaunch/lang/                                                 translations + tem
 slaunch/music/                                                background music (mp3/ogg/flac)
 slaunch/sounds/                                               UI sound effects
 slaunch/widgets/                                              Lua home-screen widgets
-slaunch/themes/                                               user wallpapers (.jpg/.png)
+slaunch/themes/                                               user wallpapers (.jpg/.png/.mp4)
 slaunch/config/                                               console settings, saved at runtime
 slaunch/config/users/<account id>/                            each account's own settings
 ```
@@ -71,6 +73,25 @@ Non-Latin scripts need a font with those glyphs. sLaunch selects the console's
 own shared font from the system language, so Japanese, Korean and Chinese render
 correctly with nothing installed; a full Noto Sans CJK is also bundled and
 selectable under **Theming > Fonts** for reading names in other scripts.
+
+### Video wallpapers
+
+A theme's wallpaper can be an `.mp4` file instead of a still image - it plays
+back looped and silent behind the menu, decoded on the Switch's own NVDEC
+hardware block (see `THIRDPARTY.md` for where that decoder comes from).
+
+- **Format**: H.264 video in an `.mp4` container. Other codecs/containers are
+  out of scope for now.
+- **Keep it short and modest resolution.** Decode cost scales with both;
+  a small looping clip (a few seconds, well under full HD) looks the same
+  behind the menu as a longer or larger one and starts up faster.
+- **No audio.** The menu has its own background-music system
+  (**Theming > Music**); video wallpapers never play a soundtrack.
+- **Blur is not supported** for a video wallpaper - re-blurring every decoded
+  frame live is not worth the performance cost for a cosmetic effect. The
+  Blur toggle greys out in the theme editor while a video wallpaper is active
+  (the Dim and Snow overlays still work, since those do not need to inspect
+  the frame contents).
 
 ### Widgets
 
@@ -102,6 +123,18 @@ menu inherits the old `slaunch/config/` files, including its first-run setup, so
 that account sees exactly what it saw before. The originals are copied rather
 than moved, so downgrading still finds them. Any other account starts on the
 defaults and goes through first-run setup once, as a new account should.
+
+### USB file transfer
+
+While the menu is on screen, plugging the console into a computer shows the SD
+card as an MTP device ("Nintendo Switch"), so files can be copied on and off
+without taking the card out. Windows and most Linux file managers support MTP
+out of the box; macOS needs an MTP client such as OpenMTP. Auto-sleep is held
+off while a computer is connected.
+
+The server stops whenever the menu hands off to a game, homebrew or a system
+applet, so homebrew that uses USB itself (DBI, Goldleaf, ...) gets it free. A
+copy still running at that moment is cut off.
 
 ### Content filter
 
@@ -210,8 +243,16 @@ applet did, so prefer one the menu has no entry for.
   **[uLaunch](https://github.com/Xortroll/uLaunch)** by Xortroll & contributors
   (GPLv2). The bundled homebrew loader is a fork of
   **[nx-hbloader](https://github.com/switchbrew/nx-hbloader)** (ISC).
+- USB file transfer is **haze** from
+  **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)** (GPLv2) - see
+  `THIRDPARTY.md`.
 - The `Minimal` icon pack is by
   **[MeepCat55](https://github.com/meepcat55)**.
 - Button prompt icons are from **Xelu's Free Controller and Key Prompts**
   (CC0) - see `assets/icons/buttons/ATTRIBUTION.md`.
 - Bundled fonts are SIL OFL / Apache licensed - see `assets/fonts/ATTRIBUTION.md`.
+- Video wallpaper decoding uses the NVDEC hardware-acceleration backend from
+  **[averne/FFmpeg](https://github.com/averne/FFmpeg)** (`nvtegra` branch,
+  GPLv2+), the same decoder used by
+  **[SwitchWave](https://github.com/averne/SwitchWave)** - see
+  `THIRDPARTY.md`.

@@ -40,6 +40,11 @@ namespace sl::menu::ui {
             C(30, 70, 34), C(10, 30, 14), C(240, 245, 235), C(180, 240, 120),
             C(150, 180, 150), C(235, 250, 220), "sdmc:/slaunch/forest.jpg" };
 
+        // The built-ins get their background palette from their own accent and
+        // title, so a fresh install looks the same as it did before the
+        // backgrounds had colours of their own.
+        for (auto &b : m_builtin) { b.fx_a = b.accent; b.fx_b = b.title; }
+
         // No custom themes exist until the user creates one.
         m_custom.clear();
     }
@@ -59,7 +64,12 @@ namespace sl::menu::ui {
     }
 
     int ThemeManager::AddCustom() {
-        Theme t = At(m_current); // start from the current look
+        // The applied theme, not m_current: browsing the Themes list previews
+        // each entry live (Select() on every cursor move), so m_current is
+        // often just whatever the cursor is passing over, not what's actually
+        // in effect. Basing a new theme on that meant "New Theme" could copy
+        // a theme you only glanced at on the way to the bottom of the list.
+        Theme t = At(m_applied);
         snprintf(t.name, sizeof(t.name), "Custom %d", (int)m_custom.size() + 1);
         m_custom.push_back(t);
         return BuiltinThemeCount + (int)m_custom.size() - 1;
@@ -68,8 +78,17 @@ namespace sl::menu::ui {
     void ThemeManager::DeleteCustom(int i) {
         if (!IsCustom(i)) return;
         m_custom.erase(m_custom.begin() + (i - BuiltinThemeCount));
-        if (m_current >= Count()) m_current = Count() - 1;
-        if (m_current < 0) m_current = 0;
+        // Erasing shifts every later custom theme's index down by one, so
+        // just clamping left m_current silently pointing at whichever theme
+        // slid into its old slot instead of the one it was on.
+        auto reindex = [&](int &idx) {
+            if (idx == i)      idx -= 1; // it was the one just deleted
+            else if (idx > i)  idx -= 1; // it shifted down
+            if (idx >= Count()) idx = Count() - 1;
+            if (idx < 0)        idx = 0;
+        };
+        reindex(m_current);
+        reindex(m_applied);
     }
 
     // ---- persistence --------------------------------------------------------
@@ -92,6 +111,7 @@ namespace sl::menu::ui {
         if (!fp) return;
 
         int want_current = m_current;
+        bool seen_fx_a = false, seen_fx_b = false;
         char line[160];
         while (fgets(line, sizeof(line), fp)) {
             line[strcspn(line, "\r\n")] = '\0';
@@ -124,18 +144,58 @@ namespace sl::menu::ui {
                 else if (!strcmp(field, "dim"))    ParseColor(val, c.dim);
                 else if (!strcmp(field, "title"))  ParseColor(val, c.title);
                 else if (!strcmp(field, "icon_bg")) ParseColor(val, c.icon_bg);
+                else if (!strcmp(field, "icon_fg")) ParseColor(val, c.icon_fg);
+                else if (!strcmp(field, "fx_a")) { ParseColor(val, c.fx_a); seen_fx_a = true; }
+                else if (!strcmp(field, "fx_b")) { ParseColor(val, c.fx_b); seen_fx_b = true; }
+                // One line per background: fx<style>=lines,thickness,amplitude,
+                // seed,layers,y,x,cam
+                else if (!strncmp(field, "fx", 2) && isdigit((unsigned char)field[2])) {
+                    const int st = atoi(field + 2);
+                    if (st >= 0 && st < (int)BackgroundStyle_Count) {
+                        Theme::FxParams &f = c.fx[st];
+                        sscanf(val, "%d,%d,%d,%d,%d,%d,%d,%d",
+                               &f.lines, &f.thickness, &f.amplitude, &f.seed,
+                               &f.layers, &f.y, &f.x, &f.cam);
+                    }
+                }
+                // Pre-per-background files: one shared set, which was the
+                // ribbon's. Land it on both ribbons and leave the rest at the
+                // defaults that suit them.
+                else if (!strcmp(field, "fx_x")) {
+                    const int v = atoi(val);
+                    c.fx[BackgroundStyle_Ribbon].x   = (v < 0) ? 0 : (v > 100 ? 100 : v);
+                    c.fx[BackgroundStyle_Grid].x     = c.fx[BackgroundStyle_Ribbon].x;
+                }
                 else if (!strcmp(field, "icon_bg_alpha")) {
                     int a = atoi(val);
                     c.icon_bg_alpha = (a < 0) ? 0 : (a > 255 ? 255 : a);
                 }
                 else if (!strcmp(field, "wallpaper")) { strncpy(c.wallpaper, val, sizeof(c.wallpaper) - 1); c.wallpaper[sizeof(c.wallpaper) - 1] = '\0'; }
                 else if (!strcmp(field, "background_style")) c.background_style = atoi(val);
-                else if (!strcmp(field, "ribbon_lines"))     c.ribbon_line_count  = atoi(val);
-                else if (!strcmp(field, "ribbon_thickness")) c.ribbon_thickness   = atoi(val);
-                else if (!strcmp(field, "ribbon_amplitude")) c.ribbon_amplitude   = atoi(val);
-                else if (!strcmp(field, "ribbon_seed"))      c.ribbon_seed        = atoi(val);
-                else if (!strcmp(field, "ribbon_layers"))    c.ribbon_layers      = atoi(val);
-                else if (!strcmp(field, "ribbon_y_center"))  c.ribbon_y_center    = atoi(val);
+                else if (!strcmp(field, "ribbon_lines")) {
+                    c.fx[BackgroundStyle_Ribbon].lines = atoi(val);
+                    c.fx[BackgroundStyle_RibbonHD].lines = c.fx[BackgroundStyle_Ribbon].lines;
+                }
+                else if (!strcmp(field, "ribbon_thickness")) {
+                    c.fx[BackgroundStyle_Ribbon].thickness = atoi(val);
+                    c.fx[BackgroundStyle_RibbonHD].thickness = c.fx[BackgroundStyle_Ribbon].thickness;
+                }
+                else if (!strcmp(field, "ribbon_amplitude")) {
+                    c.fx[BackgroundStyle_Ribbon].amplitude = atoi(val);
+                    c.fx[BackgroundStyle_RibbonHD].amplitude = c.fx[BackgroundStyle_Ribbon].amplitude;
+                }
+                else if (!strcmp(field, "ribbon_seed")) {
+                    c.fx[BackgroundStyle_Ribbon].seed = atoi(val);
+                    c.fx[BackgroundStyle_RibbonHD].seed = c.fx[BackgroundStyle_Ribbon].seed;
+                }
+                else if (!strcmp(field, "ribbon_layers")) {
+                    c.fx[BackgroundStyle_Ribbon].layers = atoi(val);
+                    c.fx[BackgroundStyle_RibbonHD].layers = c.fx[BackgroundStyle_Ribbon].layers;
+                }
+                else if (!strcmp(field, "ribbon_y_center")) {
+                    c.fx[BackgroundStyle_Ribbon].y = atoi(val);
+                    c.fx[BackgroundStyle_RibbonHD].y = c.fx[BackgroundStyle_Ribbon].y;
+                }
                 else if (!strcmp(field, "wallpaper_effect")) {
                     // Backward compat: old single enum -> new toggles.
                     int eff = atoi(val);
@@ -148,14 +208,22 @@ namespace sl::menu::ui {
                 else if (!strcmp(field, "wallpaper_blur"))          c.wallpaper_blur          = std::max(0, std::min(1, atoi(val)));
                 else if (!strcmp(field, "wallpaper_blur_radius"))   c.wallpaper_blur_radius   = std::max(2, std::min(32, atoi(val)));
                 else if (!strcmp(field, "wallpaper_snow"))          c.wallpaper_snow          = std::max(0, std::min(1, atoi(val)));
-                else if (!strcmp(field, "wallpaper_fps"))           c.wallpaper_fps           = atoi(val);
             }
         }
         fclose(fp);
+        // Older theme.cfg files have no fx colours. Seeding them from the
+        // theme's own accent and title is what keeps those themes looking
+        // exactly as they did before the backgrounds gained their own palette.
+        for (auto &c : m_custom) {
+            if (!seen_fx_a) c.fx_a = c.accent;
+            if (!seen_fx_b) c.fx_b = c.title;
+        }
         Select(want_current);
+        m_applied = m_current;
     }
 
     void ThemeManager::Save() const {
+        m_applied = m_current;   // this call is what makes m_current official
         if (!g_sd_ok) return;
         cfg::EnsureDir();
 
@@ -174,20 +242,23 @@ namespace sl::menu::ui {
             snprintf(k, sizeof(k), "c%d_dim", i);    WriteColor(fp, k, c.dim);
             snprintf(k, sizeof(k), "c%d_title", i);  WriteColor(fp, k, c.title);
             snprintf(k, sizeof(k), "c%d_icon_bg", i); WriteColor(fp, k, c.icon_bg);
+            snprintf(k, sizeof(k), "c%d_icon_fg", i); WriteColor(fp, k, c.icon_fg);
+            snprintf(k, sizeof(k), "c%d_fx_a", i);    WriteColor(fp, k, c.fx_a);
+            snprintf(k, sizeof(k), "c%d_fx_b", i);    WriteColor(fp, k, c.fx_b);
             fprintf(fp, "c%d_icon_bg_alpha=%d\n", i, c.icon_bg_alpha);
+
             fprintf(fp, "c%d_wallpaper=%s\n", i, c.wallpaper);
             fprintf(fp, "c%d_background_style=%d\n", i, c.background_style);
-            fprintf(fp, "c%d_ribbon_lines=%d\n",     i, c.ribbon_line_count);
-            fprintf(fp, "c%d_ribbon_thickness=%d\n", i, c.ribbon_thickness);
-            fprintf(fp, "c%d_ribbon_amplitude=%d\n", i, c.ribbon_amplitude);
-            fprintf(fp, "c%d_ribbon_seed=%d\n",      i, c.ribbon_seed);
-            fprintf(fp, "c%d_ribbon_layers=%d\n",    i, c.ribbon_layers);
-            fprintf(fp, "c%d_ribbon_y_center=%d\n",  i, c.ribbon_y_center);
+            for (int st = 0; st < (int)BackgroundStyle_Count; st++) {
+                const Theme::FxParams &f = c.fx[st];
+                fprintf(fp, "c%d_fx%d=%d,%d,%d,%d,%d,%d,%d,%d\n", i, st,
+                        f.lines, f.thickness, f.amplitude, f.seed,
+                        f.layers, f.y, f.x, f.cam);
+            }
             fprintf(fp, "c%d_wallpaper_dim=%d\n",           i, c.wallpaper_dim);
             fprintf(fp, "c%d_wallpaper_blur=%d\n",          i, c.wallpaper_blur);
             fprintf(fp, "c%d_wallpaper_blur_radius=%d\n",   i, c.wallpaper_blur_radius);
             fprintf(fp, "c%d_wallpaper_snow=%d\n",          i, c.wallpaper_snow);
-            fprintf(fp, "c%d_wallpaper_fps=%d\n",           i, c.wallpaper_fps);
         }
         fclose(fp);
     }

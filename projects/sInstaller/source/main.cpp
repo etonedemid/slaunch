@@ -88,6 +88,150 @@ static bool CopyFile(const std::string &src, const std::string &dst) {
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+// Boot splash
+//
+// package3 (magic "PK31", exactly 8 MiB) holds a second header at the offset
+// stored in its own byte 4: "FSS0" magic, then a table of (offset, size,
+// type, name) content entries - this is what hekate's own pkg3 loader reads
+// (bootloader/hos/pkg3.c upstream). It defines a CNT_TYPE_BMP content type
+// for exactly this purpose but never processes it - that code path only ever
+// existed in fusee-primary, which Atmosphere removed in 1.10.0. So a splash
+// needs two things, neither of which existed here before: a patched hekate
+// that actually draws CNT_TYPE_BMP (scripts/hekate-pkg3-splash.patch, applied
+// to a matching hekate source checkout and reflashed as payload.bin /
+// bootloader/update.bin - this installer can't do that part, it only owns
+// package3) and a TOC entry pointing at the pixel data, which is what this
+// writes.
+//
+// Bytes 0x400000..0x7C0000 are free in every content layout observed so far
+// (nothing else claims that range; the entry named "fusee" always starts
+// exactly at 0x7C0000), so the pixel data goes there, same spot the old
+// fusee-primary format used. Free doesn't mean guaranteed, though, so this
+// still checks for a collision before writing anything.
+//
+// The stock package3 is copied out first. Without that there is no way back:
+// the original only exists inside the package3 being overwritten, and a later
+// Atmosphere update is the only thing that would restore it.
+static constexpr const char *kPackage3     = "sdmc:/atmosphere/package3";
+static constexpr const char *kPackage3Back = "sdmc:/slaunch/backup/package3.stock";
+static constexpr size_t kPackage3Size    = 0x800000;
+static constexpr u32    kPkg3Fss0Magic   = 0x30535346; // "FSS0"
+static constexpr u32    kCntTypeBmp      = 7;
+static constexpr size_t kSplashOffset    = 0x400000;
+static constexpr size_t kSplashSize      = 720 * 1280 * 4;
+static constexpr size_t kMetaOffsetAddr  = 0x4;  // where the FSS0 header's own offset is stored
+
+#pragma pack(push, 1)
+struct Pkg3Meta {
+    u32 magic, size, crt0_off, cnt_off, cnt_count, hos_ver, version, git_rev;
+};
+struct Pkg3Content {
+    u32 offset, size;
+    u8  type, flags0, flags1, flags2;
+    u32 rsvd1;
+    char name[0x10];
+};
+#pragma pack(pop)
+static_assert(sizeof(Pkg3Meta) == 0x20);
+static_assert(sizeof(Pkg3Content) == 0x20);
+
+static bool BackupPackage3() {
+    struct stat st;
+    if (stat(kPackage3Back, &st) == 0 && (size_t)st.st_size == kPackage3Size)
+        return true;            // already have a good one - never overwrite it
+    Mkdirs("sdmc:/slaunch/backup");
+    return CopyFile(kPackage3, kPackage3Back);
+}
+
+// Returns false and changes nothing unless package3 is exactly what we expect
+// and there's genuinely room to add (or update) a splash entry.
+static bool InstallSplash() {
+    struct stat st;
+    if (stat(kPackage3, &st) != 0 || (size_t)st.st_size != kPackage3Size) return false;
+
+    std::vector<char> pkg3(kPackage3Size);
+    FILE *f = fopen(kPackage3, "rb");
+    if (!f || fread(pkg3.data(), 1, kPackage3Size, f) != kPackage3Size) {
+        if (f) fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    if (memcmp(pkg3.data(), "PK31", 4) != 0) return false;
+
+    const u32 metaOff = *(u32 *)(pkg3.data() + kMetaOffsetAddr);
+    if ((size_t)metaOff + sizeof(Pkg3Meta) > kPackage3Size) return false;
+    auto *meta = (Pkg3Meta *)(pkg3.data() + metaOff);
+    if (meta->magic != kPkg3Fss0Magic) return false;
+
+    const size_t cntBase = (size_t)metaOff + meta->cnt_off;
+    if (cntBase + (size_t)meta->cnt_count * sizeof(Pkg3Content) > kPackage3Size) return false;
+    auto *entries = (Pkg3Content *)(pkg3.data() + cntBase);
+
+    FILE *blob = fopen("romfs:/splash.bin", "rb");
+    if (!blob) return false;
+    std::vector<char> pixels(kSplashSize);
+    const size_t got = fread(pixels.data(), 1, kSplashSize, blob);
+    fclose(blob);
+    if (got != kSplashSize) return false;
+
+    // Re-running Install/Re-install should update the existing entry in
+    // place rather than pile up duplicates.
+    Pkg3Content *bmp = nullptr;
+    u32 minContentOff = (u32)kPackage3Size;
+    for (u32 i = 0; i < meta->cnt_count; i++) {
+        if (entries[i].type == kCntTypeBmp) bmp = &entries[i];
+        else if (entries[i].offset < minContentOff) minContentOff = entries[i].offset;
+    }
+
+    u32 targetOff;
+    if (bmp && bmp->size == kSplashSize) {
+        targetOff = bmp->offset;
+    } else {
+        targetOff = (u32)kSplashOffset;
+        // Free window must not collide with any *other* declared content.
+        for (u32 i = 0; i < meta->cnt_count; i++) {
+            if (&entries[i] == bmp) continue;
+            const u32 a0 = entries[i].offset, a1 = a0 + entries[i].size;
+            const u32 b0 = targetOff, b1 = targetOff + (u32)kSplashSize;
+            if (a0 < b1 && b0 < a1) return false;
+        }
+        if (targetOff + kSplashSize > meta->size) return false;
+
+        if (!bmp) {
+            // Need room for one more entry right after the table, before the
+            // first real content - true today, but verify rather than assume.
+            if (cntBase + ((size_t)meta->cnt_count + 1) * sizeof(Pkg3Content) > minContentOff)
+                return false;
+            bmp = &entries[meta->cnt_count];
+            memset(bmp, 0, sizeof(*bmp));
+            strncpy(bmp->name, "splash", sizeof(bmp->name) - 1);
+            bmp->type = (u8)kCntTypeBmp;
+            meta->cnt_count += 1;
+        }
+        bmp->offset = targetOff;
+        bmp->size   = (u32)kSplashSize;
+    }
+
+    memcpy(pkg3.data() + targetOff, pixels.data(), kSplashSize);
+
+    if (!BackupPackage3()) return false;
+
+    f = fopen(kPackage3, "wb");
+    if (!f) return false;
+    const bool ok = fwrite(pkg3.data(), 1, kPackage3Size, f) == kPackage3Size;
+    fclose(f);
+    return ok;
+}
+
+// Put the stock splash back, if we still have it.
+static bool RestoreSplash() {
+    struct stat st;
+    if (stat(kPackage3Back, &st) != 0 || (size_t)st.st_size != kPackage3Size) return false;
+    return CopyFile(kPackage3Back, kPackage3);
+}
+
 static bool CopyTree(const std::string &src, const std::string &dst,
                      const std::function<void()> &tick) {
     Mkdirs(dst);
@@ -144,9 +288,36 @@ static bool DeleteTree(const std::string &path) {
     return ok;
 }
 
+static constexpr const char *kQlaunchLive     = "sdmc:/atmosphere/contents/0100000000001000";
+static constexpr const char *kQlaunchDisabled = "sdmc:/slaunch/backup/0100000000001000.disabled";
+
 static bool IsInstalled() {
     struct stat st;
-    return stat("sdmc:/atmosphere/contents/0100000000001000", &st) == 0;
+    return stat(kQlaunchLive, &st) == 0;
+}
+
+// Moved aside rather than deleted: everything else (fonts, themes, config,
+// cache, the boot splash) stays exactly as it was, so enabling again is
+// instant and doesn't need the SD payload at all.
+static bool IsDisabled() {
+    struct stat st;
+    return stat(kQlaunchDisabled, &st) == 0;
+}
+
+// ---- disable / re-enable (stock HOME menu without losing anything) --------
+static bool DisableSlaunch() {
+    struct stat st;
+    if (stat(kQlaunchLive, &st) != 0) return false;      // nothing live to disable
+    Mkdirs("sdmc:/slaunch/backup");
+    if (stat(kQlaunchDisabled, &st) == 0) DeleteTree(kQlaunchDisabled); // stale leftover
+    return rename(kQlaunchLive, kQlaunchDisabled) == 0;
+}
+
+static bool EnableSlaunch() {
+    struct stat st;
+    if (stat(kQlaunchDisabled, &st) != 0) return false;  // nothing to re-enable
+    if (stat(kQlaunchLive, &st) == 0) return false;       // already live - don't clobber it
+    return rename(kQlaunchDisabled, kQlaunchLive) == 0;
 }
 
 // ---- full uninstall --------------------------------------------------------
@@ -156,8 +327,16 @@ static bool IsInstalled() {
 static bool RemoveEverything() {
     bool ok = true;
     struct stat st;
-    if (stat("sdmc:/atmosphere/contents/0100000000001000", &st) == 0)
-        if (!DeleteTree("sdmc:/atmosphere/contents/0100000000001000")) ok = false;
+    // Stock boot logo first: the backup lives under slaunch/, which is about to
+    // be deleted, so putting it back afterwards would be putting it back from
+    // nothing. Failure here is not fatal - an uninstall that leaves our splash
+    // is better than one that refuses to run.
+    RestoreSplash();
+    // Whichever state it's in - live or disabled-aside - only one of these
+    // exists, and deleting the whole slaunch/ tree below would sweep up a
+    // disabled copy anyway, but a live one sits outside it.
+    if (stat(kQlaunchLive, &st) == 0)
+        if (!DeleteTree(kQlaunchLive)) ok = false;
     if (stat("sdmc:/slaunch", &st) == 0)
         if (!DeleteTree("sdmc:/slaunch")) ok = false;
     return ok;
@@ -215,7 +394,13 @@ static std::string FindZipUrl(const std::string &j) {
 }
 
 // ---- shared progress screen ------------------------------------------------
-static void DrawProgress(const char *title, double frac, const char *sub) {
+// The single painter for every "working on it" screen. The blocking operations
+// below drive it from their own progress callbacks while the main loop is
+// stalled inside them, so anything the main loop draws on that screen has to
+// be drawn from here too - otherwise the callback repaints a stripped-down
+// version over it. Draws only; the caller presents.
+static void DrawProgress(const char *title, double frac, const char *sub,
+                         const std::function<void()> &anim = {}) {
     FillRect(0, 0, W, H, kBlack);
     Text(g_fM, 120, H / 2 - 30, kFg, title);
     int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
@@ -224,7 +409,7 @@ static void DrawProgress(const char *title, double frac, const char *sub) {
     if (frac > 1) frac = 1;
     FillRect(bx, by, (int)(bw * frac), bh, kAccent);
     if (sub && sub[0]) Text(g_fS, 120, H / 2 + 30, kDim, sub);
-    SDL_RenderPresent(g_ren);
+    if (anim) anim();
 }
 
 // ---- HTTP (GitHub API + release download) ----------------------------------
@@ -257,6 +442,7 @@ static int DlProgressCb(void *, curl_off_t dltotal, curl_off_t dlnow, curl_off_t
     char sub[64];
     snprintf(sub, sizeof(sub), "%.1f / %.1f MB", dlnow / 1048576.0, dltotal / 1048576.0);
     DrawProgress("Downloading update...", frac, sub);
+    SDL_RenderPresent(g_ren);
     return 0;
 }
 static bool HttpDownload(const char *url, const char *path) {
@@ -318,6 +504,7 @@ static bool ExtractZip(const char *zipPath) {
         }
         done++;
         DrawProgress("Installing update...", total > 0 ? (double)done / total : 0.0, nullptr);
+        SDL_RenderPresent(g_ren);
         if (!ok) break;
         if (unzGoToNextFile(uf) != UNZ_OK) break;
     }
@@ -326,10 +513,11 @@ static bool ExtractZip(const char *zipPath) {
 }
 
 // ---- main-menu tiles -------------------------------------------------------
-// Shelf-style row (the menu's Shelf mode, minus the scrolling): three uniform
-// tiles centred as a group, the selected one lifted by a highlight card and an
-// accent frame. There are only ever three actions, so the layout is fixed.
-enum class Act { Install, Update, Remove, Exit };
+// Shelf-style row (the menu's Shelf mode, minus the scrolling): uniform tiles
+// centred as a group, the selected one lifted by a highlight card and an
+// accent frame. The row is centred either way, so it just gets wider or
+// narrower as tiles join or drop out.
+enum class Act { Install, Update, Toggle, Remove };
 
 struct Tile {
     const char  *label;
@@ -387,27 +575,89 @@ static void DrawTileRow(const Tile *tiles, int count, int cursor) {
 }
 
 // ---- dialog ----------------------------------------------------------------
+// Left-aligned at the same x=120 margin as the progress screens, rather than
+// centred, so a dialog doesn't read as a visually different kind of screen.
 static void DrawConfirmDialog(const char *title, const char *subtitle,
                               int cursor, bool isDanger = false) {
-    // Solid black background (no tint, no transparency)
     FillRect(0, 0, W, H, kBlack);
-    
+
     int cy = H / 2 - 60;
 
-    // Explicit warning header
-    if (isDanger) {
-        Text(g_fL, W / 2, cy - 80, kRed, "WARNING", true);
-    }
+    if (isDanger) Text(g_fL, 120, cy - 80, kRed, "WARNING");
 
-    Text(g_fL, W / 2, cy, kFg, title, true);
+    Text(g_fL, 120, cy, kFg, title);
     if (subtitle && subtitle[0])
-        Text(g_fM, W / 2, cy + 60, kDim, subtitle, true);
+        Text(g_fM, 120, cy + 60, kDim, subtitle);
 
     const char *opts[2] = {"Yes", "No"};
     for (int i = 0; i < 2; i++) {
         bool sel = (i == cursor);
         int y = cy + 150 + i * 65;
-        Text(g_fM, W / 2, y, sel ? (isDanger ? kRed : kAccent) : kDim, opts[i], true);
+        Text(g_fM, 120, y, sel ? (isDanger ? kRed : kAccent) : kDim, opts[i]);
+    }
+}
+
+// ---- Installing / Checking-for-updates animations --------------------------
+// Both loop continuously for as long as the screen is up, since the real
+// operation behind them (a file copy, an HTTP request) can finish at any
+// point in the cycle - there's no "done" frame to land on, just a loop that
+// keeps communicating "this is still working."
+static void DrawIcon(SDL_Texture *t, int cx, int cy, int w, int h) {
+    if (!t) return;
+    SDL_Rect r{ cx - w / 2, cy - h / 2, w, h };
+    SDL_RenderCopy(g_ren, t, nullptr, &r);
+}
+
+// The sLaunch mark slides down from above and settles onto an SD card, holds,
+// then resets - "putting sLaunch on the card," looped.
+static void DrawInstallAnim(u64 elapsed_ms, SDL_Texture *mark, SDL_Texture *card) {
+    const int cx = 980, cardCy = 460;
+    DrawIcon(card, cx, cardCy, 130, 169);   // 231x300 source aspect
+
+    constexpr u64 kFall = 650, kHold = 550, kPause = 300;
+    constexpr u64 kPeriod = kFall + kHold + kPause;
+    const u64 t = elapsed_ms % kPeriod;
+    if (t >= kFall + kHold) return;   // paused between loops - card sits empty a beat
+
+    const int restY = cardCy - 30;
+    int y = restY;
+    if (t < kFall) {
+        float f = (float)t / (float)kFall;
+        f = 1.0f - (1.0f - f) * (1.0f - f);            // ease-out
+        y = restY - (int)((1.0f - f) * 220.0f);
+    }
+    DrawIcon(mark, cx, y, 84, 84);
+}
+
+// The Switch rises toward the GitHub mark (standing in for "a satellite"),
+// pulses a few beats while in contact, then the loop resets.
+static void DrawSatelliteAnim(u64 elapsed_ms, SDL_Texture *nx, SDL_Texture *sat) {
+    const int cx = 980, satCy = 160, meetCy = 280, startCy = 500;
+    DrawIcon(sat, cx, satCy, 100, 100);
+
+    constexpr u64 kRise = 700, kTalk = 900, kPause = 300;
+    constexpr u64 kPeriod = kRise + kTalk + kPause;
+    const u64 t = elapsed_ms % kPeriod;
+    if (t >= kRise + kTalk) return;
+
+    if (t < kRise) {
+        float f = (float)t / (float)kRise;
+        f = 1.0f - (1.0f - f) * (1.0f - f);
+        int y = startCy - (int)(f * (startCy - meetCy));
+        DrawIcon(nx, cx, y, 76, 76);
+    } else {
+        DrawIcon(nx, cx, meetCy, 76, 76);
+        // Three dots ticking up the gap between them, staggered, like a
+        // handshake in progress.
+        const u64 tt = t - kRise;
+        for (int i = 0; i < 3; i++) {
+            const u64 phase = (tt + i * 220) % 660;
+            if (phase >= 500) continue;
+            const float f = (float)phase / 500.0f;
+            const int y = meetCy - 40 - (int)(f * (meetCy - satCy - 60));
+            const Uint8 a = (Uint8)(255 * (1.0f - f));
+            FillRect(cx - 3, y, 6, 6, kAccent, a);
+        }
     }
 }
 
@@ -421,6 +671,12 @@ int main() {
     PadState pad;
     padInitializeDefault(&pad);
 
+    // Set before any texture is created - SDL2 captures the scale mode at
+    // creation time, so a hint set later would leave existing textures on
+    // the old (nearest, blocky) mode. The tile icons are 512px vector art
+    // scaled down to fit; without this they'd alias instead of downsampling
+    // cleanly.
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
     SDL_Init(SDL_INIT_VIDEO);
     SDL_Window *win = SDL_CreateWindow("sInstaller", 0, 0, W, H, 0);
     g_ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -435,19 +691,23 @@ int main() {
         g_fS = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 1, 22);
     }
 
-    SDL_Texture *icon = IMG_LoadTexture(g_ren, "romfs:/icon.png");
-
-    // Action icons for the tile row. They are white line art on an opaque black
-    // square, so additive blending is what makes the black disappear.
+    // Action icons for the tile row (and the title mark below). They are white
+    // line art on an opaque black square, so additive blending is what makes
+    // the black disappear.
     auto loadTileIcon = [&](const char *path) {
         SDL_Texture *t = IMG_LoadTexture(g_ren, path);
         if (t) SDL_SetTextureBlendMode(t, SDL_BLENDMODE_ADD);
         return t;
     };
-    SDL_Texture *icInstall = loadTileIcon("romfs:/ui/install.png");
-    SDL_Texture *icUpdate  = loadTileIcon("romfs:/ui/update.png");
-    SDL_Texture *icDisable = loadTileIcon("romfs:/ui/disable.png");
-    SDL_Texture *icQuit    = loadTileIcon("romfs:/ui/quit.png");
+    SDL_Texture *icon = loadTileIcon("romfs:/icon.png");
+    SDL_Texture *icInstall   = loadTileIcon("romfs:/ui/install.png");
+    SDL_Texture *icUpdate    = loadTileIcon("romfs:/ui/update.png");
+    SDL_Texture *icDisable   = loadTileIcon("romfs:/ui/disable.png");
+    SDL_Texture *icUninstall = loadTileIcon("romfs:/ui/uninstall.png");
+    // Sprites for the Installing / Checking-for-updates animations.
+    SDL_Texture *icSdcard = loadTileIcon("romfs:/ui/sdcard.png");
+    SDL_Texture *icSwitch = loadTileIcon("romfs:/ui/switch.png");
+    SDL_Texture *icGithub = loadTileIcon("romfs:/ui/github.png");
 
     // --- installer state ---
     enum class Screen { MainMenu, ConfirmInstall, ConfirmRemove,
@@ -456,12 +716,14 @@ int main() {
     Screen screen = Screen::MainMenu;
 
     bool installed = IsInstalled();
+    bool disabled  = IsDisabled();   // present on the SD, just not the active HOME menu
     bool rebootAfter = false;   // Done came from an install/update (offer reboot)
 
-    // Fixed row of actions. Remove only joins it once there is something to
-    // remove - the row is centred either way, so it simply gets narrower.
+    // Fixed row of actions. Toggle/Remove only join once there is something to
+    // toggle or remove - the row is centred either way, so it simply gets
+    // narrower or wider. Exit isn't a tile - it's Plus, hinted at the bottom.
     Tile tiles[4] = {};
-    int  tileCount  = 3;
+    int  tileCount  = 2;
     int  instCursor = 0;
     auto buildMenu = [&]() {
         tiles[0] = { installed ? "Re-install" : "Install",
@@ -470,10 +732,14 @@ int main() {
                      Act::Install, icInstall };
         tiles[1] = { "Update", "Check GitHub for a newer release", Act::Update, icUpdate };
         int n = 2;
-        if (installed)
+        if (installed || disabled)
+            tiles[n++] = { disabled ? "Enable" : "Disable",
+                           disabled ? "Switch back to sLaunch as the HOME menu"
+                                    : "Switch back to the stock HOME menu (keeps everything)",
+                           Act::Toggle, icDisable };
+        if (installed || disabled)
             tiles[n++] = { "Remove", "Delete every sLaunch file from the SD card",
-                           Act::Remove, icDisable };
-        tiles[n++] = { "Exit", "Close the installer", Act::Exit, icQuit };
+                           Act::Remove, icUninstall };
         tileCount = n;
         if (instCursor >= tileCount) instCursor = tileCount - 1;
     };
@@ -489,9 +755,18 @@ int main() {
     const u64 freq        = armGetSystemTickFreq();
     const u64 RepeatDelay = (360 * freq) / 1000;
     auto ms = [&](u64 m) { return (m * freq) / 1000; };
-    
+
     int held_v = 0, held_h = 0;
     u64 next_v = 0, start_v = 0, next_h = 0, start_h = 0;
+
+    // Restarted on every screen change so the Installing/Checking loop
+    // animations always begin from frame zero, not wherever main() happened
+    // to be running long.
+    Screen lastScreen = screen;
+    u64 animStartTick = armGetSystemTick();
+    auto installAnim = [&] {
+        DrawInstallAnim(((armGetSystemTick() - animStartTick) * 1000) / freq, icon, icSdcard);
+    };
 
     while (appletMainLoop()) {
         padUpdate(&pad);
@@ -548,11 +823,22 @@ int main() {
                 switch (tiles[instCursor].act) {
                     case Act::Install: dialogCursor = 1; screen = Screen::ConfirmInstall; break;
                     case Act::Update:  screen = Screen::Checking; break;
+                    case Act::Toggle:
+                        // A single rename(), so no progress screen, and reversible
+                        // either way, so no confirmation - but the running session
+                        // doesn't care until next boot either way, same as
+                        // Install/Remove, so it still ends on the same reboot offer.
+                        ok = disabled ? EnableSlaunch() : DisableSlaunch();
+                        installed = IsInstalled();
+                        disabled  = IsDisabled();
+                        buildMenu();
+                        rebootAfter = ok;
+                        screen = ok ? Screen::Done : Screen::Failed;
+                        break;
                     case Act::Remove:  dialogCursor = 1; screen = Screen::ConfirmRemove; break;
-                    case Act::Exit:    goto cleanup;
                 }
             }
-            if (down & HidNpadButton_B) goto cleanup;
+            if (down & (HidNpadButton_B | HidNpadButton_Plus)) goto cleanup;
 
         } else if (screen == Screen::ConfirmInstall || screen == Screen::ConfirmRemove) {
             if (move_up || move_down) dialogCursor ^= 1;
@@ -595,18 +881,15 @@ int main() {
             if (down & (HidNpadButton_A | HidNpadButton_B)) { buildMenu(); screen = Screen::MainMenu; }
         }
 
+        if (screen != lastScreen) { animStartTick = armGetSystemTick(); lastScreen = screen; }
+        const u64 animMs = ((armGetSystemTick() - animStartTick) * 1000) / freq;
+
         // ---- draw ----
         FillRect(0, 0, W, H, kBlack);
 
         if (screen == Screen::MainMenu) {
-            Text(g_fL, W / 2, 100, kFg, "sLaunch", true);
-            char sub[64];
-            if (installed) snprintf(sub, sizeof(sub), "Installed  -  v%s", SL_VERSION);
-            else           snprintf(sub, sizeof(sub), "Home menu replacement");
-            Text(g_fS, W / 2, 160, installed ? kGreen : kDim, sub, true);
-            FillRect(W / 2 - 200, 200, 400, 1, kBg2);
-
             DrawTileRow(tiles, tileCount, instCursor);
+            Text(g_fS, W / 2, H - 40, kDim, "+  Exit", true);
 
         } else if (screen == Screen::ConfirmInstall) {
             // The dialog paints the whole screen, so nothing is drawn behind it.
@@ -614,22 +897,19 @@ int main() {
                 "This will copy files to your SD card.", dialogCursor, false);
 
         } else if (screen == Screen::ConfirmRemove) {
-            DrawConfirmDialog(installed ? "Remove sLaunch?" : "Do nothing?",
-                installed ? "This will delete all sLaunch files." : "This will do nothing.",
+            DrawConfirmDialog((installed || disabled) ? "Remove sLaunch?" : "Do nothing?",
+                (installed || disabled) ? "This will delete all sLaunch files." : "This will do nothing.",
                 dialogCursor, true);
 
         } else if (screen == Screen::Installing) {
-            Text(g_fM, 120, H / 2 - 30, kFg, "Installing sLaunch...");
-            int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
-            FillRect(bx, by, bw, bh, kBg2);
-            float p = g_total > 0 ? (float)g_done / (float)g_total : 0.0f;
-            FillRect(bx, by, (int)(bw * p), bh, kAccent);
             char cnt[64];
             snprintf(cnt, sizeof(cnt), "%d / %d files", g_done, g_total);
-            Text(g_fS, 120, H / 2 + 30, kDim, cnt);
+            DrawProgress("Installing sLaunch...",
+                         g_total > 0 ? (double)g_done / (double)g_total : 0.0,
+                         cnt, installAnim);
 
         } else if (screen == Screen::Removing) {
-            Text(g_fM, 120, H / 2 - 30, kFg, installed ? "Removing sLaunch..." : "Doing nothing...");
+            Text(g_fM, 120, H / 2 - 30, kFg, (installed || disabled) ? "Removing sLaunch..." : "Doing nothing...");
             int bx = 120, by = H / 2 + 10, bw = 600, bh = 3;
             FillRect(bx, by, bw, bh, kBg2);
             float p = g_total > 0 ? (float)g_done / (float)g_total : 0.0f;
@@ -656,6 +936,7 @@ int main() {
         } else if (screen == Screen::Checking) {
             Text(g_fM, W / 2, H / 2 - 15, kFg, "Checking for updates...", true);
             Text(g_fS, W / 2, H / 2 + 30, kDim, "Current version " SL_VERSION, true);
+            DrawSatelliteAnim(animMs, icSwitch, icGithub);
 
         } else if (screen == Screen::UpToDate) {
             Text(g_fM, W / 2, H / 2 - 20, kGreen, "You're up to date", true);
@@ -682,10 +963,22 @@ int main() {
             CountTree("romfs:/payload");
             if (g_total == 0) g_total = 1;
             ok = CopyTree("romfs:/payload", "sdmc:", [&]() {
+                char cnt[64];
+                snprintf(cnt, sizeof(cnt), "%d / %d files", g_done, g_total);
                 DrawProgress("Installing sLaunch...",
-                             (double)g_done / (double)g_total, nullptr);
+                             (double)g_done / (double)g_total, cnt, installAnim);
+                SDL_RenderPresent(g_ren);
             });
+            // Splash last, and never fatal: a console whose package3 is not the
+            // size or shape we expect still gets a working sLaunch, just with
+            // the stock boot logo.
+            if (ok) InstallSplash();
+            // A fresh copy just landed at the live path; a disabled-aside copy
+            // from before would otherwise sit there stale, looking like this
+            // install is still disabled.
+            if (ok) { struct stat st; if (stat(kQlaunchDisabled, &st) == 0) DeleteTree(kQlaunchDisabled); }
             installed = ok;
+            disabled  = IsDisabled();
             rebootAfter = ok;
             buildMenu();
             screen = ok ? Screen::Done : Screen::Failed;
@@ -694,6 +987,7 @@ int main() {
         if (screen == Screen::Removing && g_total == 0) {
             ok = RemoveEverything();          // qlaunch override + the whole slaunch/ tree
             installed = IsInstalled();
+            disabled  = IsDisabled();
             rebootAfter = ok;                 // reboot returns to the stock HOME menu
             buildMenu();
             screen = ok ? Screen::Done : Screen::Failed;
@@ -729,7 +1023,11 @@ int main() {
         if (screen == Screen::Extracting) {
             ok = ExtractZip("sdmc:/slaunch_update.zip");
             remove("sdmc:/slaunch_update.zip");
+            // Same reasoning as a fresh Install: a stale disabled-aside copy
+            // would otherwise outlive the update it was disabled before.
+            if (ok) { struct stat st; if (stat(kQlaunchDisabled, &st) == 0) DeleteTree(kQlaunchDisabled); }
             installed = IsInstalled();
+            disabled  = IsDisabled();
             rebootAfter = ok;
             buildMenu();
             if (!ok) updErr = "Could not extract the update";
@@ -739,10 +1037,13 @@ int main() {
 
 cleanup:
     if (icon) SDL_DestroyTexture(icon);
-    if (icInstall) SDL_DestroyTexture(icInstall);
-    if (icUpdate)  SDL_DestroyTexture(icUpdate);
-    if (icDisable) SDL_DestroyTexture(icDisable);
-    if (icQuit)    SDL_DestroyTexture(icQuit);
+    if (icInstall)   SDL_DestroyTexture(icInstall);
+    if (icUpdate)    SDL_DestroyTexture(icUpdate);
+    if (icDisable)   SDL_DestroyTexture(icDisable);
+    if (icUninstall) SDL_DestroyTexture(icUninstall);
+    if (icSdcard)    SDL_DestroyTexture(icSdcard);
+    if (icSwitch)    SDL_DestroyTexture(icSwitch);
+    if (icGithub)    SDL_DestroyTexture(icGithub);
     if (g_fL) TTF_CloseFont(g_fL);
     if (g_fM) TTF_CloseFont(g_fM);
     if (g_fS) TTF_CloseFont(g_fS);

@@ -4,19 +4,26 @@
 #include <sl/menu/ui/Theme.hpp>
 #include <sl/menu/gfx/Gfx.hpp>
 #include <sl/menu/gfx/IconCache.hpp>
+#include <sl/menu/gfx/Video.hpp>
 #include <sl/menu/audio/Music.hpp>
 #include <sl/menu/audio/Sound.hpp>
 #include <sl/menu/hb/Homebrew.hpp>
+#include <sl/menu/hb/Shortcuts.hpp>
 #include <sl/menu/play/PlayStats.hpp>
 #include <sl/menu/widgets/Widgets.hpp>
 #include <sl/menu/news/News.hpp>
 #include <sl/menu/dbg/Debug.hpp>
 #include <sl/menu/cfg/UserCfg.hpp>
+#include <sl/menu/usb/Mtp.hpp>
 #include <vector>
 #include <string>
 #include <unordered_map>
 #include <initializer_list>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <set>
 
 // SDL2 menu for sLaunch.
 // Screen state machine: Oobe -> Main / Themes / ThemeEditor, with an optional
@@ -50,7 +57,13 @@ namespace sl::menu::ui {
         // exist comes from the tile config. Its `name` is the widget's name,
         // which is also what ItemKey uses to tie the two together.
         WidgetTile,
+        FileManager,   // browse and manage the SD card (Menu_Files.cpp)
     };
+
+    // What the box-art worker is doing (see Menu::DrawFetchStatus). Stages run
+    // top to bottom; the last three are outcomes.
+    enum class FetchStage { Idle, Lookup, Index, Scan, Save, Sgdb, Shots,
+                            Added, NotFound, Failed };
 
     // Horizontal alignment of the main list text.
     enum class TextAlign { Left, Center, Right };
@@ -82,6 +95,14 @@ namespace sl::menu::ui {
         bool        needs_update = false;
         bool        is_favourite = false;
         std::string hb_path;   // ItemKind::Homebrew: the .nro to launch
+        // Argv to hand that .nro. Empty means "just its own path", which is the
+        // hbmenu convention and what a plain homebrew launch has always sent;
+        // a launcher shortcut puts the core and the ROM in here instead.
+        std::string hb_argv;
+        // XMB column this entry claims, overriding the one its kind would put it
+        // in. Only launcher shortcuts set it - that is what makes a playlist a
+        // column of its own rather than more entries under Homebrew.
+        std::string category;
         u64         hb_icon = 0;
     };
 
@@ -109,6 +130,9 @@ namespace sl::menu::ui {
 
         // Path of the .nro to launch, valid when OnButton returns LaunchHomebrew[App].
         const std::string &HomebrewPath() const { return m_hb_launch_path; }
+        // Argv for that launch; empty for a plain .nro, in which case the daemon
+        // falls back to the quoted path the way hbmenu does.
+        const std::string &HomebrewArgv() const { return m_hb_launch_argv; }
         u64 HomebrewDonor() const { return m_hb_donor; }
 
         // Payload to chainload, valid when OnButton returns PowerPayload.
@@ -200,12 +224,13 @@ namespace sl::menu::ui {
     private:
         enum class Screen { Oobe, Welcome, Main, Theming, Themes, ThemeEditor, ColorPicker,
                             Fonts, Widgets, WidgetOptions, Keyboard, Music, Homebrew, About,
-                            SysEntries, Power, Payloads, Album, FlowMenu, FlowSettings,
+                            SysEntries, Power, Payloads, Album, FlowMenu, FlowSettings, Files,
                             Network, CoverPicker,
                             // Deck: its side menu, the full-library grid, and the
                             // reader a news card opens into.
                             DeckMenu, DeckLibrary, DeckNews };
-        enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower };
+        enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower,
+                            ConfirmRetroArch, ConfirmDelete };
 
         void RebuildItems();
 
@@ -421,7 +446,7 @@ namespace sl::menu::ui {
         // By value: it rebuilds the entry list, which is where the caller's
         // reference would have been living.
         void RemoveWidgetTile(std::string name);
-        void DrawTileFace(const TileRect &r, const MenuItem &it, bool sel, Uint8 a);
+        void DrawTileFace(const TileRect &r, const MenuItem &it, bool sel, Uint8 a, int pass = -1);
         SDL_Color TileColor(int idx) const;  // theme accent, hue-shifted per tile
         void UpdateLiveAlbum();              // advance the cycling picture tile
 
@@ -436,6 +461,14 @@ namespace sl::menu::ui {
         void   ScanAlbum();               // fill m_album from the SD
         void   EnsureAlbumTexture();      // decode the selected shot, free the old
         void   FreeAlbumTexture();
+        // Video clips (.mp4) in the album are played back in the menu on NVDEC
+        // (gfx::VideoPlayer) rather than handed to the system Album applet.
+        // PlayAlbumVideo mutes the background music for the clip's duration and
+        // returns false if it cannot be opened; StopAlbumVideo restores the
+        // music to whatever state it was in before the clip started.
+        bool   PlayAlbumVideo(const std::string &path);
+        void   PreviewAlbumVideo(const std::string &path);   // silent, in the list panel
+        void   StopAlbumVideo();
         std::vector<std::string> m_album; // screenshot paths, newest last
         int          m_album_cursor  = 0;
         // Animated position of the list, chasing m_album_cursor. Wrapping from
@@ -446,6 +479,22 @@ namespace sl::menu::ui {
         bool         m_album_full    = false;  // fullscreen view of the selection
         SDL_Texture *m_album_tex     = nullptr;
         int          m_album_tex_idx = -1;     // which m_album entry m_album_tex is
+        // Album clip playback (see PlayAlbumVideo / StopAlbumVideo). Owns its own
+        // decode thread + GPU texture, independent of m_video_player (the
+        // wallpaper), so a clip can play on top of a video wallpaper.
+        gfx::VideoPlayer m_album_video;
+        bool         m_album_video_active = false;   // a clip is currently playing
+        std::string  m_album_video_path;             // which m_album entry is open
+        bool         m_album_video_ok     = false;   // ...and whether it opened
+        bool         m_album_music_was_on = true;    // music state before the clip
+        // Full screen viewer state (see AlbumShow / DrawAlbumViewerUi).
+        bool         m_album_slideshow  = false;
+        bool         m_album_ui_pinned  = false;     // photo info bar kept up
+        u64          m_album_ui_tick    = 0;         // last input, for the fade
+        u64          m_album_slide_tick = 0;         // when the current slide began
+        void         AlbumShow(int i);
+        void         AlbumPokeUi();
+        void         DrawAlbumViewerUi();
         void LoadHbPins();                // pinned homebrew paths (main-menu entries)
         void SaveHbPins();
         // Pinned .nro -> name + cached icon; resolved on a worker (StartResolvePins).
@@ -599,13 +648,7 @@ namespace sl::menu::ui {
         // HeroArt's own definition, Menu_Deck.cpp.
         std::unordered_map<u64, SDL_Texture *> m_hero_art;
         SDL_Texture *HeroArt(const MenuItem &it);
-        int m_cover_budget  = 6;  // cached covers to upload this frame
-        // Full decodes are in a separate, much smaller budget. A cache hit is a
-        // read; a miss is a 600x900 PNG inflate. Sharing one budget meant that
-        // while the cache was being built a frame did six decodes and took most
-        // of a second, which is the hang - the work is the same either way, but
-        // spread thinly the menu keeps drawing and can say what it is doing.
-        int m_decode_budget = 2;
+        int m_cover_budget  = 6;  // finished art to upload this frame
         // Set every time a cover is decoded, so the notice shows only while the
         // cache is actually being built and disappears on its own after.
         u64 m_cache_msg_tick = 0;
@@ -638,6 +681,27 @@ namespace sl::menu::ui {
         std::unordered_map<u64, FlowShots> m_shots;
         const FlowShots &FlowBackShots(const MenuItem &it);
 
+        // ---- background art loader ------------------------------------------
+        // Covers, box scans and hero art are read from the texture cache (or
+        // decoded and cached) on one worker; the main thread only uploads the
+        // finished surfaces. Art that is not ready yet is simply not drawn
+        // for a frame or two, instead of the whole menu stopping for it.
+        enum ArtKind { Art_Cover, Art_Wrap, Art_Hero };
+        struct ArtJob { u64 id; int kind; u32 epoch; SDL_Surface *surf; bool built; };
+        std::mutex              m_art_mx;
+        std::condition_variable m_art_cv;
+        std::deque<ArtJob>      m_art_q;       // newest at the back, served first
+        std::vector<ArtJob>     m_art_done;
+        bool                    m_art_quit = false;          // under m_art_mx
+        std::set<std::pair<int, u64>> m_art_pending;         // main thread only
+        u32                     m_art_epoch = 0;   // bumped when art on disk changes
+        bool                    m_art_started = false;
+        Thread                  m_art_thread {};
+        void   QueueArt(int kind, u64 id);
+        void   PollArt();
+        void   StopArt();
+        static void ArtTrampoline(void *self);
+
         // ---- SteamGridDB cover fetch ---------------------------------------
         // One title at a time on a worker, newest request wins, results land in
         // covers/<titleid>.jpg and are picked up by FlowCover on the next frame.
@@ -650,6 +714,30 @@ namespace sl::menu::ui {
         // worker only ever writes it and the main thread only ever reads it.
         enum class CoverState { Idle, NoKey, BadKey, Searching, NoMatch, NoArt, Failed, Filtered, Got };
         std::atomic<int> m_cover_state { (int)CoverState::Idle };
+        // What the art worker is doing right now, for the status bar
+        // (DrawFetchStatus). Stages run top to bottom; the last three are
+        // outcomes, shown for a moment once the worker is done.
+        std::atomic<int>      m_fetch_stage { (int)FetchStage::Idle };
+        std::atomic<uint64_t> m_fetch_now { 0 }, m_fetch_total { 0 };
+        u64                   m_fetch_end_tick = 0;
+        std::string           m_fetch_title;       // main thread's copy of the name
+        void DrawFetchStatus();
+        // USB file transfer (usb::Mtp*): a tag in the top bar while a computer
+        // is connected, and a card with the file and its progress while
+        // something is moving. Menu_Files.cpp.
+        usb::MtpStatus m_usb;
+        u64    m_usb_active_tick = 0;          // last frame something was moving
+        usb::MtpOp m_usb_last_op = usb::MtpOp::None;   // what it was
+        u64    m_usb_rate_tick = 0, m_usb_rate_bytes = 0;
+        double m_usb_rate = 0.0;               // bytes a second, smoothed
+        u32    m_usb_changes = 0;              // received + deleted, to refresh Files
+        void   PollUsb();
+        void   DrawUsbStatus();
+        void   DrawUsbTag(int right_x, int y);   // right-aligned to right_x
+        void FetchArtFor(const MenuItem &it);
+        // SteamGridDB is opt-in: GameTDB (no key) is the source of box art,
+        // and SteamGridDB is only asked when this is on and a key is set.
+        bool m_sgdb_enabled = false;
         u64              m_cover_ok_count = 0;
         std::string m_sgdb_key;         // empty = feature off
         bool        m_sgdb_key_loaded = false;
@@ -661,6 +749,15 @@ namespace sl::menu::ui {
         bool        m_cover_ok   = false;
         bool        m_shots_ok   = false;   // screenshots landed this fetch
         bool        m_hero_ok    = false;   // hero art landed this fetch
+        bool        m_wrap_ok    = false;   // a GameTDB box scan landed this fetch
+        // GameTDB box scans: the whole printed insert (back | spine | front),
+        // one per game, drawn on Flow's cases. Loaded for the few boxes near
+        // the selection only - they are big - and dropped as it moves on.
+        SDL_Texture *GameWrap(const MenuItem &it);
+        bool         TdbFront(u64 app_id);   // cover came from the same scan
+        std::unordered_map<u64, SDL_Texture *> m_game_wraps;
+        std::unordered_map<u64, bool>          m_tdb_front;
+        int         m_tdb_region = 0;       // index into kTdbRegions (Theming)
         // Titles already attempted this session, so a miss is not retried on
         // every cursor move.
         std::unordered_map<u64, bool> m_cover_tried;
@@ -777,7 +874,19 @@ namespace sl::menu::ui {
         // Draw one app/entry as a square tile: cached icon if present, else a
         // themed placeholder with the name. Used by the Line and Grid modes.
         void DrawAppTile(const MenuItem &it, int x, int y, int size,
-                         bool selected, Uint8 alpha);
+                         bool selected, Uint8 alpha, bool reflect = false);
+        // Selection glow strength, gently pulsing, shared by every layout.
+        static float SelectionGlow() {
+            const float s = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
+            return 0.80f + 0.20f * sinf(s * 3.0f);
+        }
+        // The selected item's art, blurred, filling the screen behind a
+        // layout; cross-fades when the selection settles somewhere new.
+        void DrawSelectionBackdrop();
+        std::string  m_bd_key;
+        SDL_Texture *m_bd_cur = nullptr, *m_bd_old = nullptr;
+        u64          m_bd_tick = 0, m_bd_moved = 0;
+        bool         m_bd_pending = false;
         // Packed-layout queries, all answered from BuildTiles so scrolling,
         // touch and navigation can never disagree with what was drawn.
         // Item index under a touch point (or -1), for touch-to-select/launch.
@@ -894,10 +1003,11 @@ namespace sl::menu::ui {
         SDL_Texture *m_wallpaper_blur  = nullptr;  // pre-baked low-res (blurred) copy
         std::string  m_wallpaper_path;              // current wallpaper file path
         int          m_wallpaper_theme = -1;
-        // Video frame sequence: when wallpaper path is a directory, cycle through frames
-        std::vector<std::string> m_video_frames;   // sorted frame paths
-        int          m_video_frame_idx = 0;        // current frame index
-        u64          m_video_frame_tick = 0;       // tick when last frame was swapped
+        // Active when the theme's wallpaper is a video file (.mp4) instead of
+        // a still image - see IsVideoPath. Owns its own decode thread and GPU
+        // texture; DrawBackground reads GetTexture() the same way it reads
+        // m_wallpaper for a static image.
+        gfx::VideoPlayer m_video_player;
 
         // Gaussian-blur an image file, baking the result into a new texture.
         // Reads the file as an SDL_Surface (CPU memory), blurs on CPU, uploads.
@@ -950,6 +1060,22 @@ namespace sl::menu::ui {
         // Status messages ("Saved", "Pinned") are not hints and always show.
         bool      m_show_hints   = true;
         bool      m_show_counter = true;
+        // Whether launcher shortcuts join the other layouts too. XMB always
+        // shows them - it gives them a column each, which is the whole point -
+        // but a few thousand ROMs poured into the Grid or the Deck buries the
+        // games they sit next to, so everywhere else is opt-in.
+        bool      m_shortcuts_everywhere = false;
+        // RetroArch playlists at all (beta, opt-in behind a warning).
+        bool      m_retroarch = false;
+        // Active name filter, empty when not searching. Deliberately not
+        // persisted: a menu that opened still filtered, with no obvious way
+        // back, would read as a menu that had lost your games.
+        std::string m_search;
+        // Periodic memory snapshot; see the trace block in Render().
+        bool m_memtrace_on   = false;
+        u64  m_memtrace_tick = 0;
+        void OpenSearch();   // built-in keyboard, seeded with the current filter
+        static bool ContainsFold(const std::string &hay, const std::string &needle);
         int  ShelfTileW() const { return m_shelf_vertical ? 152 : 208; }
         int  ShelfTileH() const { return m_shelf_vertical ? 228 : 208; }
         int  ShelfPitch() const { return ShelfTileW() + kShelfGapPx; }
@@ -973,6 +1099,7 @@ namespace sl::menu::ui {
         std::vector<hb::HbEntry> m_hb_pins;   // homebrew pinned to the main menu (resolved)
         std::vector<std::string> m_hb_favs;   // pinned homebrew marked as favourites (paths)
         std::string    m_hb_launch_path;      // set on LaunchHomebrew[App]
+        std::string    m_hb_launch_argv;      // ditto; empty = just the path
         u64  m_hb_donor = 0;                  // donor game id for "run as app"
         int  m_hb_cursor = 0;
         bool m_hb_scanned = false;
@@ -986,6 +1113,17 @@ namespace sl::menu::ui {
         static void HbScanTrampoline(void *self);
         void StartHbScan();   // kick off the worker (no-op if already running/done)
         void PollHbScan();    // main thread: swap results in when the worker finishes
+
+        // Launcher shortcuts (RetroArch playlists + shortcuts.txt). Read on the
+        // same worker as the NRO scan rather than one of their own: both are SD
+        // reads wanted at the same moment, and one thread doing them in turn
+        // beats two contending for the card.
+        std::vector<hb::Shortcut> m_shortcuts;
+        std::vector<hb::Shortcut> m_shortcut_scan_result;
+        // Art for a shortcut lives outside the icon cache (RetroArch's own
+        // thumbnails), so the cache is handed this to resolve those keys.
+        std::unordered_map<u64, std::string> m_shortcut_art;
+        void AdoptShortcuts(std::vector<hb::Shortcut> &&found);
 
         // Pinned-homebrew resolve (name + icon) also runs on a worker so it never
         // sits on the menu-start path; the main thread folds names/icons back in.
@@ -1056,6 +1194,11 @@ namespace sl::menu::ui {
         enum class XmbCat { Settings, Media, User, Network, Game, Homebrew, Count };
         struct XmbColumn {
             XmbCat           cat;
+            // Set only for a shortcut category, which has no XmbCat of its own:
+            // when non-empty it is the column's name, and the column borrows the
+            // Game headline icon. Everything else leaves it empty and is named
+            // by XmbCatName(cat) exactly as before.
+            std::string      label;
             std::vector<int> items;   // indices into m_items, in list order
         };
         std::vector<XmbColumn> m_xmb_cols;      // non-empty columns only, PSP order
@@ -1064,6 +1207,9 @@ namespace sl::menu::ui {
         float m_xmb_col_scroll  = 0.0f; // animated bar position
         float m_xmb_item_scroll = 0.0f; // animated column position
 
+        static char XmbInitial(const std::string &name);
+        const char *XmbShoulderHint() const;   // "Letter" or "Jump"
+        int  XmbLetterJump(int dir) const;   // next/prev initial in the open column
         static XmbCat XmbCatOf(const MenuItem &it);
         static const char *XmbCatName(XmbCat c);
         static ItemKind    XmbCatIconKind(XmbCat c);
@@ -1081,12 +1227,69 @@ namespace sl::menu::ui {
         float m_edit_scroll  = 0.0f; // animated scroll position for the editor
         int m_editing_theme  = -1; // global index of the custom theme being edited
         int m_oobe_step      = 0;
+        static constexpr int kOobeSteps = 5;
+        float        m_oobe_gallery = 0.0f;    // layout gallery position
+        float        m_oobe_list    = 0.0f;    // theme list position
+        SDL_Texture *m_oobe_prev[8] = {};      // layout screenshots, loaded lazily
+        bool         m_oobe_prev_tried[8] = {};
+        SDL_Texture *OobePreview(int mode);
+        void         FreeOobePreviews();
+        std::vector<std::string> WrapText(gfx::FontSize fs, const std::string &text, int width);
         // Animated position of the setup step row, which is drawn as an XMB
         // category row; it lags m_oobe_step so advancing a step slides.
         float m_oobe_scroll  = 0.0f;
 
         // Music + Widgets submenus
-        int m_music_cursor  = 0;   // cursor in the music submenu
+        // ---- File manager (Menu_Files.cpp) -----------------------------------
+        struct FmEntry { std::string name; bool dir = false; long long size = -1; };
+        enum class FmOp { None, Copy, Move, Delete };
+        enum class FmAction { Copy, Cut, Paste, Rename, Delete, NewFolder };
+        std::string            m_fm_path;
+        std::vector<FmEntry>   m_fm_list;
+        int                    m_fm_cursor = 0;
+        float                  m_fm_scroll = 0.0f;
+        bool                   m_fm_menu_open = false;
+        int                    m_fm_menu_cursor = 0;
+        std::string            m_fm_clip;             // copied / cut path, or empty
+        bool                   m_fm_clip_cut = false;
+        SDL_Texture           *m_fm_view = nullptr;   // a picture being shown
+        // Background copy / move / delete.
+        Thread                 m_fm_thread{};
+        bool                   m_fm_running = false, m_fm_ok = false;
+        FmOp                   m_fm_op = FmOp::None;
+        std::string            m_fm_src, m_fm_dst;
+        std::atomic<bool>      m_fm_done{false}, m_fm_cancel{false};
+        std::atomic<u64>       m_fm_done_bytes{0}, m_fm_total_bytes{0};
+        void   OpenFileManager();
+        void   FmScan();
+        void   FmGo(const std::string &path, const std::string &select);
+        void   FmStart(FmOp op, const std::string &src, const std::string &dst);
+        void   FmPoll();
+        bool   FmCopyTree(const std::string &src, const std::string &dst);
+        bool   FmDeleteTree(const std::string &p);
+        static void FmWorkerTrampoline(void *self);
+        std::vector<FmAction> FmActions() const;
+        static const char *FmActionName(FmAction a);
+        void   FmDo(FmAction a);
+        void   FmKeyboardDone(bool rename, const std::string &text);
+        void   FmConfirmDelete();
+        Action OnButtonFiles(Btn b);
+        void   OnTouchFiles(int x, int y);
+        void   DrawFiles();
+
+        int   m_music_cursor = 0;       // selected row of the music library
+        float m_music_scroll = 0.0f;    // list position, chasing the cursor
+        bool  m_from_theming_music = false;   // B goes back to Theming, not home
+        void  OpenMusicPlayer(bool from_theming);
+        void  OnTouchMusic(int x, int y);
+        void  OnTouchAlbum(int x, int y);
+        static std::string FormatTime(double seconds);   // m:ss / h:mm:ss
+        // Cover of the current track (audio::Music::CoverArt), decoded once per
+        // track change. The index is cached even when there is no art, so a
+        // track without any is not re-read every frame.
+        SDL_Texture *MusicArt();
+        SDL_Texture *m_music_art     = nullptr;
+        int          m_music_art_idx = -1;
         int m_widget_cursor  = 0;  // cursor in the widget list
         int m_widget_sel     = 0;  // widget whose options are being edited
         int m_widgetopt_cursor = 0;

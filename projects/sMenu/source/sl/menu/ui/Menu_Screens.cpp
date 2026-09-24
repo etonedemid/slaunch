@@ -20,6 +20,8 @@ namespace sl::menu::ui {
     Menu::Action Menu::OnButtonKeyboard(Btn b) {
         auto commit = [&]() {
             switch (m_kb_purpose) {
+                case sl::smi::Kb_FileRename: FmKeyboardDone(true,  m_kb_text); break;
+                case sl::smi::Kb_NewFolder:  FmKeyboardDone(false, m_kb_text); break;
                 case sl::smi::Kb_WidgetOption:
                     if (widgets::IWidget *w = m_widgets.At((int)m_kb_app))
                         w->SetOption(m_kb_opt, m_kb_text);
@@ -53,6 +55,20 @@ namespace sl::menu::ui {
                     m_sgdb_key_loaded = true;
                     SetStatus(m_kb_text.empty() ? T("Key cleared") : T("Key saved"));
                     m_screen = Screen::Theming;
+                    break;
+                }
+                case sl::smi::Kb_Search: {
+                    m_search = m_kb_text;
+                    RebuildItems();
+                    // Land on the first match rather than wherever the cursor
+                    // happened to be in the unfiltered list.
+                    m_cursor = 0;
+                    m_scroll_pos = 0.0f;
+                    m_xmb_col = -1; m_xmb_item = 0; m_xmb_placed = false;
+                    XmbRebuild();
+                    if (m_search.empty())        SetStatus(T("Search cleared"));
+                    else if (m_items.empty())    SetStatus(T("No matches"));
+                    m_screen = Screen::Main;
                     break;
                 }
                 default: // Kb_RenameGame
@@ -92,40 +108,43 @@ namespace sl::menu::ui {
         if (b == Btn::X)    m_kb_upper = !m_kb_upper;
         if (b == Btn::Plus) commit();
         if (b == Btn::B) {
-            m_screen = (m_kb_purpose == sl::smi::Kb_WidgetOption)
+            m_screen = (m_kb_purpose == sl::smi::Kb_FileRename ||
+                        m_kb_purpose == sl::smi::Kb_NewFolder)
+                       ? Screen::Files :
+                       (m_kb_purpose == sl::smi::Kb_WidgetOption)
                        ? Screen::WidgetOptions :
                        (m_kb_purpose == sl::smi::Kb_ThemeName)
                        ? Screen::ThemeEditor : Screen::Main;
         }
         return Action::None;
     }
+    // Setup: Welcome, Layout, Theme, Good to know, Done.
     Menu::Action Menu::OnButtonOobe(Btn b) {
-        constexpr int LastStep = 4;
-        if (m_oobe_step == 1) {   // theme - applies live
-            const int n = m_theme.Count();
-            if (b == Btn::Down) { m_theme_cursor = (m_theme_cursor + 1) % n; m_theme.Select(m_theme_cursor); }
-            if (b == Btn::Up)   { m_theme_cursor = (m_theme_cursor + n - 1) % n; m_theme.Select(m_theme_cursor); }
-        }
-        if (m_oobe_step == 2) {   // layout (vertical list, like the rest of the menu)
+        constexpr int LastStep = kOobeSteps - 1;
+        const bool prev = (b == Btn::Left || b == Btn::Up);
+        const bool next = (b == Btn::Right || b == Btn::Down);
+        if (m_oobe_step == 1 && (prev || next)) {          // layout gallery
             const int n = (int)UiMode::Count;
-            const UiMode was = m_ui_mode;
-            if (b == Btn::Right || b == Btn::Down) m_ui_mode = (UiMode)(((int)m_ui_mode + 1) % n);
-            if (b == Btn::Left  || b == Btn::Up)   m_ui_mode = (UiMode)(((int)m_ui_mode + n - 1) % n);
-            // Same reason as cycleUiMode: the list contents depend on the mode.
-            if (m_ui_mode != was) RebuildItems();
+            m_ui_mode = (UiMode)(((int)m_ui_mode + (next ? 1 : n - 1)) % n);
+            RebuildItems();   // the list contents depend on the mode
         }
-        if (m_oobe_step == LastStep) {   // done - update-check opt-out
-            if (b == Btn::Left || b == Btn::Right) m_check_updates = !m_check_updates;
+        if (m_oobe_step == 2 && (prev || next)) {          // theme, applied live
+            const int n = m_theme.Count();
+            m_theme_cursor = (m_theme_cursor + (next ? 1 : n - 1)) % n;
+            m_theme.Select(m_theme_cursor);
         }
+        if (m_oobe_step == LastStep && (b == Btn::Left || b == Btn::Right))
+            m_check_updates = !m_check_updates;
+
         if (b == Btn::A) {
-            // Re-seed the shared list scroll so the next step's carousel doesn't
-            // slide in from the previous step's position.
-            if (m_oobe_step == 0) m_sub_scroll = (float)m_theme_cursor;
-            if (m_oobe_step == 1) m_sub_scroll = (float)(int)m_ui_mode;
-            if (m_oobe_step < LastStep) { m_oobe_step++; }
-            else {
+            if (m_oobe_step < LastStep) {
+                m_oobe_step++;
+                if (m_oobe_step == 1) m_oobe_gallery = (float)(int)m_ui_mode;
+                if (m_oobe_step == 2) m_oobe_list = (float)m_theme_cursor;
+            } else {
                 m_theme.Save();
                 SaveSettings();   // persist the chosen layout (ui_mode)
+                FreeOobePreviews();
                 // Hand off to the welcome screen (opening jingle + the user's name)
                 // instead of dropping straight into the menu.
                 if (m_welcome_enabled) { EnterWelcome(); m_sfx.Play(audio::Sfx::Startup); }
@@ -133,11 +152,7 @@ namespace sl::menu::ui {
                 return Action::FinishSetup;
             }
         }
-        if (b == Btn::B && m_oobe_step > 0) {
-            m_oobe_step--;
-            if (m_oobe_step == 1) m_sub_scroll = (float)m_theme_cursor;
-            if (m_oobe_step == 2) m_sub_scroll = (float)(int)m_ui_mode;
-        }
+        if (b == Btn::B && m_oobe_step > 0) m_oobe_step--;
         return Action::None;
     }
     bool Menu::IsSysHidden(ItemKind k) const {
@@ -375,6 +390,7 @@ namespace sl::menu::ui {
 
         // Drop what Flow and the shelf have cached for this title so the new
         // file is picked up on the next frame, exactly as a fetch does.
+        m_art_epoch++;
         auto f = m_covers.find(m_pick_id);
         if (f != m_covers.end()) {
             if (f->second) m_gfx->FreeImage(f->second);
@@ -974,6 +990,46 @@ namespace sl::menu::ui {
         auto toggleWrap    = [&]() { m_wrap_nav     = !m_wrap_nav;     SaveSettings(); };
         auto toggleHints   = [&]() { m_show_hints   = !m_show_hints;   SaveSettings(); };
         auto toggleCounter = [&]() { m_show_counter = !m_show_counter; SaveSettings(); };
+        // Rebuild rather than just save: this decides whether the shortcuts are
+        // in m_items at all, so the list it names has to be rebuilt for the
+        // change to show up anywhere but XMB.
+        // Off -> on asks first: a big ROM library is still able to take the
+        // system down (see the IconCache pool), so this is opt-in with a warning.
+        auto toggleRetroArch = [&]() {
+            if (m_retroarch) {
+                m_retroarch = false;
+                SaveSettings();
+                RebuildItems();
+            } else {
+                m_dialog        = Dialog::ConfirmRetroArch;
+                m_dialog_cursor = 1;   // "No" first: this is a warning
+                m_dialog_title  = T("RetroArch games (beta)");
+                m_dialog_note   = T("Heya! this feature is beta and really unstable! If you have over a thousand ROMs in your library be aware that the system may crash sometimes!");
+            }
+        };
+        if (m_theming_cursor == TH_RetroArch && (b == Btn::Left || b == Btn::Right))
+            toggleRetroArch();
+        // SteamGridDB: a second source, off unless asked for. Turning it on
+        // clears what was tried this session so its art is looked for.
+        if (m_theming_cursor == TH_Sgdb &&
+            (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_sgdb_enabled = !m_sgdb_enabled;
+            if (m_sgdb_enabled) m_cover_tried.clear();
+            SaveSettings();
+        }
+        // Which country's box GameTDB is asked for first (others follow).
+        if (m_theming_cursor == TH_TdbRegion &&
+            (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_tdb_region = (m_tdb_region + (b == Btn::Left ? kTdbRegionCount - 1 : 1)) % kTdbRegionCount;
+            SaveSettings();
+        }
+        auto toggleShortcuts = [&]() {
+            m_shortcuts_everywhere = !m_shortcuts_everywhere;
+            SaveSettings();
+            RebuildItems();
+        };
+        if (m_theming_cursor == TH_Shortcuts && (b == Btn::Left || b == Btn::Right))
+            toggleShortcuts();
         auto toggleUpdates = [&]() { m_check_updates = !m_check_updates; SaveSettings(); };
         if (m_theming_cursor == TH_Updates && (b == Btn::Left || b == Btn::Right))
             toggleUpdates();
@@ -1031,7 +1087,7 @@ namespace sl::menu::ui {
             switch (m_theming_cursor) {
                 case TH_Themes:      m_screen = Screen::Themes;       m_theme_cursor = m_theme.CurrentIndex(); m_sub_scroll = m_theme_cursor; break;
                 case TH_Fonts:       m_screen = Screen::Fonts;        m_font_cursor = m_font_applied; m_sub_scroll = m_font_cursor; break;
-                case TH_Music:       m_screen = Screen::Music;        m_music_cursor = 0; m_sub_scroll = 0; break;
+                case TH_Music:       OpenMusicPlayer(true); break;
                 case TH_Widgets:     openWidgets(); break;
                 case TH_Entries:     m_screen = Screen::SysEntries;   m_sys_cursor = 0; m_sub_scroll = 0; break;
                 case TH_IconPack:    cycleIconPack(+1); break;
@@ -1043,6 +1099,8 @@ namespace sl::menu::ui {
                 case TH_Wrap:        toggleWrap(); break;
                 case TH_Hints:       toggleHints(); break;
                 case TH_Counter:     toggleCounter(); break;
+                case TH_Shortcuts:   toggleShortcuts(); break;
+                case TH_RetroArch:   toggleRetroArch(); break;
                 case TH_FlowSet:
                     m_screen = Screen::FlowSettings;
                     m_flowset_cursor = 0;
@@ -1159,7 +1217,10 @@ namespace sl::menu::ui {
     void Menu::ScanWallpapers() {
         m_wallpapers.clear();
         // Accept images from either the documented themes folder or the slaunch
-        // root, so wherever the user drops them works.
+        // root, so wherever the user drops them works. .mp4 is included here
+        // too (video wallpapers, see gfx::VideoPlayer) - IsVideoPath decides
+        // at draw time whether a picked path is played back or drawn as a
+        // still image, so both kinds share this one picker list.
         const char *dirs[2] = { "sdmc:/slaunch/themes", "sdmc:/slaunch" };
         for (const char *dir : dirs) {
             DIR *d = opendir(dir);
@@ -1172,7 +1233,8 @@ namespace sl::menu::ui {
                 const char *e4 = name + len - 4;
                 const char *e5 = len >= 5 ? name + len - 5 : "";
                 if (strcasecmp(e4, ".jpg") == 0 || strcasecmp(e4, ".png") == 0 ||
-                    strcasecmp(e4, ".bmp") == 0 || strcasecmp(e5, ".jpeg") == 0)
+                    strcasecmp(e4, ".bmp") == 0 || strcasecmp(e5, ".jpeg") == 0 ||
+                    strcasecmp(e4, ".mp4") == 0)
                     m_wallpapers.push_back(std::string(dir) + "/" + name);
             }
             closedir(d);
@@ -1234,8 +1296,8 @@ namespace sl::menu::ui {
     void Menu::CycleBackground(int dir) {
         if (!m_theme.IsCustom(m_editing_theme)) return;
         Theme &c = m_theme.CustomAt(m_editing_theme);
-        const int maxStyle = 2; // Gradient <-> Ribbon
-        c.background_style = (c.background_style + dir + maxStyle) % maxStyle;
+        const int n = (int)BackgroundStyle_Count;
+        c.background_style = (c.background_style + dir + n) % n;
         m_theme.Select(m_editing_theme);
         m_theme_cursor    = m_editing_theme;
         m_wallpaper_theme = -1;
@@ -1281,10 +1343,8 @@ namespace sl::menu::ui {
         if (b == Btn::Down) {
             m_edit_cursor = (m_edit_cursor + 1) % EF_Count;
             auto skipHidden = [&](int &cursor, int dir) {
-                while (IsRibbonRow(cursor) && c.background_style != BackgroundStyle_Ribbon) {
-                    cursor = (cursor + dir + EF_Count) % EF_Count;
-                }
-                while (cursor == EF_WallpaperFps && !IsVideoPath(c.wallpaper)) {
+                while ((IsRibbonRow(cursor) || IsFxColourRow(cursor))
+                       && !StyleHasParams(c.background_style)) {
                     cursor = (cursor + dir + EF_Count) % EF_Count;
                 }
                 while (IsBlurRadiusRow(cursor) && !c.wallpaper_blur) {
@@ -1296,10 +1356,8 @@ namespace sl::menu::ui {
         if (b == Btn::Up) {
             m_edit_cursor = (m_edit_cursor + EF_Count - 1) % EF_Count;
             auto skipHidden = [&](int &cursor, int dir) {
-                while (IsRibbonRow(cursor) && c.background_style != BackgroundStyle_Ribbon) {
-                    cursor = (cursor + dir + EF_Count) % EF_Count;
-                }
-                while (cursor == EF_WallpaperFps && !IsVideoPath(c.wallpaper)) {
+                while ((IsRibbonRow(cursor) || IsFxColourRow(cursor))
+                       && !StyleHasParams(c.background_style)) {
                     cursor = (cursor + dir + EF_Count) % EF_Count;
                 }
                 while (IsBlurRadiusRow(cursor) && !c.wallpaper_blur) {
@@ -1322,7 +1380,11 @@ namespace sl::menu::ui {
             if (b == Btn::Right || b == Btn::Left || b == Btn::A) c.wallpaper_dim = !c.wallpaper_dim;
         }
         if (m_edit_cursor == EF_WallpaperBlur) {
-            if (b == Btn::Right || b == Btn::Left || b == Btn::A) c.wallpaper_blur = !c.wallpaper_blur;
+            // Live per-frame blur of a playing video is not supported (see
+            // EnsureWallpaper) - the row stays visible but greyed out and
+            // ignores input while a video wallpaper is active.
+            if ((b == Btn::Right || b == Btn::Left || b == Btn::A) && !IsVideoPath(c.wallpaper))
+                c.wallpaper_blur = !c.wallpaper_blur;
         }
         if (m_edit_cursor == EF_WallpaperBlurRadius) {
             if (b == Btn::Right) c.wallpaper_blur_radius = (c.wallpaper_blur_radius < 32) ? c.wallpaper_blur_radius + 2 : 2;
@@ -1330,10 +1392,6 @@ namespace sl::menu::ui {
         }
         if (m_edit_cursor == EF_WallpaperSnow) {
             if (b == Btn::Right || b == Btn::Left || b == Btn::A) c.wallpaper_snow = !c.wallpaper_snow;
-        }
-        if (m_edit_cursor == EF_WallpaperFps) {
-            if (b == Btn::Right) c.wallpaper_fps = (c.wallpaper_fps < 30) ? c.wallpaper_fps + 1 : 1;
-            if (b == Btn::Left)  c.wallpaper_fps = (c.wallpaper_fps >  1) ? c.wallpaper_fps - 1 : 30;
         }
 
         // Icon plate opacity, in 1/16th steps so the whole range is a sensible
@@ -1346,41 +1404,56 @@ namespace sl::menu::ui {
         }
 
         // Adjust ribbon parameters with left/right.
-        if (c.background_style == BackgroundStyle_Ribbon) {
+        if (StyleHasParams(c.background_style)) {
             if (m_edit_cursor == EF_RibbonLines) {
-                if (b == Btn::Right) c.ribbon_line_count  = (c.ribbon_line_count  < 40) ? c.ribbon_line_count  + 1 : 1;
-                if (b == Btn::Left)  c.ribbon_line_count  = (c.ribbon_line_count  >  1) ? c.ribbon_line_count  - 1 : 40;
+                if (b == Btn::Right) c.Fx().lines  = (c.Fx().lines  < 40) ? c.Fx().lines  + 1 : 1;
+                if (b == Btn::Left)  c.Fx().lines  = (c.Fx().lines  >  1) ? c.Fx().lines  - 1 : 40;
             }
             if (m_edit_cursor == EF_RibbonThickness) {
-                if (b == Btn::Right) c.ribbon_thickness   = (c.ribbon_thickness   < 20) ? c.ribbon_thickness   + 1 : 1;
-                if (b == Btn::Left)  c.ribbon_thickness   = (c.ribbon_thickness   >  1) ? c.ribbon_thickness   - 1 : 20;
+                if (b == Btn::Right) c.Fx().thickness   = (c.Fx().thickness   < 20) ? c.Fx().thickness   + 1 : 1;
+                if (b == Btn::Left)  c.Fx().thickness   = (c.Fx().thickness   >  1) ? c.Fx().thickness   - 1 : 20;
             }
             if (m_edit_cursor == EF_RibbonAmplitude) {
-                if (b == Btn::Right) c.ribbon_amplitude   = (c.ribbon_amplitude   < 60) ? c.ribbon_amplitude   + 1 : 5;
-                if (b == Btn::Left)  c.ribbon_amplitude   = (c.ribbon_amplitude   >  5) ? c.ribbon_amplitude   - 1 : 60;
+                if (b == Btn::Right) c.Fx().amplitude   = (c.Fx().amplitude   < 60) ? c.Fx().amplitude   + 1 : 5;
+                if (b == Btn::Left)  c.Fx().amplitude   = (c.Fx().amplitude   >  5) ? c.Fx().amplitude   - 1 : 60;
             }
             if (m_edit_cursor == EF_RibbonSeed) {
-                if (b == Btn::Right) c.ribbon_seed = (c.ribbon_seed < 99) ? c.ribbon_seed + 1 : 0;
-                if (b == Btn::Left)  c.ribbon_seed = (c.ribbon_seed >  0) ? c.ribbon_seed - 1 : 99;
+                if (b == Btn::Right) c.Fx().seed = (c.Fx().seed < 99) ? c.Fx().seed + 1 : 0;
+                if (b == Btn::Left)  c.Fx().seed = (c.Fx().seed >  0) ? c.Fx().seed - 1 : 99;
             }
             if (m_edit_cursor == EF_RibbonLayers) {
-                if (b == Btn::Right) c.ribbon_layers = (c.ribbon_layers < 12) ? c.ribbon_layers + 1 : 1;
-                if (b == Btn::Left)  c.ribbon_layers = (c.ribbon_layers >  1) ? c.ribbon_layers - 1 : 12;
+                if (b == Btn::Right) c.Fx().layers = (c.Fx().layers < 12) ? c.Fx().layers + 1 : 1;
+                if (b == Btn::Left)  c.Fx().layers = (c.Fx().layers >  1) ? c.Fx().layers - 1 : 12;
+            }
+            if (m_edit_cursor == EF_FxCam) {
+                if (b == Btn::Right) c.Fx().cam = (c.Fx().cam < 200) ? c.Fx().cam + 5 : 200;
+                if (b == Btn::Left)  c.Fx().cam = (c.Fx().cam >   5) ? c.Fx().cam - 5 : 5;
+            }
+            if (m_edit_cursor == EF_FxX) {
+                // Clamped, not wrapped: sliding off one edge of the screen
+                // straight to the other is never what you meant.
+                if (b == Btn::Right) c.Fx().x = (c.Fx().x < 100) ? c.Fx().x + 2 : 100;
+                if (b == Btn::Left)  c.Fx().x = (c.Fx().x >   0) ? c.Fx().x - 2 : 0;
             }
             if (m_edit_cursor == EF_RibbonYCenter) {
-                if (b == Btn::Right) c.ribbon_y_center = (c.ribbon_y_center < 1120) ? c.ribbon_y_center + 10 : -400;
-                if (b == Btn::Left)  c.ribbon_y_center = (c.ribbon_y_center > -400) ? c.ribbon_y_center - 10 : 1120;
+                if (b == Btn::Right) c.Fx().y = (c.Fx().y < 1120) ? c.Fx().y + 10 : -400;
+                if (b == Btn::Left)  c.Fx().y = (c.Fx().y > -400) ? c.Fx().y - 10 : 1120;
             }
         }
 
+        // Leaving the editor keeps the edits: B saves exactly as the Save row
+        // does, rather than walking away from changes that were never written.
+        auto saveAndLeave = [&]() {
+            m_theme.Select(m_editing_theme);
+            m_theme.Save();
+            SetStatus("Theme saved");
+            m_sfx_confirm = true;
+            m_theme_cursor = m_editing_theme;
+            m_screen = Screen::Themes;
+        };
         if (b == Btn::A) {
             if (m_edit_cursor == EF_Save) {
-                m_theme.Select(m_editing_theme);
-                m_theme.Save();
-                SetStatus("Theme saved");
-                m_sfx_confirm = true;
-                m_theme_cursor = m_editing_theme;
-                m_screen = Screen::Themes;
+                saveAndLeave();
             } else if (m_edit_cursor == EF_Rename) {
                 m_kb_purpose = sl::smi::Kb_ThemeName;
                 m_kb_app = (u64)m_editing_theme;
@@ -1392,6 +1465,10 @@ namespace sl::menu::ui {
                 m_theme.Save();
                 m_editing_theme = -1;
                 m_theme_cursor = m_theme.CurrentIndex();
+                // The wallpaper cache is keyed by theme index; deleting a
+                // theme shifts every later one down a slot, so the index the
+                // cache remembers can now belong to a different theme.
+                m_wallpaper_theme = -1;
                 SetStatus("Theme deleted");
                 m_sfx_confirm = true;
                 m_screen = Screen::Themes;
@@ -1399,7 +1476,7 @@ namespace sl::menu::ui {
                 OpenColorPicker(col);
             }
         }
-        if (b == Btn::B) m_screen = Screen::Themes;
+        if (b == Btn::B) saveAndLeave();
         return Action::None;
     }
     Menu::Action Menu::OnButtonColorPicker(Btn b) {
@@ -1539,6 +1616,13 @@ namespace sl::menu::ui {
                 return Action::LaunchApp;
             }
             if (which == Dialog::ConfirmCloseGame) return Action::TerminateApp;
+            if (which == Dialog::ConfirmDelete) { FmConfirmDelete(); return Action::None; }
+            if (which == Dialog::ConfirmRetroArch) {
+                m_retroarch = true;
+                SaveSettings();
+                RebuildItems();
+                return Action::None;
+            }
             if (which == Dialog::ConfirmPower) {
                 const Action act = m_power_confirm;
                 m_power_confirm  = Action::None;
@@ -1547,193 +1631,220 @@ namespace sl::menu::ui {
         }
         return Action::None;
     }
-    // The setup wizard, as an XMB cross.
-    //
-    // The five steps ARE the category row: the same bar, the same anchor, the
-    // same zoom-and-fade tween, with each step's content in the column beneath
-    // it. That is what makes this read as XMB rather than as centred pages with
-    // a progress bar bolted on - and it is why the progress dots are gone. XMB
-    // already has a way of showing where you are along a row, which is the row.
-    //
-    // Everything is drawn in XMB regardless of the layout being previewed at
-    // step 2. Letting the wizard restyle itself as you scrolled that list was
-    // never a real preview - only the list chrome changed, so picking "Flow"
-    // showed you a text list either way - and it would now mean the wizard
-    // falling out of XMB halfway through setting XMB up.
-    void Menu::DrawOobe() {
-        const Theme  &t = m_theme.Current();
-        const int     W = gfx::Gfx::Width;
-        const int     H = gfx::Gfx::Height;
-        constexpr int kSteps = 5;
+    // ---- setup wizard -----------------------------------------------------
+    // One page per step, all built the same way: progress along the top, a
+    // title and a line saying what this step is for, one piece of content,
+    // and the buttons at the bottom. The layout step is a gallery of real
+    // screenshots (sdmc:/slaunch/previews, shipped with the menu), because a
+    // layout is something you choose by looking at it.
+    static const char *kLayoutFiles[] = { "list", "line", "grid", "cover",
+                                          "shelf", "xmb", "flow", "deck" };
+    static_assert(sizeof(kLayoutFiles) / sizeof(kLayoutFiles[0]) == (size_t)UiMode::Count,
+                  "one preview per layout");
 
-        // Shared with DrawCarouselXmb, so the steps that are lists and the steps
-        // that are prose sit on one left edge instead of two.
-        const int colX   = kXmbAnchorX + kXmbIcon / 2 + kXmbLabelLeft - kXmbIcon;
-        const int textX  = kXmbAnchorX + kXmbIcon / 2 + kXmbLabelLeft;
-        const int valueX = kXmbMarginLeft + kXmbSpacingH + kXmbLabelLeft
-                         + kXmbSettingLeft - kXmbIcon;
-        auto rowY = [](float d) {
-            return kXmbMarginTop + kXmbIcon / 2 + (int)XmbRowOffset(d);
-        };
+    SDL_Texture *Menu::OobePreview(int mode) {
+        if (mode < 0 || mode >= (int)UiMode::Count) return nullptr;
+        if (!m_oobe_prev_tried[mode]) {
+            m_oobe_prev_tried[mode] = true;
+            char path[80];
+            snprintf(path, sizeof(path), "sdmc:/slaunch/previews/%s.jpg", kLayoutFiles[mode]);
+            m_oobe_prev[mode] = m_gfx->LoadImage(path);
+        }
+        return m_oobe_prev[mode];
+    }
+    void Menu::FreeOobePreviews() {
+        for (int i = 0; i < (int)UiMode::Count; i++) {
+            if (m_oobe_prev[i]) m_gfx->FreeImage(m_oobe_prev[i]);
+            m_oobe_prev[i] = nullptr;
+            m_oobe_prev_tried[i] = false;
+        }
+    }
 
-        m_oobe_scroll += ((float)m_oobe_step - m_oobe_scroll) * 0.20f;
-        if (std::abs((float)m_oobe_step - m_oobe_scroll) < 0.004f)
-            m_oobe_scroll = (float)m_oobe_step;
-
-        // The category name doubles as the screen title here too.
-        const char *titles[kSteps] = { T("Welcome"), T("Theme"), T("Layout"),
-                                       T("Good to know"), T("All set") };
-        DrawXmbHeader(titles[m_oobe_step]);
-
-        // --- step row, drawn exactly as the main screen draws its categories --
-        const ItemKind icons[kSteps] = {
-            ItemKind::UserPage, ItemKind::Theming, ItemKind::Game,
-            ItemKind::Controllers, ItemKind::Settings,
-        };
-        for (int c = 0; c < kSteps; c++) {
-            const float d  = (float)c - m_oobe_scroll;
-            const int   cx = kXmbAnchorX + (int)(d * kXmbSpacingH);
-            if (cx < -kXmbIcon || cx > W + kXmbIcon) continue;
-
-            const float prox = std::max(0.0f, 1.0f - std::abs(d));
-            const float zoom = kXmbZoomPassive + (kXmbZoomActive - kXmbZoomPassive) * prox;
-            const int   sz   = (int)(kXmbIcon * zoom);
-            // Steps not yet reached are dimmer than a passive tab. This is the
-            // one thing a wizard needs that a category row does not: some sense
-            // of how much of it is left.
-            const float lit = (c <= m_oobe_step) ? 1.0f : 0.4f;
-            const Uint8 a   = (Uint8)(255.0f * (0.75f + 0.25f * prox) * lit);
-
-            if (SDL_Texture *icon = SystemIcon(icons[c])) {
-                const int ix = cx - sz / 2, iy = kXmbTabY - sz / 2;
-                m_gfx->FillRect(ix, iy, sz, sz, IconPlate(t, a));
-                m_gfx->DrawImage(icon, ix, iy, sz, sz, a);
+    // Break text into lines no wider than `width`, at spaces.
+    std::vector<std::string> Menu::WrapText(FontSize fs, const std::string &text, int width) {
+        std::vector<std::string> lines;
+        std::string line, word;
+        auto flush_word = [&]() {
+            if (word.empty()) return;
+            const std::string tryl = line.empty() ? word : line + " " + word;
+            if (!line.empty() && m_gfx->TextWidth(fs, tryl.c_str()) > width) {
+                lines.push_back(line);
+                line = word;
+            } else {
+                line = tryl;
             }
+            word.clear();
+        };
+        for (char c : text) {
+            if (c == ' ') flush_word(); else word += c;
+        }
+        flush_word();
+        if (!line.empty()) lines.push_back(line);
+        return lines;
+    }
+
+    void Menu::DrawOobe() {
+        const Theme &t = m_theme.Current();
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+
+        static const char *kLayoutNames[] = { "List", "Line", "Grid", "Cover",
+                                              "Shelf", "XMB", "Flow", "Deck" };
+        static const char *kLayoutDesc[] = {
+            "A simple scrolling list", "A carousel of covers",
+            "A wall of tiles", "One big cover at a time",
+            "A shelf of covers with details", "The PlayStation cross-media bar",
+            "3D game cases on a mirrored floor", "Steam Deck: hero, covers and news" };
+
+        struct Page { const char *title, *sub; };
+        const Page pages[kOobeSteps] = {
+            { "Welcome to sLaunch", "A clean HOME Menu replacement. Let's set it up - it only takes a moment." },
+            { "Choose a layout",    "How your games are laid out. You can change it any time in Theming." },
+            { "Pick a theme",       "Applied as you browse. Make your own later in Theming > Themes." },
+            { "Good to know",       "A few things worth knowing before you start." },
+            { "You're all set",     "Enjoy sLaunch." },
+        };
+        const int step = m_oobe_step;
+
+        // ---- progress + heading ----
+        {
+            const int seg = 64, gap = 10, total = kOobeSteps * seg + (kOobeSteps - 1) * gap;
+            for (int i = 0; i < kOobeSteps; i++) {
+                const int x = (W - total) / 2 + i * (seg + gap);
+                const SDL_Color c = (i <= step) ? t.accent : WithAlpha(t.dim, 90);
+                m_gfx->FillRect(x, 36, seg, 3, c);
+            }
+            m_gfx->TextCentered(FontSize::Title, W / 2, 62, t.title, T(pages[step].title));
+            m_gfx->TextCentered(FontSize::Normal, W / 2, 130, t.dim,
+                                Ellipsize(T(pages[step].sub), W - 160, FontSize::Normal).c_str());
         }
 
-        // --- step content -----------------------------------------------------
-        // Faded out and back while the row slides, so the two axes never look
-        // like two independent screens - the same trick DrawMainXmb uses.
-        const float slide = std::min(1.0f, std::abs((float)m_oobe_step - m_oobe_scroll));
-        const Uint8 colA  = (Uint8)(255.0f * (1.0f - slide));
-        const int   lhN   = m_gfx->LineHeight(FontSize::Normal);
-        const int   lhS   = m_gfx->LineHeight(FontSize::Small);
+        // A preview card: the screenshot, or a named placeholder when the
+        // file is missing (an SD card set up without the previews folder).
+        auto preview = [&](int mode, float x, float y, float w, float h, Uint8 a, bool sel) {
+            SDL_Texture *tex = OobePreview(mode);
+            if (sel) {                                 // a thin frame, nothing more
+                const SDL_Color f = WithAlpha(t.accent, a);
+                m_gfx->FillRect((int)x - 3, (int)y - 3, (int)w + 6, 3, f);
+                m_gfx->FillRect((int)x - 3, (int)(y + h), (int)w + 6, 3, f);
+                m_gfx->FillRect((int)x - 3, (int)y, 3, (int)h, f);
+                m_gfx->FillRect((int)(x + w), (int)y, 3, (int)h, f);
+            }
+            m_gfx->FillRect((int)x, (int)y, (int)w, (int)h, WithAlpha(t.bg_bottom, a));
+            if (tex) m_gfx->DrawImage(tex, (int)x, (int)y, (int)w, (int)h, a);
+            if (!tex)
+                m_gfx->TextCentered(FontSize::Large, (int)(x + w / 2), (int)(y + h / 2 - 20),
+                                    WithAlpha(t.dim, a), T(kLayoutNames[mode]));
+        };
 
-        switch (m_oobe_step) {
-            case 0:   // Welcome
-                // The product name takes the active row - the slot the curve
-                // pushes clear of the tab bar - with the tagline in the band
-                // underneath, where an entry's sublabel goes.
-                m_gfx->Text(FontSize::Title, colX,
-                            rowY(0) - m_gfx->LineHeight(FontSize::Title) / 2,
-                            WithAlpha(t.title, colA), "sLaunch");
-                m_gfx->FillRect(colX, rowY(0) + 34, 220, 3, WithAlpha(t.accent, colA));
-                m_gfx->Text(FontSize::Normal, colX, rowY(0) + 56,
-                            WithAlpha(t.fg, colA), T("A clean HOME Menu replacement"));
-                m_gfx->Text(FontSize::Small, colX, rowY(1) - lhS / 2,
-                            WithAlpha(t.dim, colA),
-                            T("Let's set it up - just a few seconds."));
+        switch (step) {
+            case 0: {   // three layouts fanned out, to show what this is
+                preview((int)UiMode::XMB, (W - 640) / 2.0f, 200.0f, 640.0f, 360.0f, 255, false);
                 DrawHint({ {{"a"}, "Get started"} });
                 break;
+            }
+            case 1: {   // layout gallery
+                const int n = (int)UiMode::Count, cur = (int)m_ui_mode;
+                // Chase the choice the short way round, so wrapping from Deck
+                // to List slides one step instead of across the whole gallery.
+                float target = (float)cur;
+                while (target - m_oobe_gallery >  n * 0.5f) target -= n;
+                while (target - m_oobe_gallery < -n * 0.5f) target += n;
+                m_oobe_gallery += (target - m_oobe_gallery) * 0.22f;
+                if (std::abs(target - m_oobe_gallery) < 0.002f) m_oobe_gallery = target;
 
-            case 1: {   // Theme - applied live as you scroll
-                std::vector<std::string> labels, values;
-                for (int i = 0; i < m_theme.Count(); i++) {
-                    labels.push_back(m_theme.At(i).name);
-                    values.push_back(i == m_theme_cursor ? T("Applied") : std::string());
+                std::vector<std::pair<float, int>> order;   // |d|, virtual index
+                for (int k = -2; k <= 2; k++) {
+                    const int v = (int)lroundf(m_oobe_gallery) + k;
+                    order.push_back({ std::abs((float)v - m_oobe_gallery), v });
                 }
-                DrawCarouselXmb(labels, values, m_theme_cursor, m_sub_scroll, colA);
+                std::sort(order.begin(), order.end(), [](auto &p, auto &q) { return p.first > q.first; });
+                for (auto &o : order) {
+                    const float d  = (float)o.second - m_oobe_gallery;
+                    const float ad = std::min(std::abs(d), 1.5f);
+                    const float w  = 580.0f * (1.0f - std::min(ad, 1.0f) * 0.34f);
+                    const float h  = w * 9.0f / 16.0f;
+                    const float cx = W / 2.0f + d * 440.0f;
+                    const float cy = 355.0f;
+                    const Uint8 a  = (Uint8)(255.0f - ad * 120.0f);
+                    const int mode = ((o.second % n) + n) % n;
+                    preview(mode, cx - w / 2, cy - h / 2, w, h, a, mode == cur && ad < 0.5f);
+                }
+                m_gfx->TextCentered(FontSize::Large, W / 2, 540, t.title, T(kLayoutNames[cur]));
+                if (cur == (int)UiMode::XMB) {             // the one we suggest
+                    const int nw = m_gfx->TextWidth(FontSize::Large, T(kLayoutNames[cur]));
+                    m_gfx->Text(FontSize::Small, W / 2 + nw / 2 + 14, 552, t.accent, T("Recommended"));
+                }
+                m_gfx->TextCentered(FontSize::Normal, W / 2, 588, t.dim, T(kLayoutDesc[cur]));
+                for (int i = 0; i < n; i++) {               // where you are in the gallery
+                    const int dx = W / 2 + (i - n / 2) * 22 + 11, dy = 638;
+                    m_gfx->FillRect(dx - 4, dy - 4, 8, 8, i == cur ? t.accent : WithAlpha(t.dim, 110));
+                }
+                DrawHint({ {{"left","right"}, "Choose"}, {{"a"}, "Next"}, {{"b"}, "Back"} });
+                break;
+            }
+            case 2: {   // themes, each with its colours
+                const int n = m_theme.Count();
+                m_oobe_list += ((float)m_theme_cursor - m_oobe_list) * 0.25f;
+                if (std::abs((float)m_theme_cursor - m_oobe_list) < 0.01f) m_oobe_list = (float)m_theme_cursor;
+                const int rowH = 62, listW = 620, x = (W - listW) / 2, cy = 380;
+                for (int i = 0; i < n; i++) {
+                    const float d = (float)i - m_oobe_list;
+                    if (std::abs(d) > 3.4f) continue;
+                    const int   y = cy + (int)(d * rowH) - (rowH - 12) / 2;
+                    const Uint8 a = (Uint8)std::max(60.0f, 255.0f - std::abs(d) * 60.0f);
+                    const bool  sel = (i == m_theme_cursor);
+                    const Theme &th = m_theme.At(i);
+                    const int lh = m_gfx->LineHeight(FontSize::Normal);
+                    const int ty = y + (rowH - 12 - lh) / 2;
+                    if (sel) m_gfx->Text(FontSize::Normal, x - 30, ty, WithAlpha(t.accent, a), ">");
+                    m_gfx->Text(FontSize::Normal, x, ty, WithAlpha(sel ? t.accent : t.fg, a), th.name);
+                    const SDL_Color sw[4] = { th.bg_top, th.bg_bottom, th.accent, th.title };
+                    for (int k = 0; k < 4; k++) {           // the theme's own colours
+                        const int sx = x + listW - (4 - k) * 26, sy = y + (rowH - 12) / 2 - 9;
+                        m_gfx->FillRect(sx - 1, sy - 1, 20, 20, WithAlpha(t.dim, (Uint8)(a / 3)));
+                        m_gfx->FillRect(sx, sy, 18, 18, WithAlpha(sw[k], a));
+                    }
+                }
                 DrawHint({ {{"up","down"}, "Choose"}, {{"a"}, "Next"}, {{"b"}, "Back"} });
                 break;
             }
-
-            case 2: {   // Layout
-                const char *names[8] = { T("List"), T("Line"), T("Grid"), T("Cover"),
-                                         T("Shelf"), T("XMB"), T("Flow"), T("Deck") };
-                const char *desc[8]  = { T("A simple scrolling text list"),
-                                         T("A cover carousel (EmulationStation)"),
-                                         T("A grid of app icons"),
-                                         T("One fullscreen cover at a time"),
-                                         T("An Xbox-360-style cover shelf"),
-                                         T("PSP/PS3 cross-media bar"),
-                                         T("A 3D coverflow shelf"),
-                                         T("Steam Deck: hero, covers and news") };
-                std::vector<std::string> labels, values;
-                for (int i = 0; i < (int)UiMode::Count; i++)
-                    { labels.push_back(names[i]); values.emplace_back(); }
-
-                const int cur = (int)m_ui_mode;
-                DrawCarouselXmb(labels, values, cur, m_sub_scroll, colA);
-                // The description rides the selected row into place instead of
-                // sitting at a fixed y, so it stays attached to the row it is
-                // describing while the column is still moving. m_sub_scroll has
-                // just been advanced by the call above, so this matches the
-                // frame that was actually drawn.
-                m_gfx->Text(FontSize::Small, colX,
-                            rowY((float)cur - m_sub_scroll) + lhN / 2 + 6,
-                            WithAlpha(t.dim, colA), desc[cur]);
-                DrawHint({ {{"up","down"}, "Choose"}, {{"a"}, "Next"}, {{"b"}, "Back"} });
-                break;
-            }
-
-            case 3: {   // Good to know
+            case 3: {   // tips, as four cards
                 struct Tip { const char *key; const char *val; };
-                const Tip tips[] = {
-                    { "X",        T("Options on any entry: favourite, rename, move") },
-                    { "Theming",  T("Fonts, colours, background music, widgets") },
-                    { "Homebrew", T("Browse .nro files and pin them to this menu") },
-                    { "HOME",     T("Suspends your game and brings this back") },
+                const Tip tips[4] = {
+                    { "X",        "Options on any entry: favourite, rename, move" },
+                    { "Theming",  "Fonts, colours, background music, widgets" },
+                    { "Homebrew", "Browse .nro files and pin them to this menu" },
+                    { "HOME",     "Suspends your game and brings this back" },
                 };
-                // The button name takes the slot an XMB row gives its icon, so
-                // these read as ordinary entries rather than as a table dropped
-                // into the middle of the menu.
+                const int keyX = 250, textX = 440, y0 = 230, rowGap = 70;
+                const int lhN = m_gfx->LineHeight(FontSize::Normal);
                 for (int i = 0; i < 4; i++) {
-                    const int y  = 330 + i * 74;
-                    const int bx = kXmbAnchorX - kXmbIcon / 2;
-                    const int kw = m_gfx->TextWidth(FontSize::Small, tips[i].key) + 28;
-                    const int kh = lhS + 16;
-                    m_gfx->FillRect(bx, y - kh / 2, kw, kh,
-                                    WithAlpha(t.accent, (Uint8)(colA * 34 / 255)));
-                    m_gfx->Text(FontSize::Small, bx + 14, y - lhS / 2,
-                                WithAlpha(t.accent, colA), tips[i].key);
-                    m_gfx->Text(FontSize::Normal, textX, y - lhN / 2,
-                                WithAlpha(t.fg, colA),
-                                Ellipsize(tips[i].val, W - 60 - textX,
-                                          FontSize::Normal).c_str());
+                    const int y = y0 + i * rowGap;
+                    m_gfx->Text(FontSize::Normal, keyX, y, t.accent, tips[i].key);
+                    m_gfx->Text(FontSize::Normal, textX, y, t.fg,
+                                Ellipsize(T(tips[i].val), W - 80 - textX, FontSize::Normal).c_str());
+                    (void)lhN;
                 }
                 DrawHint({ {{"a"}, "Next"}, {{"b"}, "Back"} });
                 break;
             }
-
-            default: {  // Done
-                m_gfx->Text(FontSize::Large, colX,
-                            rowY(0) - m_gfx->LineHeight(FontSize::Large) / 2,
-                            WithAlpha(t.title, colA), T("You're all set"));
-                m_gfx->FillRect(colX, rowY(0) + 34, 220, 3, WithAlpha(t.accent, colA));
-                m_gfx->Text(FontSize::Small, colX, rowY(0) + 56,
-                            WithAlpha(t.dim, colA), T("Enjoy sLaunch."));
-                // The last choice, drawn as an XMB settings row: label on the
-                // column edge, value in the setting column, same as every other
-                // setting in the menu.
-                m_gfx->Text(FontSize::Normal, colX, rowY(1) - lhN / 2,
-                            WithAlpha(t.title, colA),
-                            Ellipsize(T("Check for updates on startup"),
-                                      valueX - 24 - colX, FontSize::Normal).c_str());
-                m_gfx->Text(FontSize::Normal, valueX, rowY(1) - lhN / 2,
-                            WithAlpha(t.accent, colA),
-                            m_check_updates ? T("On") : T("Off"));
+            default: {  // done: the one last choice
+                const int rw = 640, rh = 64, x = (W - rw) / 2, y = 300;
+                m_gfx->Text(FontSize::Normal, x - 30, y + (rh - m_gfx->LineHeight(FontSize::Normal)) / 2,
+                            t.accent, ">");
+                const int lh = m_gfx->LineHeight(FontSize::Normal);
+                const char *val = m_check_updates ? T("On") : T("Off");
+                m_gfx->Text(FontSize::Normal, x + 24, y + (rh - lh) / 2, t.title,
+                            T("Check for updates on startup"));
+                m_gfx->Text(FontSize::Normal, x + rw - 24 - m_gfx->TextWidth(FontSize::Normal, val),
+                            y + (rh - lh) / 2, t.accent, val);
+                m_gfx->TextCentered(FontSize::Small, W / 2, y + rh + 26, t.dim,
+                                    T("Everything here can be changed later in Theming."));
                 DrawHint({ {{"left","right"}, "Change"}, {{"a"}, "Finish"}, {{"b"}, "Back"} });
                 break;
             }
         }
-
-        // Step counter where XMB puts its entry index.
-        if (m_show_counter) {
-            char pos[32];
-            snprintf(pos, sizeof(pos), "%d/%d", m_oobe_step + 1, kSteps);
-            const int pw = m_gfx->TextWidth(FontSize::Small, pos);
-            m_gfx->Text(FontSize::Small, W - 8 - pw, H - 8 - lhS, t.dim, pos);
-        }
+        (void)H;
     }
     // Rows currently shown in Theming. The SteamGridDB key is only meaningful
     // to the coverflow, so in every other layout it is absent rather than
@@ -1746,9 +1857,17 @@ namespace sl::menu::ui {
             // Both of these only mean anything to the coverflow.
             // The key row belongs to any layout that draws box art; the Flow
             // tuning screen only to Flow.
+            if (i == TH_TdbRegion && m_ui_mode != UiMode::Flow &&
+                                     m_ui_mode != UiMode::Deck && m_ui_mode != UiMode::Shelf) continue;
+            if (i == TH_Sgdb && m_ui_mode != UiMode::Flow &&
+                                m_ui_mode != UiMode::Deck && m_ui_mode != UiMode::Shelf) continue;
+            if (i == TH_SgdbKey && !m_sgdb_enabled) continue;
             if (i == TH_SgdbKey && m_ui_mode != UiMode::Flow &&
                                    m_ui_mode != UiMode::Deck) continue;
             if (i == TH_FlowSet && m_ui_mode != UiMode::Flow) continue;
+            // XMB gives the shortcuts a column each whatever this says, so
+            // there the row would be a switch wired to nothing.
+            if (i == TH_Shortcuts && (m_ui_mode == UiMode::XMB || !m_retroarch)) continue;
             if (i == TH_ShelfVert && m_ui_mode != UiMode::Shelf) continue;
             // The wall shape is only meaningful where there is a wall.
             if ((i == TH_TileCols || i == TH_TileRows) && m_ui_mode != UiMode::Grid) continue;
@@ -1783,8 +1902,9 @@ namespace sl::menu::ui {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
             T("Icon pack"), T("Anti-aliasing"), T("Vertical covers"),
             T("Columns"), T("Rows"),
-            T("SteamGridDB key"), T("Flow layout"),
+            T("Box art region"), T("SteamGridDB"), T("SteamGridDB key"), T("Flow layout"),
             T("Wrap around"), T("Button hints"), T("Position counter"),
+            T("RetroArch games"), T("Shortcuts everywhere"),
             T("Fonts"), T("Language"),
             T("Music"), T("Widgets"),
             T("Menu entries"),
@@ -1793,6 +1913,7 @@ namespace sl::menu::ui {
         };
         std::vector<std::string> values(labels.size());
         values[TH_UiMode]      = modes[(int)m_ui_mode];
+        if (m_ui_mode == UiMode::XMB) values[TH_UiMode] += std::string("  (") + T("recommended") + ")";
         values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_ListIcons]   = m_list_icons ? T("On") : T("Off");
         values[TH_IconPack]    = (m_icon_pack_idx > 0 &&
@@ -1810,6 +1931,10 @@ namespace sl::menu::ui {
         values[TH_Wrap]        = m_wrap_nav ? T("On") : T("Off");
         values[TH_Hints]       = m_show_hints ? T("On") : T("Off");
         values[TH_Counter]     = m_show_counter ? T("On") : T("Off");
+        values[TH_Shortcuts]   = m_shortcuts_everywhere ? T("On") : T("Off");
+        values[TH_RetroArch]   = m_retroarch ? T("On") : T("Off");
+        values[TH_TdbRegion]   = kTdbRegions[std::clamp(m_tdb_region, 0, kTdbRegionCount - 1)];
+        values[TH_Sgdb]        = m_sgdb_enabled ? T("On") : T("Off");
         values[TH_SgdbKey]     = SgdbKeyPresent() ? T("Set") : T("Not set");
         values[TH_Language]    = kLangs[m_lang_idx].name
                                ? kLangs[m_lang_idx].name : T("Automatic");
@@ -1836,63 +1961,183 @@ namespace sl::menu::ui {
         DrawHint({ {{"up","down"}, "Select"}, {{"a"}, "Open"}, {{"left","right"}, "Change"}, {{"b"}, "Back"} });
     }
 
-    // ---- Music submenu -----------------------------------------------------
+    // ---- Music player ------------------------------------------------------
+    // Now playing on the left (cover, title, state), the whole library on the
+    // right, a progress bar under both. The list cursor is independent of the
+    // playing track: browse freely, A plays what is selected.
     Menu::Action Menu::OnButtonMusic(Btn b) {
-        if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = TH_Music; return Action::None; }
-        if (b == Btn::Down) m_music_cursor = (m_music_cursor + 1) % MU_Count;
-        if (b == Btn::Up)   m_music_cursor = (m_music_cursor + MU_Count - 1) % MU_Count;
-
-        const bool left = (b == Btn::Left), right = (b == Btn::Right), a = (b == Btn::A);
-        switch (m_music_cursor) {
-            case MU_Enabled:
-                if (left || right || a) m_music.SetEnabled(!m_music.Enabled());
+        const int n = m_music.TrackCount();
+        if (b == Btn::B) {
+            m_screen = m_from_theming_music ? Screen::Theming : BackTarget();
+            if (m_from_theming_music) m_sub_scroll = TH_Music;
+            m_from_theming_music = false;
+            return Action::None;
+        }
+        if (n > 0) {
+            if (b == Btn::Down) m_music_cursor = (m_music_cursor + 1) % n;
+            if (b == Btn::Up)   m_music_cursor = (m_music_cursor + n - 1) % n;
+        }
+        switch (b) {
+            case Btn::A:
+                if (n == 0) break;
+                if (m_music_cursor == m_music.TrackIndex())
+                    m_music.SetEnabled(!m_music.Enabled());   // play / pause
+                else {
+                    m_music.SetEnabled(true);
+                    m_music.SelectTrack(m_music_cursor);
+                }
                 break;
-            case MU_Track:
-                if (right || a) m_music.Next();
-                else if (left)  m_music.Prev();
-                break;
-            case MU_Volume:
-                if (right || a) m_music.SetVolume(m_music.Volume() + 5);
-                else if (left)  m_music.SetVolume(m_music.Volume() - 5);
-                break;
-            case MU_Shuffle:
-                if (left || right || a) m_music.ToggleShuffle();
-                break;
-            case MU_Back:
-                if (a) { m_screen = Screen::Theming; m_sub_scroll = TH_Music; }
-                break;
+            case Btn::Left:  m_music.Seek(m_music.Position() - 10.0); break;
+            case Btn::Right: m_music.Seek(m_music.Position() + 10.0); break;
+            case Btn::L:     m_music.Prev(); m_music_cursor = m_music.TrackIndex(); break;
+            case Btn::R:     m_music.Next(); m_music_cursor = m_music.TrackIndex(); break;
+            case Btn::X:     m_music.CycleRepeat(); break;
+            case Btn::Y:     m_music.ToggleShuffle(); break;
+            case Btn::Plus:  m_music.SetVolume(m_music.Volume() + 5); break;
+            case Btn::Minus: m_music.SetVolume(m_music.Volume() - 5); break;
+            default: break;
         }
         return Action::None;
     }
+    void Menu::OpenMusicPlayer(bool from_theming) {
+        m_screen = Screen::Music;
+        m_from_theming_music = from_theming;
+        m_music_cursor = m_music.TrackIndex();
+        const int n = m_music.TrackCount();       // opens settled on what is playing
+        m_music_scroll = (float)std::clamp(m_music_cursor - kMuRows / 2, 0, std::max(0, n - kMuRows));
+    }
+    SDL_Texture *Menu::MusicArt() {
+        const int i = m_music.TrackCount() ? m_music.TrackIndex() : -1;
+        if (i == m_music_art_idx) return m_music_art;
+        if (m_music_art) { m_gfx->FreeImage(m_music_art); m_music_art = nullptr; }
+        m_music_art_idx = i;
+        const std::vector<u8> img = m_music.CoverArt(i);
+        if (!img.empty()) m_music_art = m_gfx->LoadImageScaled(img.data(), img.size(), 360, 360);
+        return m_music_art;
+    }
+    std::string Menu::FormatTime(double seconds) {
+        const int t = (int)(seconds < 0.0 ? 0.0 : seconds);
+        char buf[16];
+        if (t >= 3600) snprintf(buf, sizeof(buf), "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60);
+        else           snprintf(buf, sizeof(buf), "%d:%02d", t / 60, t % 60);
+        return buf;
+    }
     void Menu::DrawMusic() {
-        DrawTopBar("Music");
         const Theme &t = m_theme.Current();
+        const int     W = gfx::Gfx::Width;
+        SDL_Texture *art = MusicArt();
+        if (art) m_gfx->DrawCover(art, 40);
+        DrawTopBar("Music");
 
-        std::vector<std::string> labels = {
-            T("Enabled"), T("Track"), T("Volume"), T("Shuffle"), T("Back")
-        };
-        std::vector<std::string> values(labels.size());
-        values[MU_Enabled] = m_music.Enabled() ? T("On") : T("Off");
-        if (m_music.TrackCount() == 0) {
-            values[MU_Track] = T("No music found");
-        } else {
-            std::string nm = m_music.CurrentName();
-            if (nm.size() > 30) nm = nm.substr(0, 29) + "...";
-            char c[64];
-            snprintf(c, sizeof(c), "%s  (%d/%d)", nm.c_str(),
-                     m_music.TrackIndex() + 1, m_music.TrackCount());
-            values[MU_Track] = c;
-        }
-        char vol[16];
-        snprintf(vol, sizeof(vol), "%d%%", m_music.Volume());
-        values[MU_Volume]  = vol;
-        values[MU_Shuffle] = m_music.Shuffle() ? T("On") : T("Off");
-
-        DrawCarousel(labels, values, m_music_cursor, m_sub_scroll);
-        if (m_music.TrackCount() == 0)
-            m_gfx->TextCentered(FontSize::Small, gfx::Gfx::Width / 2, 612, t.dim,
+        const int n = m_music.TrackCount();
+        if (n == 0) {
+            m_gfx->TextCentered(FontSize::Normal, W / 2, 300, t.dim, T("No music found"));
+            m_gfx->TextCentered(FontSize::Small, W / 2, 340, t.dim,
                                 T("Put mp3/ogg files in sdmc:/slaunch/music"));
-        DrawHint({ {{"up","down"}, "Select"}, {{"a","left","right"}, "Change"}, {{"b"}, "Back"} });
+            DrawHint({ {{"b"}, "Back"} });
+            return;
+        }
+        const int cur = m_music.TrackIndex();
+
+        // ---- now playing ----
+        m_gfx->FillRect(kMuArtX - 2, kMuArtY - 2, kMuArt + 4, kMuArt + 4, WithAlpha(t.dim, 60));
+        if (art) {
+            m_gfx->DrawImage(art, kMuArtX, kMuArtY, kMuArt, kMuArt, 255);
+        } else {
+            m_gfx->FillRect(kMuArtX, kMuArtY, kMuArt, kMuArt, WithAlpha(t.bg_bottom, 200));
+            if (SDL_Texture *g = SystemIcon(ItemKind::MusicPlayer))
+                m_gfx->DrawImageTinted(g, kMuArtX + kMuArt / 2 - 60, kMuArtY + kMuArt / 2 - 60,
+                                       120, 120, IconTint(t, 255));
+        }
+        const int ty = kMuArtY + kMuArt + 18;
+        m_gfx->Text(FontSize::Normal, kMuArtX, ty, t.title,
+                    Ellipsize(m_music.CurrentName(), kMuListX - kMuArtX - 30, FontSize::Normal).c_str());
+        static const char *kRepeat[] = { "Repeat all", "Repeat one", "Repeat off" };
+        std::string state = std::string(m_music.Enabled() ? T("Playing") : T("Paused")) +
+                            "  ·  " + T(kRepeat[m_music.RepeatMode()]);
+        if (m_music.Shuffle()) state += std::string("  ·  ") + T("Shuffle");
+        char vol[48];
+        snprintf(vol, sizeof(vol), "%s %d%%", T("Volume"), m_music.Volume());
+        const int sy = ty + m_gfx->LineHeight(FontSize::Normal) + 6;
+        const int sw = kMuListX - kMuArtX - 30;
+        m_gfx->Text(FontSize::Small, kMuArtX, sy, t.dim, Ellipsize(state, sw, FontSize::Small).c_str());
+        m_gfx->Text(FontSize::Small, kMuArtX, sy + m_gfx->LineHeight(FontSize::Small) + 4, t.dim, vol);
+
+        // ---- library ----
+        // m_music_scroll is the top row, chasing whatever keeps the cursor
+        // centred - clamped, so a short library starts at the top.
+        const float top = (float)std::clamp(m_music_cursor - kMuRows / 2, 0, std::max(0, n - kMuRows));
+        m_music_scroll += (top - m_music_scroll) * 0.30f;
+        if (std::abs(top - m_music_scroll) < 0.01f) m_music_scroll = top;
+        const int listW = W - 80 - kMuListX;
+        const int first = std::max(0, (int)m_music_scroll - 1);
+        const int last  = std::min(n - 1, (int)m_music_scroll + kMuRows + 1);
+        for (int i = first; i <= last; i++) {
+            const float d = (float)i - m_music_scroll;
+            const int   y = kMuListY + (int)(d * kMuRowH);
+            if (y < kMuListY - 4 || y > kMuListY + (kMuRows - 1) * kMuRowH + 4) continue;
+            const Uint8 a = 255;
+            const bool  sel = (i == m_music_cursor);
+            if (sel) m_gfx->FillRect(kMuListX - 12, y, listW + 24, kMuRowH - 4, WithAlpha(t.accent, 40));
+            if (i == cur) {                          // what is playing
+                const int cy = y + (kMuRowH - 4) / 2;
+                if (m_music.Enabled())
+                    m_gfx->FillTriangle(kMuListX, cy - 7, kMuListX + 11, cy, kMuListX, cy + 7, WithAlpha(t.accent, a));
+                else {
+                    m_gfx->FillRect(kMuListX, cy - 7, 4, 14, WithAlpha(t.accent, a));
+                    m_gfx->FillRect(kMuListX + 7, cy - 7, 4, 14, WithAlpha(t.accent, a));
+                }
+            }
+            const double dur = m_music.Duration(i);
+            const std::string dtxt = dur > 0.0 ? FormatTime(dur) : std::string();
+            const int dw = m_gfx->TextWidth(FontSize::Small, dtxt.c_str());
+            const int lh = m_gfx->LineHeight(FontSize::Small);
+            const int yy = y + (kMuRowH - 4 - lh) / 2;
+            m_gfx->Text(FontSize::Small, kMuListX + 22, yy,
+                        WithAlpha(i == cur ? t.accent : (sel ? t.title : t.fg), a),
+                        Ellipsize(m_music.TrackName(i), listW - 22 - dw - 20, FontSize::Small).c_str());
+            if (!dtxt.empty())
+                m_gfx->Text(FontSize::Small, kMuListX + listW - dw, yy, WithAlpha(t.dim, a), dtxt.c_str());
+        }
+
+        // ---- progress ----
+        const double dur = m_music.Duration(cur);
+        const double pos = std::min(m_music.Position(), dur > 0.0 ? dur : 1e9);
+        const int barW = W - 80 - kMuArtX;
+        m_gfx->FillRect(kMuArtX, kMuBarY, barW, 6, WithAlpha(t.dim, 70));
+        if (dur > 0.0)
+            m_gfx->FillRect(kMuArtX, kMuBarY, (int)(barW * (pos / dur)), 6, t.accent);
+        const std::string el = FormatTime(pos), tot = dur > 0.0 ? FormatTime(dur) : std::string("--:--");
+        const int lh = m_gfx->LineHeight(FontSize::Small);
+        m_gfx->Text(FontSize::Small, kMuArtX, kMuBarY - lh - 6, t.fg, el.c_str());
+        m_gfx->Text(FontSize::Small, kMuArtX + barW - m_gfx->TextWidth(FontSize::Small, tot.c_str()),
+                    kMuBarY - lh - 6, t.dim, tot.c_str());
+
+        DrawHint({ {{"a"}, m_music_cursor == cur && m_music.Enabled() ? "Pause" : "Play"},
+                   {{"left","right"}, "Seek"}, {{"l","r"}, "Track"},
+                   {{"x"}, "Repeat"}, {{"y"}, "Shuffle"}, {{"minus","plus"}, "Volume"},
+                   {{"b"}, "Back"} });
+    }
+    // Touch: a track row plays it, the bar seeks, the cover plays / pauses.
+    void Menu::OnTouchMusic(int x, int y) {
+        const int n = m_music.TrackCount();
+        if (n == 0) return;
+        const int W = gfx::Gfx::Width;
+        if (y >= kMuBarY - 20 && y <= kMuBarY + 26 && x >= kMuArtX && x <= W - 80) {
+            const double dur = m_music.Duration(m_music.TrackIndex());
+            if (dur > 0.0) m_music.Seek(dur * (x - kMuArtX) / (double)(W - 80 - kMuArtX));
+            return;
+        }
+        if (x >= kMuArtX && x < kMuArtX + kMuArt && y >= kMuArtY && y < kMuArtY + kMuArt) {
+            m_music.SetEnabled(!m_music.Enabled());
+            return;
+        }
+        if (x >= kMuListX - 12 && y >= kMuListY && y < kMuListY + kMuRows * kMuRowH) {
+            const int i = (int)lroundf(m_music_scroll) + (y - kMuListY) / kMuRowH;
+            if (i < 0 || i >= n) return;
+            m_music_cursor = i;
+            OnButtonMusic(Btn::A);
+        }
     }
     // ---- Homebrew (.nro) browser -------------------------------------------
     void Menu::LoadHbPins() {
@@ -1996,18 +2241,31 @@ namespace sl::menu::ui {
     void Menu::HbScanTrampoline(void *self) {
         Menu *m = static_cast<Menu *>(self);
         m->m_hb_scan_result = hb::Scan();
+        m->m_shortcut_scan_result = hb::ScanShortcuts();
         m->m_hb_scan_done.store(true, std::memory_order_release);
+    }
+    // Swap in a scan's shortcuts and rebuild the key -> art-path map the icon
+    // cache consults. Built here rather than looked up per draw so the cache's
+    // resolver stays a hash lookup, which is what it is called on every visible
+    // entry every frame.
+    void Menu::AdoptShortcuts(std::vector<hb::Shortcut> &&found) {
+        m_shortcuts = std::move(found);
+        m_shortcut_art.clear();
+        for (const auto &sc : m_shortcuts)
+            if (!sc.icon_path.empty()) m_shortcut_art[sc.icon_key] = sc.icon_path;
     }
     void Menu::StartHbScan() {
         if (m_hb_scanned || m_hb_scan_running) return;
         m_hb_scan_done.store(false, std::memory_order_release);
         m_hb_scan_result.clear();
+        m_shortcut_scan_result.clear();
         if (R_SUCCEEDED(threadCreate(&m_hb_thread, &Menu::HbScanTrampoline, this,
                                      nullptr, 0x20000, 0x3B, -2))) {
             threadStart(&m_hb_thread);
             m_hb_scan_running = true;
         } else {
             m_hb = hb::Scan();   // fallback: synchronous (may briefly stall)
+            AdoptShortcuts(hb::ScanShortcuts());
             m_hb_scanned = true;
             RebuildItems();
         }
@@ -2018,6 +2276,7 @@ namespace sl::menu::ui {
         threadClose(&m_hb_thread);
         m_hb_scan_running = false;
         m_hb = std::move(m_hb_scan_result);
+        AdoptShortcuts(std::move(m_shortcut_scan_result));
         m_hb_scanned = true;
         if (m_hb_cursor >= (int)m_hb.size()) m_hb_cursor = m_hb.empty() ? 0 : (int)m_hb.size() - 1;
         RebuildItems();
@@ -2030,7 +2289,7 @@ namespace sl::menu::ui {
     // ---- Album (screenshot browser) -----------------------------------------
     // The console files captures as
     // sdmc:/Nintendo/Album/<year>/<month>/<day>/<timestamp>-<id>.jpg (.mp4 for
-    // clips, which are skipped - we have no video decoder). Walking that fixed
+    // clips, played through gfx::VideoPlayer). Walking that fixed
     // four-level shape with opendir is enough; there is no need for a general
     // recursive walker, and the depth cap means a stray directory cannot send us
     // wandering over the card.
@@ -2068,9 +2327,8 @@ namespace sl::menu::ui {
                     std::vector<std::string> shots;
                     entries(d, shots, true);
                     for (auto &s : shots) {
-                        // Video clips share the tree; we can only show stills.
-                        if (s.size() > 4 &&
-                            strcasecmp(s.c_str() + s.size() - 4, ".jpg") == 0)
+                        const char *ext = s.c_str() + s.size() - 4;
+                        if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".mp4") == 0)
                             m_album.push_back(std::move(s));
                     }
                 }
@@ -2094,6 +2352,11 @@ namespace sl::menu::ui {
         if (m_album_tex_idx == m_album_cursor && m_album_tex) return;
 
         FreeAlbumTexture();
+        // Clips have no still to decode; the panel previews them live instead.
+        if (IsVideoPath(m_album[m_album_cursor].c_str())) {
+            m_album_tex_idx = m_album_cursor;
+            return;
+        }
         m_album_tex     = m_gfx->LoadImage(m_album[m_album_cursor].c_str());
         m_album_tex_idx = m_album_cursor;   // cached even on failure, so a
                                             // corrupt capture is not retried
@@ -2109,28 +2372,137 @@ namespace sl::menu::ui {
         m_album_cursor = 0;
         m_album_scroll = 0.0f;   // opens settled, not mid-slide
         m_album_full   = false;
+        StopAlbumVideo();        // a clip from a previous visit is not left playing
         FreeAlbumTexture();
     }
+    // Clip playback: the selection is played in the menu on its own VideoPlayer
+    // (the wallpaper's m_video_player keeps running underneath it), with the
+    // background music muted for the clip's duration. PlayAlbumVideo mutes the
+    // music only once the clip has actually opened - on failure the music is
+    // left exactly as it was. StopAlbumVideo restores the remembered state, so
+    // a user who had music off does not wake it up by stopping a clip.
+    // Full-screen playback, with sound. Music is paused for the clip and put
+    // back as it was by StopAlbumVideo - remembered only on the first clip of
+    // a run, so stepping clip to clip does not overwrite it with "off".
+    bool Menu::PlayAlbumVideo(const std::string &path) {
+        if (!m_album_video_active) m_album_music_was_on = m_music.Enabled();
+        m_album_video.Close();
+        m_album_video_path = path;
+        // False on the no-decoder stub (e.g. the Windows simulator), where
+        // nothing can be played at all - the caller shows a status hint.
+        m_album_video_ok = m_album_video.Open(m_gfx, path.c_str(), false, true);
+        if (!m_album_video_ok) {
+            if (m_album_video_active) StopAlbumVideo();
+            return false;
+        }
+        m_album_video_active = true;
+        m_music.SetEnabled(false);   // pauses, keeping the play position
+        return true;
+    }
+    // Silent, looping, for the list's preview panel. The path is recorded
+    // even when the open fails, so a broken clip is tried once, not per frame.
+    void Menu::PreviewAlbumVideo(const std::string &path) {
+        if (m_album_video_path == path) return;
+        m_album_video.Close();
+        m_album_video_path = path;
+        m_album_video_ok   = m_album_video.Open(m_gfx, path.c_str());
+    }
+    // Closes the preview too; only a playing clip has music to give back.
+    void Menu::StopAlbumVideo() {
+        m_album_video.Close();       // idempotent; joins the decode thread
+        m_album_video_path.clear();
+        m_album_video_ok = false;
+        if (!m_album_video_active) return;
+        m_album_video_active = false;
+        m_album_full = false;        // stopping a clip lands back on the list
+        m_music.SetEnabled(m_album_music_was_on);
+    }
+    // Put capture i on the full screen viewer: a clip starts playing, a
+    // photo just shows (EnsureAlbumTexture decodes it on the next draw).
+    void Menu::AlbumShow(int i) {
+        const int n = (int)m_album.size();
+        if (n == 0) return;
+        m_album_cursor = (i % n + n) % n;
+        m_album_scroll = (float)m_album_cursor;
+        m_album_slide_tick = armGetSystemTick();
+        const std::string &p = m_album[m_album_cursor];
+        if (IsVideoPath(p.c_str())) {
+            if (!PlayAlbumVideo(p)) SetStatus(T("Could not play that clip"));
+        } else {
+            StopAlbumVideo();
+        }
+        m_album_full = true;
+        AlbumPokeUi();
+    }
+    void Menu::AlbumPokeUi() { m_album_ui_tick = armGetSystemTick(); }
+
     Menu::Action Menu::OnButtonAlbum(Btn b) {
         const int n = (int)m_album.size();
 
+        // ---- full screen viewer ----
+        if (m_album_full) {
+            AlbumPokeUi();
+            const bool clip = m_album_video_active;
+            switch (b) {
+                case Btn::B:
+                    StopAlbumVideo();
+                    m_album_full = false;
+                    m_album_slideshow = false;
+                    return Action::None;
+                case Btn::Y:
+                    StopAlbumVideo(); FreeAlbumTexture();
+                    return Action::OpenAlbum;
+                case Btn::L: AlbumShow(m_album_cursor - 1); return Action::None;
+                case Btn::R: AlbumShow(m_album_cursor + 1); return Action::None;
+                case Btn::Left:
+                    if (clip) m_album_video.Seek(m_album_video.Position() - 5.0);
+                    else      AlbumShow(m_album_cursor - 1);
+                    return Action::None;
+                case Btn::Right:
+                    if (clip) m_album_video.Seek(m_album_video.Position() + 5.0);
+                    else      AlbumShow(m_album_cursor + 1);
+                    return Action::None;
+                case Btn::A:
+                    if (clip && m_album_video.Ended()) {        // play it again
+                        m_album_video.Seek(0.0);
+                        m_album_video.SetPaused(false);
+                    } else if (clip) {
+                        m_album_video.SetPaused(!m_album_video.Paused());
+                    } else {
+                        m_album_ui_pinned = !m_album_ui_pinned;  // photo: info on/off
+                    }
+                    return Action::None;
+                case Btn::X:
+                    m_album_slideshow = !m_album_slideshow;
+                    m_album_slide_tick = armGetSystemTick();
+                    SetStatus(m_album_slideshow ? "Slideshow on" : "Slideshow off");
+                    return Action::None;
+                default: return Action::None;
+            }
+        }
+
+        // ---- list ----
         if (b == Btn::B) {
-            if (m_album_full) { m_album_full = false; return Action::None; }
-            FreeAlbumTexture();          // don't hold a capture open in the menu
+            StopAlbumVideo();        // the list's preview, if one is running
+            FreeAlbumTexture();      // don't hold a capture open in the menu
             m_screen = BackTarget();
             return Action::None;
         }
         // Y hands off to the console's own Album applet, which is the only way
-        // to reach clips, sharing and deletion.
-        if (b == Btn::Y) { FreeAlbumTexture(); return Action::OpenAlbum; }
+        // to reach sharing and deletion. That closes the menu outright (see
+        // main.cpp), and Music::Exit persists its state for the next launch.
+        if (b == Btn::Y) { StopAlbumVideo(); FreeAlbumTexture(); return Action::OpenAlbum; }
         if (n == 0) return Action::None;
 
         const int was = m_album_cursor;
-        if (b == Btn::Down)  m_album_cursor = (m_album_cursor + 1) % n;
-        if (b == Btn::Up)    m_album_cursor = (m_album_cursor + n - 1) % n;
-        if (b == Btn::Right) m_album_cursor = (m_album_cursor + 1) % n;
-        if (b == Btn::Left)  m_album_cursor = (m_album_cursor + n - 1) % n;
-        if (b == Btn::A)     m_album_full   = !m_album_full;
+        if (b == Btn::Down || b == Btn::Right) m_album_cursor = (m_album_cursor + 1) % n;
+        if (b == Btn::Up   || b == Btn::Left)  m_album_cursor = (m_album_cursor + n - 1) % n;
+        if (b == Btn::A) { AlbumShow(m_album_cursor); return Action::None; }
+        if (b == Btn::X) {                      // slideshow from the selection
+            m_album_slideshow = true;
+            AlbumShow(m_album_cursor);
+            return Action::None;
+        }
 
         // Wrapping the ends is a jump, not a scroll: animating it would drag the
         // list past every capture in the library. Snap the animation to the new
@@ -2139,31 +2511,111 @@ namespace sl::menu::ui {
             m_album_scroll = (float)m_album_cursor;
         return Action::None;
     }
+
+    // "2026092312000000-ABCDEF.jpg" -> "2026-09-23  12:00:00". The console
+    // names every capture by its timestamp, so this is the capture's date.
+    static std::string CaptureDate(const std::string &path) {
+        const size_t slash = path.find_last_of('/');
+        const std::string f = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        if (f.size() < 14 || f.find_first_not_of("0123456789") < 14) return f;
+        return f.substr(0, 4) + "-" + f.substr(4, 2) + "-" + f.substr(6, 2) + "  " +
+               f.substr(8, 2) + ":" + f.substr(10, 2) + ":" + f.substr(12, 2);
+    }
+
+    // The viewer's info bar: date and position, and for a clip the transport.
+    // It fades in on any input and out a few seconds later, and stays while a
+    // clip is paused or a photo has it pinned.
+    void Menu::DrawAlbumViewerUi() {
+        const Theme &t = m_theme.Current();
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+        const bool clip = m_album_video_active;
+        const u64 ms = (armGetSystemTick() - m_album_ui_tick) * 1000 / armGetSystemTickFreq();
+        const bool held = clip ? (m_album_video.Paused() || m_album_video.Ended()) : m_album_ui_pinned;
+        float vis = held ? 1.0f : (ms < 2500 ? 1.0f : std::max(0.0f, 1.0f - (ms - 2500) / 400.0f));
+        if (vis <= 0.0f) return;
+        const Uint8 a = (Uint8)(255 * vis);
+
+        // Tall enough that its rows sit above the hint bar and the touch
+        // Back button, which share the bottom edge with it.
+        const int band = clip ? 160 : 120;
+        m_gfx->FillRect(0, H - band, W, band, SDL_Color{ 0, 0, 0, (Uint8)(160 * vis) });
+        const int lh = m_gfx->LineHeight(FontSize::Small);
+        const int y0 = H - band + 14;
+        m_gfx->Text(FontSize::Small, 40, y0, WithAlpha(t.fg, a),
+                    CaptureDate(m_album[m_album_cursor]).c_str());
+        char pos[32];
+        snprintf(pos, sizeof(pos), "%d / %d", m_album_cursor + 1, (int)m_album.size());
+        std::string right = pos;
+        if (m_album_slideshow) right = std::string(T("Slideshow")) + "   " + right;
+        m_gfx->Text(FontSize::Small, W - 40 - m_gfx->TextWidth(FontSize::Small, right.c_str()), y0,
+                    WithAlpha(t.dim, a), right.c_str());
+
+        if (clip) {
+            const double dur = m_album_video.Duration(), p = m_album_video.Position();
+            const int bx = 40, bw = W - 80, by = y0 + lh + 14;
+            m_gfx->FillRect(bx, by, bw, 6, SDL_Color{ 255, 255, 255, (Uint8)(60 * vis) });
+            if (dur > 0.0) m_gfx->FillRect(bx, by, (int)(bw * std::min(1.0, p / dur)), 6, WithAlpha(t.accent, a));
+            const std::string tm = FormatTime(p) + " / " + FormatTime(dur);
+            m_gfx->Text(FontSize::Small, bx + 30, by + 12, WithAlpha(t.fg, a), tm.c_str());
+            const int cx = bx + 8, cy = by + 12 + lh / 2;
+            if (m_album_video.Paused() || m_album_video.Ended())
+                m_gfx->FillTriangle(cx, cy - 8, cx + 14, cy, cx, cy + 8, WithAlpha(t.fg, a));
+            else {
+                m_gfx->FillRect(cx, cy - 8, 5, 16, WithAlpha(t.fg, a));
+                m_gfx->FillRect(cx + 9, cy - 8, 5, 16, WithAlpha(t.fg, a));
+            }
+            DrawStatusHint({ {{"a"}, m_album_video.Paused() || m_album_video.Ended() ? "Play" : "Pause"},
+                             {{"left","right"}, "Seek"}, {{"l","r"}, "Previous / next"},
+                             {{"x"}, "Slideshow"}, {{"b"}, "Back"} });
+        } else {
+            DrawStatusHint({ {{"left","right"}, "Previous / next"}, {{"a"}, "Info"},
+                             {{"x"}, "Slideshow"}, {{"b"}, "Back"}, {{"y"}, "System album"} });
+        }
+    }
+
     // Browser: the list of captures on the left, a preview of the selected one
     // on the right, in the same left-anchored arrangement as the rest of XMB.
-    // A press fills the screen with it.
+    // A opens the full screen viewer.
     void Menu::DrawAlbum() {
         const Theme &t = m_theme.Current();
         const int     W = gfx::Gfx::Width;
         const int     H = gfx::Gfx::Height;
 
-        EnsureAlbumTexture();
-
-        if (m_album_full && m_album_tex) {
-            m_gfx->Clear(SDL_Color{ 0, 0, 0, 255 });
-            m_gfx->DrawCover(m_album_tex, 255);
-            DrawStatusHint({ {{"a"}, "Windowed"}, {{"b"}, "Back"}, {{"y"}, "System album"} });
+        if (m_album_full && !m_album.empty()) {
+            // Slideshow: photos hold for a few seconds, clips play out.
+            if (m_album_slideshow) {
+                const u64 ms = (armGetSystemTick() - m_album_slide_tick) * 1000 / armGetSystemTickFreq();
+                if (m_album_video_active ? m_album_video.Ended() : ms >= 4000)
+                    AlbumShow(m_album_cursor + 1);
+            }
+            m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 255 });
+            if (m_album_video_active) {
+                m_album_video.Tick();
+                if (SDL_Texture *vt = m_album_video.GetTexture()) m_gfx->DrawCover(vt, 255);
+            } else {
+                EnsureAlbumTexture();
+                if (m_album_tex) m_gfx->DrawCover(m_album_tex, 255);
+            }
+            DrawAlbumViewerUi();
             return;
         }
+
+        EnsureAlbumTexture();
 
         DrawTopBar("Album");
 
         if (m_album.empty()) {
             m_gfx->TextCentered(FontSize::Normal, W / 2, H / 2 - 20, t.dim,
-                                T("No screenshots found"));
+                                T("No screenshots or clips found"));
             DrawStatusHint({ {{"b"}, "Back"}, {{"y"}, "System album"} });
             return;
         }
+
+        // Chase the cursor rather than jumping to it, at the same rate the other
+        // lists use, and settle exactly so it does not creep forever.
+        m_album_scroll += ((float)m_album_cursor - m_album_scroll) * 0.30f;
+        if (std::abs((float)m_album_cursor - m_album_scroll) < 0.01f)
+            m_album_scroll = (float)m_album_cursor;
 
         // Preview panel on the right, sized and placed like the XMB thumbnail.
         const int pw = (int)(W * 0.46f);
@@ -2171,8 +2623,26 @@ namespace sl::menu::ui {
         const int px = W - pw - 40;
         const int py = (H - ph) / 2;
         m_gfx->FillRect(px - 2, py - 2, pw + 4, ph + 4, WithAlpha(t.dim, 60));
-        if (m_album_tex) m_gfx->DrawImage(m_album_tex, px, py, pw, ph, 255);
-        else             m_gfx->FillRect(px, py, pw, ph, WithAlpha(t.bg_bottom, 200));
+
+        // A clip previews live, silently, once the list has come to rest on it
+        // - opening a decoder for every row scrolled past would stall the list.
+        const bool clip = IsVideoPath(m_album[m_album_cursor].c_str());
+        if (!clip)                                           StopAlbumVideo();
+        else if (m_album_scroll == (float)m_album_cursor)    PreviewAlbumVideo(m_album[m_album_cursor]);
+        SDL_Texture *pv = m_album_tex;
+        if (clip && m_album_video_path == m_album[m_album_cursor]) {
+            m_album_video.Tick();
+            pv = m_album_video.GetTexture();
+        }
+        if (pv) m_gfx->DrawImage(pv, px, py, pw, ph, 255);
+        else    m_gfx->FillRect(px, py, pw, ph, WithAlpha(t.bg_bottom, 200));
+        if (clip) {   // play badge, so a clip reads as one even before it decodes
+            const int cx = px + pw / 2, cy = py + ph / 2, s = 22;
+            m_gfx->FillRect(cx - s - 12, cy - s - 8, 2 * s + 24, 2 * s + 16,
+                            SDL_Color{ 0, 0, 0, 110 });
+            m_gfx->FillTriangle(cx - s / 2, cy - s, cx + s, cy, cx - s / 2, cy + s,
+                                WithAlpha(t.title, 220));
+        }
 
         // The list, using the XMB placement curve so it matches every other
         // screen while XMB is the active layout.
@@ -2182,12 +2652,6 @@ namespace sl::menu::ui {
         const int   listX  = 56;
         const int   listW  = px - 40 - listX;
         const int   n      = (int)m_album.size();
-
-        // Chase the cursor rather than jumping to it, at the same rate the other
-        // lists use, and settle exactly so it does not creep forever.
-        m_album_scroll += ((float)m_album_cursor - m_album_scroll) * 0.30f;
-        if (std::abs((float)m_album_cursor - m_album_scroll) < 0.01f)
-            m_album_scroll = (float)m_album_cursor;
 
         // One extra row each way: at rest they sit off-screen, and during a
         // scroll they are what slides in rather than popping into place.
@@ -2208,7 +2672,7 @@ namespace sl::menu::ui {
             const std::string &p = m_album[i];
             const size_t slash   = p.find_last_of('/');
             std::string  name    = (slash == std::string::npos) ? p : p.substr(slash + 1);
-            if (name.size() > 4) name.resize(name.size() - 4);   // drop ".jpg"
+            if (name.size() > 4) name.resize(name.size() - 4);   // drop ".jpg"/".mp4"
 
             const FontSize fs = sel ? FontSize::Normal : FontSize::Small;
             const int      lh = m_gfx->LineHeight(fs);
@@ -2217,9 +2681,14 @@ namespace sl::menu::ui {
                 m_gfx->FillTriangle(listX - 22, y - s, listX - 13, y,
                                     listX - 22, y + s, WithAlpha(t.accent, a));
             }
+            const bool        vid   = IsVideoPath(p.c_str());
+            const std::string shown = Ellipsize(name, listW - (vid ? 24 : 0), fs);
             m_gfx->Text(fs, listX, y - lh / 2,
-                        WithAlpha(sel ? t.title : t.fg, a),
-                        Ellipsize(name, listW, fs).c_str());
+                        WithAlpha(sel ? t.title : t.fg, a), shown.c_str());
+            if (vid) {   // small play mark after the name
+                const int mx = listX + m_gfx->TextWidth(fs, shown.c_str()) + 10;
+                m_gfx->FillTriangle(mx, y - 6, mx + 10, y, mx, y + 6, WithAlpha(t.accent, a));
+            }
         }
 
         char pos[32];
@@ -2231,7 +2700,33 @@ namespace sl::menu::ui {
         m_gfx->Text(FontSize::Small, W - 8 - pwid,
                     H - 8 - m_gfx->LineHeight(FontSize::Small), t.dim, pos);
 
-        DrawStatusHint({ {{"a"}, "Fullscreen"}, {{"b"}, "Back"}, {{"y"}, "System album"} });
+        DrawStatusHint({ {{"a"}, clip ? "Play" : "View"}, {{"x"}, "Slideshow"}, {{"b"}, "Back"},
+                         {{"y"}, "System album"} });
+    }
+    // Touch. Viewer: the outer thirds step through the album, the middle
+    // plays / pauses (or shows the info), the bar seeks. List: a row opens.
+    void Menu::OnTouchAlbum(int x, int y) {
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+        if (m_album.empty()) return;
+        if (m_album_full) {
+            if (m_album_video_active && y > H - 125 && y < H - 90 && m_album_video.Duration() > 0.0) {
+                m_album_video.Seek(m_album_video.Duration() * std::max(0, x - 40) / (double)(W - 80));
+                AlbumPokeUi();
+            } else if (x < W / 3)      OnButtonAlbum(Btn::L);
+            else if (x > W * 2 / 3)    OnButtonAlbum(Btn::R);
+            else                       OnButtonAlbum(Btn::A);
+            return;
+        }
+        const int pitch = 44, cy0 = H / 2 - 4 * pitch;     // DrawAlbum's list rows
+        if (x < (int)(W * 0.54f)) {
+            const int i = (int)lroundf(m_album_scroll) + (int)lroundf((float)(y - cy0) / pitch) - 4;
+            if (i >= 0 && i < (int)m_album.size()) {
+                if (i == m_album_cursor) AlbumShow(i);
+                else                     m_album_cursor = i;
+            }
+        } else {
+            AlbumShow(m_album_cursor);   // the preview opens the selection
+        }
     }
     Menu::Action Menu::OnButtonHomebrew(Btn b) {
         const int n = (int)m_hb.size();
@@ -2350,7 +2845,7 @@ namespace sl::menu::ui {
         std::vector<std::string> labels, values;
         for (int i = 0; i < m_theme.Count(); i++) {
             labels.push_back(m_theme.At(i).name);
-            values.push_back(i == m_theme.CurrentIndex() ? T("current") : "");
+            values.push_back(i == m_theme.AppliedIndex() ? T("current") : "");
         }
         labels.push_back(T("+ New custom theme"));
         values.push_back("");
@@ -2371,23 +2866,70 @@ namespace sl::menu::ui {
 
         const char *labels[EF_Count] = {
             T("Background"), T("Photo"), T("Dim"), T("Blur"),
-            T("Blur radius"), T("Snow"), T("Video fps"),
+            T("Blur radius"), T("Snow"),
             T("Gradient top"), T("Gradient bottom"), T("Text"),
-            T("Accent"), T("Secondary"), T("Title"), T("Icon background"),
+            T("Accent"), T("Secondary"), T("Title"),
+            T("Icon colour"), T("Icon background"),
             T("Icon background opacity"),
+            T("Effect colour"), T("Effect colour 2"),
             T("Wave lines"), T("Wave thickness"), T("Wave amplitude"),
-            T("Ribbon seed"), T("Ribbon layers"), T("Ribbon Y"),
+            T("Ribbon seed"), T("Ribbon layers"), T("Ribbon Y"), T("Sun X"),
+            T("Camera height"),
             T("Rename theme"), T("Save & Apply"), T("Delete theme")
         };
 
-        // Build the visible row list (ribbon rows hidden when bg != Ribbon).
+        // The six shared knobs mean different things per background, so the
+        // rows say what they do here rather than always naming the ribbon.
+        switch (c.background_style) {
+            case BackgroundStyle_Grid:
+                labels[EF_RibbonLines]     = T("Grid lines");
+                labels[EF_FxCam]           = T("Camera height");
+                labels[EF_RibbonThickness] = T("Line width");
+                labels[EF_RibbonAmplitude] = T("Scroll speed");
+                labels[EF_RibbonSeed]      = T("Hills");
+                labels[EF_RibbonLayers]    = T("Sun size");
+                labels[EF_RibbonYCenter]   = T("Horizon");
+                break;
+            case BackgroundStyle_Stars:
+                labels[EF_RibbonLines]     = T("Star density");
+                labels[EF_RibbonThickness] = T("Star size");
+                labels[EF_RibbonAmplitude] = T("Twinkle speed");
+                labels[EF_RibbonSeed]      = T("Sky");
+                labels[EF_RibbonLayers]    = T("Flare size");
+                labels[EF_RibbonYCenter]   = T("Horizon");
+                break;
+            case BackgroundStyle_Aurora:
+                labels[EF_RibbonLines]     = T("Curtains");
+                labels[EF_RibbonThickness] = T("Curtain width");
+                labels[EF_RibbonAmplitude] = T("Sway");
+                labels[EF_RibbonSeed]      = T("Sky");
+                labels[EF_RibbonLayers]    = T("Softness");
+                labels[EF_RibbonYCenter]   = T("Hem height");
+                break;
+            case BackgroundStyle_Ocean:
+                labels[EF_RibbonLines]     = T("(unused)");
+                labels[EF_RibbonThickness] = T("Swell");
+                labels[EF_RibbonAmplitude] = T("Speed");
+                labels[EF_RibbonSeed]      = T("(unused)");
+                labels[EF_RibbonLayers]    = T("Wave density");
+                labels[EF_RibbonYCenter]   = T("Horizon");
+                labels[EF_FxX]             = T("Reflection");
+                break;
+            default: break;   // Ribbon and Ribbon glow keep the wave labels
+        }
+
+        // Build the visible row list (the six are hidden when bg has no knobs).
         int vis_ids[EF_Count];
         int vis_n = 0;
         int cursor_vis = 0;
         for (int i = 0; i < EF_Count; i++) {
-            if (IsRibbonRow(i) && c.background_style != BackgroundStyle_Ribbon)
+            if (IsRibbonRow(i) && !StyleHasParams(c.background_style))
                 continue;
-            if (i == EF_WallpaperFps && !IsVideoPath(c.wallpaper))
+            if (i == EF_FxX && !StyleHasFxX(c.background_style))
+                continue;
+            if (i == EF_FxCam && !StyleHasFxCam(c.background_style))
+                continue;
+            if (IsFxColourRow(i) && !StyleHasParams(c.background_style))
                 continue;
             if (IsBlurRadiusRow(i) && !c.wallpaper_blur)
                 continue;
@@ -2414,7 +2956,12 @@ namespace sl::menu::ui {
             if (y < 90 || y > kHintY - 30) continue;
 
             const bool sel = (i == m_edit_cursor);
+            // Blur cannot apply to a playing video (see EnsureWallpaper) -
+            // the row stays in the list (so the user's saved choice is not
+            // hidden), but greys out to show it is not doing anything.
+            const bool blur_disabled = (i == EF_WallpaperBlur) && IsVideoPath(c.wallpaper);
             const SDL_Color rc = (i == EF_Delete) ? WithAlpha(SDL_Color{235, 90, 90, 255}, alpha)
+                                : blur_disabled    ? WithAlpha(t.dim, alpha)
                                                   : WithAlpha(sel ? t.accent : t.fg, alpha);
             m_gfx->Text(fs, kListX, y, rc, labels[i]);
 
@@ -2426,7 +2973,7 @@ namespace sl::menu::ui {
                 snprintf(hex, sizeof(hex), "#%02X%02X%02X", col->r, col->g, col->b);
                 m_gfx->Text(FontSize::Small, vx + 78, y + 4, WithAlpha(t.dim, alpha), hex);
             } else if (i == EF_Background) {
-                const char *bg = (c.background_style == BackgroundStyle_Ribbon) ? T("Ribbon") : T("Gradient");
+                const char *bg = BackgroundName(c.background_style);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), bg);
             } else if (i == EF_Wallpaper) {
@@ -2439,21 +2986,16 @@ namespace sl::menu::ui {
                 }
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), wp_label);
             } else if (i == EF_WallpaperDim || i == EF_WallpaperBlur || i == EF_WallpaperSnow) {
-                // Show On/Off toggle.
+                // Show On/Off toggle. A disabled Blur row shows its saved
+                // value (not forced Off) dimmed, same as its label above.
                 int val = (i == EF_WallpaperDim) ? c.wallpaper_dim
                        : (i == EF_WallpaperBlur) ? c.wallpaper_blur
                        : c.wallpaper_snow;
-                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha),
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(blur_disabled ? t.dim : t.fg, alpha),
                             val ? T("On") : T("Off"));
             } else if (i == EF_WallpaperBlurRadius) {
                 char val[16];
                 snprintf(val, sizeof(val), "%d", c.wallpaper_blur_radius);
-                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
-                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
-                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
-            } else if (i == EF_WallpaperFps) {
-                char val[16];
-                snprintf(val, sizeof(val), "%d", c.wallpaper_fps);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
                 m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
@@ -2467,39 +3009,51 @@ namespace sl::menu::ui {
                                 WithAlpha(c.icon_bg, (Uint8)c.icon_bg_alpha));
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Small, vx + 78, y + 4, WithAlpha(t.dim, alpha), val);
+            } else if (i == EF_FxCam) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d%%", c.Fx().cam);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
+            } else if (i == EF_FxX) {
+                char val[16];
+                snprintf(val, sizeof(val), "%d%%", c.Fx().x);
+                m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
+                m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
+                m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
             } else if (i == EF_RibbonLines) {
                 char val[16];
-                snprintf(val, sizeof(val), "%d", c.ribbon_line_count);
+                snprintf(val, sizeof(val), "%d", c.Fx().lines);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
                 m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
             } else if (i == EF_RibbonThickness) {
                 char val[16];
-                snprintf(val, sizeof(val), "%d", c.ribbon_thickness);
+                snprintf(val, sizeof(val), "%d", c.Fx().thickness);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
                 m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
             } else if (i == EF_RibbonAmplitude) {
                 char val[16];
-                snprintf(val, sizeof(val), "%d", c.ribbon_amplitude);
+                snprintf(val, sizeof(val), "%d", c.Fx().amplitude);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
                 m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
             } else if (i == EF_RibbonSeed) {
                 char val[16];
-                snprintf(val, sizeof(val), "%d", c.ribbon_seed);
+                snprintf(val, sizeof(val), "%d", c.Fx().seed);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
                 m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
             } else if (i == EF_RibbonLayers) {
                 char val[16];
-                snprintf(val, sizeof(val), "%d", c.ribbon_layers);
+                snprintf(val, sizeof(val), "%d", c.Fx().layers);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
                 m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
             } else if (i == EF_RibbonYCenter) {
                 char val[16];
-                snprintf(val, sizeof(val), "%d", c.ribbon_y_center);
+                snprintf(val, sizeof(val), "%d", c.Fx().y);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), val);
                 m_gfx->Text(FontSize::Small, vx + 40, y + 4, WithAlpha(t.dim, alpha), ">");
@@ -2508,24 +3062,24 @@ namespace sl::menu::ui {
 
         // Contextual hint for the current row.
         if (m_edit_cursor == EF_Background)
-            DrawHint({ {{"up","down"}, "Row"}, {{"left","right"}, "Change background type"}, {{"b"}, "Back"} });
+            DrawHint({ {{"up","down"}, "Row"}, {{"left","right"}, "Change background type"}, {{"b"}, "Save & back"} });
         else if (m_edit_cursor == EF_Wallpaper)
-            DrawHint({ {{"up","down"}, "Row"}, {{"left","right"}, "Choose photo overlay"}, {{"b"}, "Back"} });
+            DrawHint({ {{"up","down"}, "Row"}, {{"left","right"}, "Choose photo overlay"}, {{"b"}, "Save & back"} });
+        else if (m_edit_cursor == EF_WallpaperBlur && IsVideoPath(c.wallpaper))
+            DrawHint("Blur is not available for video wallpapers   B: Back");
         else if (IsEffectRow(m_edit_cursor))
             DrawHint({ {{"up","down"}, "Row"}, {{"left","right","a"}, "Toggle effect"},
-                      {{"left","right"}, "Adjust value"}, {{"b"}, "Back"} });
-        else if (m_edit_cursor == EF_WallpaperFps)
-            DrawHint({ {{"up","down"}, "Row"}, {{"left","right"}, "Adjust video fps"}, {{"b"}, "Back"} });
+                      {{"left","right"}, "Adjust value"}, {{"b"}, "Save & back"} });
         else if (IsRibbonRow(m_edit_cursor))
-            DrawHint({ {{"up","down"}, "Row"}, {{"left","right"}, "Adjust value"}, {{"b"}, "Back"} });
+            DrawHint({ {{"up","down"}, "Row"}, {{"left","right"}, "Adjust value"}, {{"b"}, "Save & back"} });
         else if (m_edit_cursor == EF_Save)
-            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Save & apply"}, {{"b"}, "Back"} });
+            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Save & apply"}, {{"b"}, "Save & back"} });
         else if (m_edit_cursor == EF_Rename)
-            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Rename"}, {{"b"}, "Back"} });
+            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Rename"}, {{"b"}, "Save & back"} });
         else if (m_edit_cursor == EF_Delete)
-            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Delete this theme"}, {{"b"}, "Back"} });
+            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Delete this theme"}, {{"b"}, "Save & back"} });
         else
-            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Edit color"}, {{"b"}, "Back"} });
+            DrawHint({ {{"up","down"}, "Row"}, {{"a"}, "Edit color"}, {{"b"}, "Save & back"} });
     }
     void Menu::DrawColorPicker() {
         if (!m_pick_target) return;
@@ -2634,7 +3188,13 @@ namespace sl::menu::ui {
         // Dim the whole screen, then draw a centered box.
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0,0,0,150});
         int cx = gfx::Gfx::Width / 2;
-        int bw = 560, bh = 260;
+        // The note wraps; the box grows to fit it.
+        const int bw = 640;
+        const auto note = m_dialog_note.empty() ? std::vector<std::string>()
+                        : WrapText(FontSize::Small, m_dialog_note, bw - 60);
+        const int nlh = m_gfx->LineHeight(FontSize::Small) + 4;
+        const int noteH = (int)note.size() * nlh;
+        int bh = 276 + std::max(0, noteH - nlh);
         int bx = cx - bw / 2, by = gfx::Gfx::Height / 2 - bh / 2;
         m_gfx->FillRect(bx, by, bw, bh, WithAlpha(t.bg_bottom, 245));
         m_gfx->FillRect(bx, by, bw, 4, t.accent);
@@ -2644,13 +3204,13 @@ namespace sl::menu::ui {
         m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title,
                             m_dialog_title.empty() ? T("Close running application?")
                                                    : m_dialog_title.c_str());
-        if (!m_dialog_note.empty())
-            m_gfx->TextCentered(FontSize::Small, cx, by + 88, t.dim, m_dialog_note.c_str());
+        for (size_t l = 0; l < note.size(); l++)
+            m_gfx->TextCentered(FontSize::Small, cx, by + 88 + (int)l * nlh, t.dim, note[l].c_str());
 
         const char *opts[2] = { T("Yes"), T("No") };
         for (int i = 0; i < 2; i++) {
             bool sel = (i == m_dialog_cursor);
-            int y = by + 120 + i * 48;
+            int y = by + 136 + std::max(0, noteH - nlh) + i * 48;
             if (sel) m_gfx->FillRect(cx - 90, y - 4, 180, 42, WithAlpha(t.accent, 60));
             m_gfx->TextCentered(FontSize::Normal, cx, y, sel ? t.accent : t.fg, opts[i]);
         }

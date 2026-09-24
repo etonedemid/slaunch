@@ -148,6 +148,9 @@ namespace sl::menu::ui {
 
         // ---- submenus: tap to select a row ----
         if (m_screen != Screen::Main && !m_options_open && m_dialog == Dialog::None) {
+            if (phase == 0 && m_screen == Screen::Music) { OnTouchMusic(x, y); return Action::None; }
+            if (phase == 0 && m_screen == Screen::Album) { OnTouchAlbum(x, y); return Action::None; }
+            if (phase == 0 && m_screen == Screen::Files) { OnTouchFiles(x, y); return Action::None; }
             if (phase == 0) {
                 // Which cursor this screen drives, how many rows it has, and the
                 // scroll value its carousel is actually animating. All three have
@@ -174,8 +177,6 @@ namespace sl::menu::ui {
                         cursor = &m_widgetopt_cursor;
                         if (widgets::IWidget *w = m_widgets.At(m_widget_sel)) rows = w->OptionCount();
                         break;
-                    case Screen::Music:
-                        cursor = &m_music_cursor;     rows = MU_Count; break;
                     case Screen::Homebrew:
                         cursor = &m_hb_cursor;        rows = (int)m_hb.size(); break;
                     case Screen::SysEntries:
@@ -200,8 +201,7 @@ namespace sl::menu::ui {
                     if (!c) return Action::None;
                     int vis[EF_Count], n = 0;
                     for (int i = 0; i < EF_Count; i++) {
-                        if (IsRibbonRow(i) && c->background_style != BackgroundStyle_Ribbon) continue;
-                        if (i == EF_WallpaperFps && !IsVideoPath(c->wallpaper)) continue;
+                        if ((IsRibbonRow(i) || IsFxColourRow(i)) && !StyleHasParams(c->background_style)) continue;
                         if (IsBlurRadiusRow(i) && !c->wallpaper_blur) continue;
                         vis[n++] = i;
                     }

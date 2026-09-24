@@ -77,37 +77,39 @@ namespace sl::menu::hb {
                 }
             }
 
-            // Icon: extract the JPEG to the cache so the UI can load it.
+            // Icon: extract the JPEG to the cache so the UI can load it. Every
+            // caller into ReadMeta has already decided a (re-)extract is
+            // warranted (the mtime check in Scan/Resolve, or ReadOne's caller
+            // asking for this one NRO specifically), so this just writes -
+            // no same-size-means-same-content guess, which a same-sized but
+            // different icon would have quietly defeated anyway.
             if (ah.icon.size > 0 && ah.icon.size < 512 * 1024) {
                 e.icon_key = HashPath(e.path);
                 char out[96];
                 snprintf(out, sizeof(out), "sdmc:/slaunch/%s/%016llX.jpg",
                          IconDir, (unsigned long long)e.icon_key);
-                struct stat st;
-                if (stat(out, &st) != 0 || (u64)st.st_size != ah.icon.size) {
-                    std::vector<u8> buf(ah.icon.size);
-                    if (fseek(fp, nro_size + ah.icon.offset, SEEK_SET) == 0 &&
-                        fread(buf.data(), 1, buf.size(), fp) == buf.size()) {
-                        FILE *of = fopen(out, "wb");
-                        if (of) { fwrite(buf.data(), 1, buf.size(), of); fclose(of); }
-                    }
+                std::vector<u8> buf(ah.icon.size);
+                if (fseek(fp, nro_size + ah.icon.offset, SEEK_SET) == 0 &&
+                    fread(buf.data(), 1, buf.size(), fp) == buf.size()) {
+                    FILE *of = fopen(out, "wb");
+                    if (of) { fwrite(buf.data(), 1, buf.size(), of); fclose(of); }
                 }
             }
             fclose(fp);
         }
 
         // Manifest: one line per .nro we've already parsed, so we never re-read an
-        // NRO we've seen before. Keyed by path only - we deliberately do NOT check
-        // whether the file changed. Its icon (cache/hbicons/<key>.jpg) and name are
-        // cosmetic; if a .nro is replaced, the stale name/icon is harmless and gets
-        // refreshed if the cache is cleared. Line format: key\tpath\tname
+        // NRO we've seen before - unless its mtime has moved on, which is what
+        // makes replacing a .nro (a new build, a new icon) actually take effect
+        // instead of leaving the previous run's name/icon stuck until the cache
+        // is cleared by hand. Line format: key\tpath\tname\tmtime
         constexpr const char *ManifestPath = "sdmc:/slaunch/cache/hb_manifest.txt";
 
         // Serialises manifest read-modify-write: Scan() (browser thread) and
         // Resolve() (pin-resolve thread) can run at once and must not clobber it.
         std::mutex g_manifest_mutex;
 
-        struct CacheRec { u64 icon_key; std::string name; };
+        struct CacheRec { u64 icon_key; std::string name; time_t mtime = 0; };
 
         void LoadManifest(std::unordered_map<std::string, CacheRec> &m) {
             FILE *fp = fopen(ManifestPath, "r");
@@ -117,9 +119,16 @@ namespace sl::menu::hb {
                 line[strcspn(line, "\r\n")] = '\0';
                 char *p = line, *end = nullptr;
                 u64 key = strtoull(p, &end, 10); if (*end != '\t') continue; p = end + 1;
-                char *tab = strchr(p, '\t'); if (!tab) continue;  // path \t name
+                char *tab = strchr(p, '\t'); if (!tab) continue;  // path \t name \t mtime
                 *tab = '\0';
-                if (p[0]) m[p] = CacheRec{ key, std::string(tab + 1) };
+                char *name = tab + 1;
+                // Older manifests (pre-mtime) have no trailing field; treat as
+                // mtime 0, which will simply miss every entry once and refresh
+                // it - a one-time cost, not a bug.
+                char *mtab = strrchr(name, '\t');
+                long long mtime = 0;
+                if (mtab) { *mtab = '\0'; mtime = strtoll(mtab + 1, nullptr, 10); }
+                if (p[0]) m[p] = CacheRec{ key, std::string(name), (time_t)mtime };
             }
             fclose(fp);
         }
@@ -131,10 +140,16 @@ namespace sl::menu::hb {
                 // Names never contain tab/newline in practice; guard anyway.
                 std::string nm = kv.second.name;
                 for (char &c : nm) if (c == '\t' || c == '\n' || c == '\r') c = ' ';
-                fprintf(fp, "%llu\t%s\t%s\n",
-                        (unsigned long long)kv.second.icon_key, kv.first.c_str(), nm.c_str());
+                fprintf(fp, "%llu\t%s\t%s\t%lld\n",
+                        (unsigned long long)kv.second.icon_key, kv.first.c_str(), nm.c_str(),
+                        (long long)kv.second.mtime);
             }
             fclose(fp);
+        }
+
+        time_t FileMtime(const std::string &path) {
+            struct stat st;
+            return stat(path.c_str(), &st) == 0 ? st.st_mtime : 0;
         }
 
         void ScanDir(const std::string &dir, std::vector<HbEntry> &out, int depth,
@@ -155,17 +170,18 @@ namespace sl::menu::hb {
 
                     HbEntry e;
                     e.path = p;
+                    const time_t mtime = FileMtime(p);
                     auto it = old_m.find(p);
-                    if (it != old_m.end()) {
-                        e.name     = it->second.name;   // seen before: from manifest, no read
+                    if (it != old_m.end() && it->second.mtime == mtime) {
+                        e.name     = it->second.name;   // unchanged since last scan: no read
                         e.icon_key = it->second.icon_key;
                     } else {
-                        // First time we've seen this .nro: parse NACP + extract icon.
+                        // New, or replaced since the last scan: parse NACP + extract icon.
                         e.name = BaseName(p);
                         ReadMeta(e);
                         changed = true;
                     }
-                    new_m[p] = CacheRec{ e.icon_key, e.name };
+                    new_m[p] = CacheRec{ e.icon_key, e.name, mtime };
                     out.push_back(std::move(e));
                 }
             }
@@ -194,14 +210,15 @@ namespace sl::menu::hb {
         LoadManifest(m);
         bool changed = false;
         for (auto &e : entries) {
+            const time_t mtime = FileMtime(e.path);
             auto it = m.find(e.path);
-            if (it != m.end()) {
-                e.name     = it->second.name;      // seen before: from manifest, no read
+            if (it != m.end() && it->second.mtime == mtime) {
+                e.name     = it->second.name;      // unchanged since last resolve: no read
                 e.icon_key = it->second.icon_key;
             } else {
                 if (e.name.empty()) e.name = BaseName(e.path);
-                ReadMeta(e);                        // first time: parse + extract icon
-                m[e.path] = CacheRec{ e.icon_key, e.name };
+                ReadMeta(e);                        // new, or replaced: parse + extract icon
+                m[e.path] = CacheRec{ e.icon_key, e.name, mtime };
                 changed = true;
             }
         }
@@ -220,6 +237,7 @@ namespace sl::menu::hb {
         LoadManifest(old_m);
 
         std::vector<HbEntry> out;
+        out.reserve(4096);
         bool changed = false;
         ScanDir("sdmc:/switch", out, 0, old_m, new_m, changed);
 

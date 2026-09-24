@@ -354,3 +354,37 @@ extern "C" Result nifmSetWirelessCommunicationEnabled(bool enable) {
     g_wifi_on = enable;
     return 0;
 }
+
+// ---- USB file transfer --------------------------------------------------------
+// There is no USB device here. SLAUNCH_SIM_MTP fakes one so the status tag and
+// transfer card can be seen: "idle" (connected, nothing moving), "recv" or
+// "send" (one 256 MB file, 8 s round), "done:N" (moving for N seconds, then
+// the summary).
+#include <sl/menu/usb/Mtp.hpp>
+#include <cmath>
+#include <cstring>
+#include <chrono>
+namespace sl::menu::usb {
+    void MtpStart() {}
+    void MtpStop() {}
+    bool MtpConnected() { return getenv("SLAUNCH_SIM_MTP") != nullptr; }
+    void MtpGetStatus(MtpStatus &out) {
+        const char *m = getenv("SLAUNCH_SIM_MTP");
+        out = MtpStatus{};
+        if (!m) return;
+        out.connected = true;
+        static const auto t0 = std::chrono::steady_clock::now();
+        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        out.bytes = (u64)(s * 38.0 * 1048576);
+        out.received = 3; out.sent = 1; out.deleted = 2;
+        if (!strcmp(m, "recv") || !strcmp(m, "send")) {
+            out.op    = !strcmp(m, "recv") ? MtpOp::Receive : MtpOp::Send;
+            out.total = 256ull << 20;
+            out.done  = (u64)(fmod(s, 8.0) / 8.0 * out.total);
+            snprintf(out.name, sizeof(out.name), "/switch/sphaira/sphaira.nro");
+        } else if (!strncmp(m, "done", 4)) {
+            if (s < (m[4] == ':' ? atof(m + 5) : 1.0)) { out.op = MtpOp::Receive; out.total = 1 << 20; out.done = out.total / 2; }
+            snprintf(out.name, sizeof(out.name), "/switch/sphaira/sphaira.nro");
+        }
+    }
+}

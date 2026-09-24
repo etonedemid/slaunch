@@ -18,7 +18,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sLaunch Installer
 APP_AUTHOR  := sLaunch
-APP_VERSION := 1.3.0
+APP_VERSION := 1.4.0
 APP_ICON    := ../../assets/icon.jpg
 
 PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
@@ -67,10 +67,16 @@ romfs_stage:
 	@cp -r $(SDOUT)/atmosphere $(ROMFS)/payload/ 2>/dev/null || true
 	@cp -r $(SDOUT)/slaunch    $(ROMFS)/payload/ 2>/dev/null || true
 	@cp ../../icon.png $(ROMFS)/icon.png 2>/dev/null || true
-	@# Line art for the installer's own three action tiles.
+	@# Boot splash, already in Atmosphere's package3 layout (see InstallSplash).
+	@cp -f ../../assets/splash.bin $(ROMFS)/splash.bin 2>/dev/null || true
+	@# Line art for the installer's own action tiles. quit.png stopped being
+	@# used when Exit moved off the tile row onto Plus, so it's not staged.
 	@mkdir -p $(ROMFS)/ui
-	@cp -f ../../assets/install.png ../../assets/update.png ../../assets/quit.png \
-	       ../../assets/disable.png $(ROMFS)/ui/ 2>/dev/null || true
+	@cp -f ../../assets/install.png ../../assets/update.png \
+	       ../../assets/disable.png ../../assets/uninstall.png $(ROMFS)/ui/ 2>/dev/null || true
+	@# Sprites for the Installing / Checking-for-updates screen animations.
+	@cp -f ../../assets/anim/sdcard.png ../../assets/anim/switch.png ../../assets/anim/github.png \
+	       $(ROMFS)/ui/ 2>/dev/null || true
 
 # Build the NRO with romfs + icon. romfs_stage is a prerequisite (not just an
 # earlier goal in `all`) so the NRO is rebuilt whenever the staged payload

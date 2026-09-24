@@ -64,7 +64,8 @@ namespace sl::menu::ui {
             case ItemKind::RandomGame:   return XmbCat::Game;
             case ItemKind::Homebrew:     return IsNetHomebrew(it) ? XmbCat::Network
                                                                   : XmbCat::Homebrew;
-            case ItemKind::HomebrewMenu: return XmbCat::Homebrew;
+            case ItemKind::HomebrewMenu:
+            case ItemKind::FileManager:  return XmbCat::Homebrew;
             case ItemKind::Album:
             case ItemKind::MusicPlayer:  return XmbCat::Media;
             case ItemKind::UserPage:
@@ -101,19 +102,45 @@ namespace sl::menu::ui {
     void Menu::XmbRebuild() {
         m_xmb_cols.clear();
         std::vector<int> bucket[(int)XmbCat::Count];
+        // Shortcut categories, in the order they are first seen. m_items has
+        // them already grouped and sorted (ScanShortcuts sorts by category, and
+        // RebuildItems appends them in that order), so first-seen order is
+        // alphabetical without sorting anything again here.
+        std::vector<std::pair<std::string, std::vector<int>>> cats;
         for (int i = 0; i < (int)m_items.size(); i++) {
             // The Homebrew column lists every scanned .nro directly, so the
             // entry that only opens the browser has nothing left to offer there
             // and is dropped. It stays in m_items for the other layouts, where
             // it is still their only route to the browser.
             if (m_items[i].kind == ItemKind::HomebrewMenu) continue;
+            const std::string &cat = m_items[i].category;
+            if (!cat.empty()) {
+                auto it = std::find_if(cats.begin(), cats.end(),
+                                       [&](const auto &c){ return c.first == cat; });
+                if (it == cats.end()) { cats.push_back({ cat, { i } }); continue; }
+                it->second.push_back(i);
+                continue;
+            }
             bucket[(int)XmbCatOf(m_items[i])].push_back(i);
         }
 
+        // Emulated libraries sit immediately after the console's own games,
+        // which is where you look for them - and it keeps them off the far end
+        // of a bar that would otherwise put Homebrew between the two. With no
+        // games installed there is no Games column to sit after, so they are
+        // appended instead of being dropped.
+        bool cats_placed = cats.empty();
         for (int c = 0; c < (int)XmbCat::Count; c++) {
             if (bucket[c].empty()) continue;          // empty columns are not shown
-            m_xmb_cols.push_back({ (XmbCat)c, std::move(bucket[c]) });
+            m_xmb_cols.push_back({ (XmbCat)c, std::string(), std::move(bucket[c]) });
+            if ((XmbCat)c != XmbCat::Game || cats_placed) continue;
+            for (auto &kv : cats)
+                m_xmb_cols.push_back({ XmbCat::Game, kv.first, std::move(kv.second) });
+            cats_placed = true;
         }
+        if (!cats_placed)
+            for (auto &kv : cats)
+                m_xmb_cols.push_back({ XmbCat::Game, kv.first, std::move(kv.second) });
         if (m_xmb_cols.empty()) { m_xmb_col = -1; m_xmb_item = 0; return; }
 
         // Every entry lands in exactly one column, so following m_cursor keeps
@@ -139,6 +166,57 @@ namespace sl::menu::ui {
             return;
         }
     }
+    // What L/R do in the open column - the hint has to say which, since the
+    // shoulders page by five in most columns and jump by initial in a shortcut
+    // category. Returns a T() key, like every other hint label.
+    const char *Menu::XmbShoulderHint() const {
+        if (m_xmb_col < 0 || m_xmb_col >= (int)m_xmb_cols.size()) return "Jump";
+        return m_xmb_cols[m_xmb_col].label.empty() ? "Jump" : "Letter";
+    }
+
+    // The character a name is filed under: first letter, upper-cased, with
+    // everything that is not a letter collapsed to one '#' bucket so the
+    // leading-digit and bracketed-prefix names a ROM set is full of do not each
+    // become a stop of their own.
+    char Menu::XmbInitial(const std::string &name) {
+        if (name.empty()) return '#';
+        const unsigned char c = (unsigned char)name[0];
+        if (c >= 'a' && c <= 'z') return (char)(c - 32);
+        if (c >= 'A' && c <= 'Z') return (char)c;
+        return '#';   // digits, punctuation, and any UTF-8 lead byte
+    }
+
+    // Index of the first entry of the next (or previous) initial, clamped at the
+    // ends. Always moves at least one entry so an unsorted column still steps.
+    int Menu::XmbLetterJump(int dir) const {
+        if (m_xmb_col < 0 || m_xmb_col >= (int)m_xmb_cols.size()) return m_xmb_item;
+        const auto &items = m_xmb_cols[m_xmb_col].items;
+        const int n = (int)items.size();
+        if (n == 0) return 0;
+
+        const int cur = std::min(std::max(0, m_xmb_item), n - 1);
+        const char here = XmbInitial(m_items[items[cur]].name);
+
+        if (dir > 0) {
+            for (int i = cur + 1; i < n; i++)
+                if (XmbInitial(m_items[items[i]].name) != here) return i;
+            return n - 1;
+        }
+        // Backwards behaves like a "previous track" button: from inside a letter
+        // it goes to that letter's first entry, and only from there on to the
+        // previous letter's first. Jumping straight to the previous letter
+        // skips the start of the one you are standing in, which is usually
+        // where you were trying to get back to.
+        int start = cur;
+        while (start > 0 && XmbInitial(m_items[items[start - 1]].name) == here) start--;
+        if (start < cur) return start;      // inside a letter: go to its start
+        if (start == 0) return 0;           // already at the very top
+        int j = start - 1;                  // at a letter's start: previous letter
+        const char prev = XmbInitial(m_items[items[j]].name);
+        while (j > 0 && XmbInitial(m_items[items[j - 1]].name) == prev) j--;
+        return j;
+    }
+
     // Point the bar at whatever m_cursor currently selects, so switching into XMB
     // from another layout (or back from a submenu) keeps your place.
     void Menu::XmbSyncFromCursor() {
@@ -189,7 +267,7 @@ namespace sl::menu::ui {
             m_gfx->DrawImage(icon, x, y, size, size, alpha);
         } else if (icon) {
             m_gfx->FillRect(x, y, size, size, IconPlate(t, alpha));
-            m_gfx->DrawImage(icon, x, y, size, size, alpha);
+            m_gfx->DrawImageTinted(icon, x, y, size, size, IconTint(t, alpha));
         } else {
             // No artwork cached yet: a plain plate with the initial, sized to
             // match, so the column never gains or loses a row while icons load.
@@ -246,7 +324,14 @@ namespace sl::menu::ui {
         const int        count = (int)col.items.size();
 
         // The category name doubles as the screen title, as it does in XMB.
-        DrawXmbHeader(XmbCatName(m_xmb_cols[m_xmb_col].cat));
+        const char *colname = m_xmb_cols[m_xmb_col].label.empty()
+                                  ? XmbCatName(m_xmb_cols[m_xmb_col].cat)
+                                  : m_xmb_cols[m_xmb_col].label.c_str();
+        // A filtered bar looks exactly like an unfiltered one with fewer games
+        // in it, so the query has to be on screen the whole time it is active.
+        std::string header = colname ? colname : "";
+        if (!m_search.empty()) header = std::string(T("Search")) + ": \"" + m_search + "\"";
+        DrawXmbHeader(header.c_str());
 
         // --- category row ----------------------------------------------------
         // RetroArch tweens every tab between a passive and an active zoom and
@@ -265,7 +350,7 @@ namespace sl::menu::ui {
             if (SDL_Texture *icon = SystemIcon(XmbCatIconKind(m_xmb_cols[c].cat))) {
                 const int ix = cx - sz / 2, iy = kXmbTabY - sz / 2;
                 m_gfx->FillRect(ix, iy, sz, sz, IconPlate(t, a));
-                m_gfx->DrawImage(icon, ix, iy, sz, sz, a);
+                m_gfx->DrawImageTinted(icon, ix, iy, sz, sz, IconTint(t, a));
             }
         }
 
@@ -275,7 +360,8 @@ namespace sl::menu::ui {
         const float slide = std::min(1.0f, std::abs((float)m_xmb_col - m_xmb_col_scroll));
         const Uint8 listA = (Uint8)(255.0f * (1.0f - slide));
         if (listA <= 8 || count == 0) {
-            DrawStatusHint({ {{"a"}, "Select"}, {{"x"}, "Options"}, {{"l","r"}, "Jump"}, {{"plus"}, "Power"} });
+            DrawStatusHint({ {{"a"}, "Select"}, {{"y"}, "Search"},
+                         {{"l","r"}, XmbShoulderHint()}, {{"x"}, "Options"} });
             return;
         }
 
@@ -358,6 +444,7 @@ namespace sl::menu::ui {
         m_gfx->Text(FontSize::Small, W - 8 - pw, H - 8 - ph,
                     WithAlpha(t.dim, listA), pos);
 
-        DrawStatusHint({ {{"a"}, "Select"}, {{"x"}, "Options"}, {{"l","r"}, "Jump"}, {{"plus"}, "Power"} });
+        DrawStatusHint({ {{"a"}, "Select"}, {{"y"}, "Search"},
+                         {{"l","r"}, XmbShoulderHint()}, {{"x"}, "Options"} });
     }
 } // namespace sl::menu::ui

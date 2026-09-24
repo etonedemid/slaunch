@@ -208,40 +208,16 @@ namespace sl::menu::ui {
             const auto c = m_tilecfg.find(ItemKey(m_items[idx]));
             if (c != m_tilecfg.end() && c->second.has_color) return c->second.color;
         }
+        // Windows 10 Mobile: every tile in the one accent colour. Deepened so
+        // white labels read on it, and a grey accent (AMOLED's white, say)
+        // becomes Windows' own blue rather than a wall of pale tiles.
         const SDL_Color b = m_theme.Current().accent;
-
         const float r = b.r / 255.0f, g = b.g / 255.0f, bl = b.b / 255.0f;
-        const float mx = std::max(r, std::max(g, bl));
-        const float mn = std::min(r, std::min(g, bl));
-        const float d  = mx - mn;
-
-        float h = 0.0f;
-        if (d > 0.0001f) {
-            if      (mx == r)  h = 60.0f * fmodf((g - bl) / d, 6.0f);
-            else if (mx == g)  h = 60.0f * (((bl - r) / d) + 2.0f);
-            else               h = 60.0f * (((r - g) / d) + 4.0f);
-        }
-        // A flat accent has no hue to rotate, so give it one to spread from.
-        float s = (mx > 0.0001f) ? d / mx : 0.35f;
-        float v = mx;
-        if (s < 0.15f) { s = 0.35f; h = 205.0f; }
-
-        static const float kShift[] = { 0, 34, -40, 68, -20, 104, 16, -68 };
-        h = fmodf(h + kShift[idx % (int)(sizeof(kShift) / sizeof(kShift[0]))] + 360.0f, 360.0f);
-        // Nudge value as well, so neighbouring hues never read as one block.
-        v = std::min(1.0f, std::max(0.30f, v + ((idx % 3) - 1) * 0.07f));
-
-        const float c = v * s, x = c * (1.0f - std::fabs(fmodf(h / 60.0f, 2.0f) - 1.0f));
-        const float m = v - c;
-        float rr = 0, gg = 0, bb = 0;
-        if      (h <  60) { rr = c; gg = x; }
-        else if (h < 120) { rr = x; gg = c; }
-        else if (h < 180) { gg = c; bb = x; }
-        else if (h < 240) { gg = x; bb = c; }
-        else if (h < 300) { rr = x; bb = c; }
-        else              { rr = c; bb = x; }
-        return SDL_Color{ (Uint8)((rr + m) * 255), (Uint8)((gg + m) * 255),
-                          (Uint8)((bb + m) * 255), b.a };
+        const float mx = std::max(r, std::max(g, bl)), mn = std::min(r, std::min(g, bl));
+        if (mx <= 0.0001f || (mx - mn) / mx < 0.15f) return SDL_Color{ 0, 120, 215, 255 };
+        const float k = std::min(1.0f, 0.78f / mx);   // cap the value at 78%
+        (void)idx;
+        return SDL_Color{ (Uint8)(b.r * k), (Uint8)(b.g * k), (Uint8)(b.b * k), 255 };
     }
     void Menu::LoadTileCfg() {
         m_tilecfg.clear();
@@ -432,10 +408,13 @@ namespace sl::menu::ui {
         const int n = (int)m_album.size();
         const int next = (m_tile_pic_idx < 0) ? n - 1
                        : ((m_tile_pic_idx - 1) + n) % n;
+        // Clips have no still to show; step past them (and past unreadable
+        // shots) rather than retrying the same one forever.
+        m_tile_pic_idx = next;
+        if (IsVideoPath(m_album[next].c_str())) return;
         SDL_Texture *tex = m_gfx->LoadImageScaled(m_album[next].c_str(),
                                                   TileWideW(), TileUnit());
         if (!tex) { m_tile_pic_tick = now; return; }   // unreadable: try later
-        m_tile_pic_idx = next;
         if (!m_tile_pic) {                 // first one: no fade to run
             m_tile_pic = tex;
             m_tile_pic_fade = 1.0f;
@@ -478,9 +457,11 @@ namespace sl::menu::ui {
         // texture, whose origin is its own corner. Dropped for the duration of
         // the widget's own drawing and put back before the blit, which is the
         // part that does need clipping.
+        m_gfx->FxClose();   // SDL is used directly below
         const SDL_bool clipped = SDL_RenderIsClipEnabled(ren);
         SDL_Rect saved{};
         SDL_RenderGetClipRect(ren, &saved);
+        m_gfx->FxClose();   // SDL is used directly below
         SDL_RenderSetClipRect(ren, nullptr);
 
         // The widget saves and restores the target around its own cache, so
@@ -495,6 +476,7 @@ namespace sl::menu::ui {
         const int natH = w->Render(m_gfx, m_theme.Current(), 0, 0, kTileWidgetW, reqH);
         SDL_SetRenderTarget(ren, prev);
 
+        m_gfx->FxClose();   // SDL is used directly below
         SDL_RenderSetClipRect(ren, clipped ? &saved : nullptr);
         if (natH <= 0) return;   // nothing rendered yet (first frames)
 
@@ -509,21 +491,46 @@ namespace sl::menu::ui {
         SDL_SetTextureAlphaMod(m_tile_wscratch, a);
         SDL_Rect src{ 0, 0, kTileWidgetW, natH };
         SDL_Rect dst{ r.x + (r.w - dw) / 2, r.y + (r.h - dh) / 2, dw, dh };
+        m_gfx->FxClose();
         SDL_RenderCopy(ren, m_tile_wscratch, &src, &dst);
     }
-    // One tile face. Flat, no border and no shadow: the colour block and the
-    // label in the bottom-left corner are the whole of Metro's vocabulary.
-    void Menu::DrawTileFace(const TileRect &r, const MenuItem &it, bool sel, Uint8 a) {
+    // One tile face: a rounded card (colour, or the artwork edge to edge),
+    // soft shadow, a glow when selected, and the label on a darkened band.
+    // Without the GPU path it is Metro's flat block with a ring, as before.
+    //
+    // pass 0 draws only the card bases and pass 1 only what goes on them, so
+    // DrawMainGrid can put every base in one GPU pass instead of reopening it
+    // (an SDL flush each time) for every tile; -1 draws both, the fallback.
+    void Menu::DrawTileFace(const TileRect &r, const MenuItem &it, bool sel, Uint8 a, int pass) {
         const Theme &t = m_theme.Current();
+        const bool rest = (pass != 0);
+        bool carded = (pass == 1);   // pass 1 only runs once cards drew the bases
+        // The tile's base: fill colour, optionally an image covering it all.
+        // Windows 10 Mobile tiles: square, flat, a little see-through so the
+        // background shows between and through them; the name sits straight
+        // on the colour, and only a picture gets a band to keep it readable.
+        auto base = [&](SDL_Texture *img, SDL_Color fill, bool band = true) {
+            if (pass == 1) return;
+            gfx::Gfx::CardStyle cs;
+            cs.radius   = 0.0f;
+            cs.shadow   = 0.0f;
+            cs.fill     = WithAlpha(fill, img ? 255 : 218);
+            cs.band     = (band && img) ? 30.0f : 0.0f;
+            carded = m_gfx->Card(img, (float)r.x, (float)r.y, (float)r.w, (float)r.h, cs, a);
+            if (!carded) {
+                m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(fill, a));
+                if (img) m_gfx->DrawImage(img, r.x, r.y, r.w, r.h, a);
+            }
+        };
         const bool wide = (r.w > TileUnit());
         const std::string key = ItemKey(it);
         // Eased every frame, so a recolour arrives as a fade rather than a jump.
         const SDL_Color face = TileShownColor(key, TileColor(r.item));
 
         if (it.kind == ItemKind::WidgetTile) {
-            m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
-            DrawWidgetTile(r, it, a);
-            if (sel) {
+            base(nullptr, face, false);
+            if (rest) DrawWidgetTile(r, it, a);
+            if (rest && sel) {
                 const SDL_Color c = WithAlpha(t.title, a);
                 m_gfx->FillRect(r.x - 3, r.y - 3, r.w + 6, 3, c);
                 m_gfx->FillRect(r.x - 3, r.y + r.h, r.w + 6, 3, c);
@@ -534,26 +541,44 @@ namespace sl::menu::ui {
         }
 
         if (it.kind == ItemKind::MusicPlayer) {
-            // The music tile is always a colour block: it is showing text, and a
-            // picture behind a track name would only make it harder to read.
-            m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
-            if (SDL_Texture *g = SystemIcon(it.kind))
-                m_gfx->DrawImage(g, r.x + 14, r.y + 20, 52, 52, a);
+            // A colour block showing text; the track's cover, when it has one,
+            // sits square on the left instead of the glyph rather than behind
+            // the text, where it would only make the track name harder to read.
+            base(nullptr, face);
+            if (!rest) return;
+            SDL_Texture *art = m_deferred_joined ? MusicArt() : nullptr;
+            int tx = r.x + 78;
+            if (art) {
+                // Inset, with its own rounded corners, clear of the band.
+                const int as = r.h - 30 - 16;
+                gfx::Gfx::CardStyle cs;
+                cs.radius = 0.0f; cs.shadow = 0.0f;
+                if (!m_gfx->Card(art, (float)(r.x + 8), (float)(r.y + 8), (float)as, (float)as, cs, a))
+                    m_gfx->DrawImage(art, r.x + 8, r.y + 8, as, as, a);
+                tx = r.x + as + 20;
+            } else if (SDL_Texture *g = SystemIcon(it.kind)) {
+                m_gfx->DrawImageTinted(g, r.x + 14, r.y + 20, 52, 52, IconTint(t, a));
+            }
             if (m_deferred_joined) {
                 const int lh = m_gfx->LineHeight(FontSize::Small);
-                m_gfx->Text(FontSize::Small, r.x + 78, r.y + 24, WithAlpha(t.fg, a),
+                m_gfx->Text(FontSize::Small, tx, r.y + 24, WithAlpha(t.fg, a),
                             m_music.Enabled() ? T("Playing") : T("Paused"));
                 char n[48];
                 snprintf(n, sizeof(n), "%d / %d", m_music.TrackIndex() + 1,
                          std::max(1, m_music.TrackCount()));
-                m_gfx->Text(FontSize::Small, r.x + 78, r.y + 24 + lh + 4,
+                m_gfx->Text(FontSize::Small, tx, r.y + 24 + lh + 4,
                             WithAlpha(t.dim, a), n);
             }
         } else if (it.kind == ItemKind::Album && m_tile_pic) {
-            m_gfx->DrawImage(m_tile_pic, r.x, r.y, r.w, r.h, a);
-            if (m_tile_pic_next)
-                m_gfx->DrawImage(m_tile_pic_next, r.x, r.y, r.w, r.h,
-                                 (Uint8)(a * m_tile_pic_fade));
+            base(m_tile_pic, face);
+            if (pass != 1 && m_tile_pic_next) {
+                gfx::Gfx::CardStyle cs;          // the next picture fading in
+                cs.radius = 0.0f; cs.shadow = 0.0f; cs.band = 30.0f;
+                if (!m_gfx->Card(m_tile_pic_next, (float)r.x, (float)r.y, (float)r.w, (float)r.h,
+                                 cs, (Uint8)(a * m_tile_pic_fade)))
+                    m_gfx->DrawImage(m_tile_pic_next, r.x, r.y, r.w, r.h,
+                                     (Uint8)(a * m_tile_pic_fade));
+            }
         } else if (it.kind == ItemKind::Game || it.kind == ItemKind::Homebrew) {
             // A game's own icon fills the tile, which is what gives the wall its
             // colour - the same job Metro gave photo and people tiles.
@@ -569,25 +594,28 @@ namespace sl::menu::ui {
             const bool tinted = (cfg != m_tilecfg.end() && cfg->second.has_color);
             const int  fit    = std::min(r.w, r.h);
             const int  sz     = tinted ? (fit * 5) / 8 : fit;
-            if (!icon || tinted || sz != r.w || sz != r.h)
-                m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
-            if (icon)
-                m_gfx->DrawImage(icon, r.x + (r.w - sz) / 2,
-                                 r.y + (r.h - sz) / 2 - (tinted ? 8 : 0), sz, sz, a);
+            if (icon && !tinted && sz == r.w && sz == r.h) {
+                base(icon, face);                 // artwork edge to edge
+            } else {
+                base(nullptr, face);
+                if (icon && rest)
+                    m_gfx->DrawImage(icon, r.x + (r.w - sz) / 2,
+                                     r.y + (r.h - sz) / 2 - (tinted ? 8 : 0), sz, sz, a);
+            }
         } else {
             // System tiles are a solid block with the glyph centred.
-            m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(face, a));
+            base(nullptr, face);
+            if (!rest) return;
             if (SDL_Texture *g = SystemIcon(it.kind)) {
                 const int sz = wide ? 56 : 64;
-                m_gfx->DrawImage(g, r.x + (r.w - sz) / 2,
-                                 r.y + (r.h - sz) / 2 - (wide ? 10 : 8), sz, sz, a);
+                m_gfx->DrawImageTinted(g, r.x + (r.w - sz) / 2,
+                                       r.y + (r.h - sz) / 2 - (wide ? 10 : 8), sz, sz,
+                                       IconTint(t, a));
             }
         }
 
-        // A band under the label so it stays readable over artwork.
-        const int band = 30;
-        m_gfx->FillRect(r.x, r.y + r.h - band, r.w, band, SDL_Color{0, 0, 0,
-                        (Uint8)(a * 0.55f)});
+        if (!rest) return;
+        const int band = 30;   // the label's line at the foot of the tile
 
         std::string label = it.name;
         // The music tile names the track rather than naming itself - the play
@@ -601,7 +629,8 @@ namespace sl::menu::ui {
                     WithAlpha(t.fg, a),
                     Ellipsize(label, r.w - 20, FontSize::Small).c_str());
 
-        // Selection is a ring, not a fill: Metro never dims the tile itself.
+        // Focus is a white frame round the tile, as Windows draws it when you
+        // move with a controller; the tile itself is never dimmed.
         if (sel) {
             const SDL_Color c = WithAlpha(t.title, a);
             m_gfx->FillRect(r.x - 3, r.y - 3, r.w + 6, 3, c);
@@ -653,8 +682,11 @@ namespace sl::menu::ui {
         SDL_Renderer *ren = m_gfx->Renderer();
         const SDL_Rect band{ 0, bandTop - 4, gfx::Gfx::Width,
                              (bandBot + 4) - (bandTop - 4) };
+        m_gfx->FxClose();   // SDL is used directly below
         if (ren) SDL_RenderSetClipRect(ren, &band);
 
+        struct Vis { TileRect r; int item; Uint8 a; };
+        std::vector<Vis> visible;
         for (const TileRect &src : tiles) {
             TileRect r = src;
             r.y -= scrollPx;
@@ -675,8 +707,16 @@ namespace sl::menu::ui {
             else if (over_bot > 0) a = (Uint8)std::max(0, 255 - over_bot * 5);
             if (a == 0) continue;
 
-            DrawTileFace(r, m_items[src.item], src.item == m_cursor, a);
+            visible.push_back({ r, src.item, a });
         }
+        // Bases first, all in one GPU pass; then everything drawn on them.
+        if (m_gfx->CardsOk()) {
+            for (const auto &v : visible) DrawTileFace(v.r, m_items[v.item], v.item == m_cursor, v.a, 0);
+            for (const auto &v : visible) DrawTileFace(v.r, m_items[v.item], v.item == m_cursor, v.a, 1);
+        } else {
+            for (const auto &v : visible) DrawTileFace(v.r, m_items[v.item], v.item == m_cursor, v.a, -1);
+        }
+        m_gfx->FxClose();   // SDL is used directly below
         if (ren) SDL_RenderSetClipRect(ren, nullptr);
 
         // The selected entry's name, in the corner Metro puts its page title.

@@ -55,15 +55,20 @@ namespace sl::menu::smi {
     inline Result OpenHomebrew(const char *nro_path, const char *argv = nullptr) {
         sl::smi::PayloadHomebrew p {};
         strncpy(p.nro_path, nro_path ? nro_path : "", sizeof(p.nro_path) - 1);
+        // No argv means "just your own path" - the hbmenu convention, which
+        // hbloader applies itself when the target file has no second line.
+        if (argv && !argv[0]) argv = nullptr;
         strncpy(p.argv, argv ? argv : (nro_path ? nro_path : ""), sizeof(p.argv) - 1);
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::OpenHomebrew, p);
     }
 
     // Launch a .nro as an application in a donor game's slot (full RAM / perms).
-    inline Result LaunchHomebrewApp(u64 donor_id, const char *nro_path) {
+    inline Result LaunchHomebrewApp(u64 donor_id, const char *nro_path,
+                                    const char *argv = nullptr) {
         sl::smi::PayloadHomebrew p {};
         strncpy(p.nro_path, nro_path ? nro_path : "", sizeof(p.nro_path) - 1);
-        strncpy(p.argv, nro_path ? nro_path : "", sizeof(p.argv) - 1);
+        if (argv && !argv[0]) argv = nullptr;
+        strncpy(p.argv, argv ? argv : (nro_path ? nro_path : ""), sizeof(p.argv) - 1);
         p.donor_id = donor_id;
         return sl::smi::SendMenuCommand(sl::smi::SystemMessage::LaunchHomebrewApplication, p);
     }

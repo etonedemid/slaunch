@@ -26,6 +26,17 @@ namespace sl::menu::audio {
         int  Volume() const { return m_volume; }
         void ToggleShuffle();
         bool Shuffle() const { return m_shuffle; }
+        // What happens when a track ends: go on to the next (All), play it
+        // again (One), or go on and stop after the last one (Off).
+        enum Repeat { RepeatAll = 0, RepeatOne, RepeatOff, RepeatCount };
+        void   CycleRepeat();
+        Repeat RepeatMode() const { return m_repeat; }
+
+        double Position() const { return m_pos; }   // seconds into the current track
+        // Length of track i in seconds, read from the file's own headers
+        // (SDL_mixer 2.0.4 cannot tell us) and cached. 0 when unknown.
+        double Duration(int i);
+        void   Seek(double seconds);                // within the current track
 
         void Next();
         void Prev();
@@ -35,6 +46,10 @@ namespace sl::menu::audio {
         int  TrackIndex() const { return m_index; }
         std::string TrackName(int i) const;   // display name (file base, no ext)
         std::string CurrentName() const;
+        // Encoded cover image for track i (jpg/png bytes), empty if it has none:
+        // a sidecar <track>.jpg/.png beside it, else a picture embedded in the
+        // file's ID3v2 tag (mp3) or FLAC metadata.
+        std::vector<u8> CoverArt(int i) const;
 
         void SaveState();
 
@@ -59,7 +74,9 @@ namespace sl::menu::audio {
         bool   m_enabled  = true;
         int    m_volume   = 55;      // 0..100
         bool   m_shuffle  = false;
+        Repeat m_repeat   = RepeatAll;
         std::vector<std::string> m_tracks;   // full paths
+        std::vector<double>      m_dur;      // Duration cache, -1 = not read yet
         int    m_index    = 0;
         double m_pos      = 0.0;     // seconds into the current track
         u64    m_last_tick = 0;      // for the Update() dt

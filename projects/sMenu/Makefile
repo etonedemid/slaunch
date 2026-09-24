@@ -10,10 +10,10 @@ BUILD    := build
 SOURCES  := source source/sl/menu/ui source/sl/menu/gfx source/sl/menu/smi \
             source/sl/menu/net source/sl/menu/widgets source/sl/menu/audio \
             source/sl/menu/hb source/sl/menu/play source/sl/menu/dbg \
-            source/sl/menu/news source/sl/menu/cfg ../../libs/Lua
+            source/sl/menu/news source/sl/menu/cfg source/sl/menu/usb ../../libs/Lua
 
 INCLUDES := include ../../libs/sCommon/include \
-            ../../libs/Lua ../../libs/sol2/include
+            ../../libs/Lua ../../libs/sol2/include ../../libs/haze/include
 
 COMMON_SRC := ../../libs/sCommon/source/sl/os/Applications.cpp
 
@@ -27,6 +27,17 @@ SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image SDL2_mixer)
 CURL_CFLAGS := $(shell $(PKGCONF) --cflags libcurl)
 CURL_LIBS   := $(shell $(PKGCONF) --libs libcurl)
 
+# Trimmed static FFmpeg (H.264 decode + nvtegra NVDEC hwaccel) for video
+# wallpapers. Built from source by scripts/build-ffmpeg.sh into its own
+# prefix, same shape as $(DEVKITPRO)/AtmosphereLibs for sSystem - it is not a
+# devkitPro portlib, so no pkg-config .pc file; flags are hand-rolled like
+# the Lua/sol2 block below. See THIRDPARTY.md.
+FFMPEG_PREFIX := $(DEVKITPRO)/FFmpegLibs
+FFMPEG_CFLAGS := -I$(FFMPEG_PREFIX)/include
+# Link order matters for static libs: avformat depends on avcodec depends on
+# avutil (same reasoning as the curl/mbedtls/z ordering below).
+FFMPEG_LIBS   := -lavformat -lavcodec -lavutil
+
 #---------------------------------------------------------------------------------
 # sMenu is a library applet: its exefs (main + main.npdm) lives in a folder on
 # the SD card, which sSystem serves into an applet slot via ECS.
@@ -38,7 +49,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 1.3.0
+APP_VERSION := 1.4.0
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
@@ -65,9 +76,15 @@ SOL_FLAGS = -DSOL_ALL_SAFETIES_ON=0 -DSOL_EXCEPTIONS_SAFE_PROPAGATION=0 \
 
 COMPAT_FLAGS = -Dsol_lua_newstate_args=$(NEWSTATE_ARGS)
 
+# SL_HAS_NVTEGRA: only this build links the vendored averne/FFmpeg nvtegra
+# fork (scripts/build-ffmpeg.sh); the AV_HWDEVICE_TYPE_NVTEGRA/AV_PIX_FMT_NVTEGRA
+# enum members that fork adds are not preprocessor macros, so Video.cpp cannot
+# test for them with #ifdef - this flag is the compile-time signal instead.
+# The sim's native build (stock host FFmpeg, software decode only) must NOT
+# define this.
 CFLAGS    = -g -Wall -O2 -ffunction-sections -fvisibility=default $(ARCH) \
-            $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) $(LUA_DEFINES) \
-            -DSL_VERSION=\"$(APP_VERSION)\"
+            $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) $(FFMPEG_CFLAGS) $(LUA_DEFINES) \
+            -DSL_VERSION=\"$(APP_VERSION)\" -DSL_HAS_VIDEO=1 -DSL_HAS_NVTEGRA=1
 
 CXXFLAGS = $(CFLAGS) -std=gnu++20 -fno-rtti -fno-exceptions \
            $(SOL_FLAGS) $(COMPAT_FLAGS)
@@ -83,11 +100,12 @@ LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
             -Wl,-Map,$(TARGET).map \
             -Wl,--unresolved-symbols=ignore-in-shared-libs
 
-# Network libs first (curl -> mbedtls -> z), then SDL (whose flags end with
-# -lnx) so libnx resolves everything last.
-LIBS     := $(CURL_LIBS) $(SDL_LIBS)
+# Network libs first (curl -> mbedtls -> z), then FFmpeg (avformat -> avcodec
+# -> avutil), then SDL (whose flags end with -lnx) so libnx resolves
+# everything last.
+LIBS     := $(CURL_LIBS) $(FFMPEG_LIBS) $(SDL_LIBS)
 
-LIBDIRS  := $(PORTLIBS) $(LIBNX)
+LIBDIRS  := $(PORTLIBS) $(LIBNX) $(FFMPEG_PREFIX)
 
 #---------------------------------------------------------------------------------
 # Lua is out-of-tree too, and lands outside build/ for the same reason the
@@ -107,9 +125,19 @@ CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))
 # with their own flags (sysmodule specs here, libnx applet specs there), and
 # each linked whichever object the other had written last. That is a menu
 # object inside the daemon, or the reverse, decided by build order.
+# Atmosphère's MTP server (libs/haze). Built as it is upstream: C++23 and
+# Atmosphère's libvapours headers, from the same checkout sSystem builds
+# libstratosphere from. Objects under build/haze/ for the reason given above.
+ATMOSPHERE_DIR ?= /opt/atmosphere
+HAZE_SRC   := $(wildcard ../../libs/haze/source/*.cpp)
+HAZE_OBJ   := $(patsubst %.cpp,$(BUILD)/haze/%.o,$(notdir $(HAZE_SRC)))
+HAZE_FLAGS := -std=gnu++23 -I$(ATMOSPHERE_DIR)/libraries/libvapours/include
+# The menu's own wrapper includes haze's headers, so it needs them too.
+$(BUILD)/source/sl/menu/usb/Mtp.o: CXXFLAGS += $(HAZE_FLAGS)
+
 COMMON_OBJ := $(patsubst %.cpp,$(BUILD)/sCommon/%.o,$(notdir $(COMMON_SRC)))
 SFILES   := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.s))
-OFILES   := $(patsubst %.cpp,$(BUILD)/%.o,$(CPPFILES)) $(COMMON_OBJ) $(LUA_OBJ) \
+OFILES   := $(patsubst %.cpp,$(BUILD)/%.o,$(CPPFILES)) $(COMMON_OBJ) $(LUA_OBJ) $(HAZE_OBJ) \
             $(patsubst %.c,$(BUILD)/%.o,$(CFILES)) \
             $(patsubst %.s,$(BUILD)/%.o,$(SFILES))
 
@@ -144,6 +172,10 @@ $(BUILD)/$(TARGET).elf: $(OFILES) | $(BUILD)
 $(BUILD)/Lua/%.o: ../../libs/Lua/%.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/haze/%.o: ../../libs/haze/source/%.cpp | $(BUILD)
+	@mkdir -p $(dir $@)
+	@$(CXX) $(CXXFLAGS) $(HAZE_FLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD)/sCommon/%.o: ../../libs/sCommon/source/sl/os/%.cpp | $(BUILD)
 	@mkdir -p $(dir $@)

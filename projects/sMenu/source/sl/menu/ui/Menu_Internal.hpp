@@ -27,22 +27,31 @@ namespace sl::menu::ui {
     // untappable.
     enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
            TH_IconPack, TH_Antialias, TH_ShelfVert, TH_TileCols, TH_TileRows,
-           TH_SgdbKey, TH_FlowSet, TH_Wrap,
-           TH_Hints, TH_Counter, TH_Fonts,
+           TH_TdbRegion, TH_Sgdb, TH_SgdbKey, TH_FlowSet, TH_Wrap,
+           TH_Hints, TH_Counter, TH_RetroArch, TH_Shortcuts, TH_Fonts,
            TH_Language, TH_Music,
            TH_Widgets, TH_Entries,
            TH_Welcome, TH_Updates,
            TH_About, TH_Back, TH_Count };
 
     enum { EF_Background = 0, EF_Wallpaper, EF_WallpaperDim, EF_WallpaperBlur,
-           EF_WallpaperBlurRadius, EF_WallpaperSnow, EF_WallpaperFps,
+           EF_WallpaperBlurRadius, EF_WallpaperSnow,
            EF_Top, EF_Bottom, EF_Text,
-           EF_Accent, EF_Secondary, EF_Title, EF_IconBg, EF_IconBgAlpha,
+           EF_Accent, EF_Secondary, EF_Title, EF_IconFg, EF_IconBg, EF_IconBgAlpha,
+           EF_FxA, EF_FxB,
            EF_RibbonLines, EF_RibbonThickness, EF_RibbonAmplitude,
-           EF_RibbonSeed, EF_RibbonLayers, EF_RibbonYCenter,
+           EF_RibbonSeed, EF_RibbonLayers, EF_RibbonYCenter, EF_FxX, EF_FxCam,
            EF_Rename, EF_Save, EF_Delete, EF_Count };
 
-    enum { MU_Enabled = 0, MU_Track, MU_Volume, MU_Shuffle, MU_Back, MU_Count };
+    // GameTDB art regions, offered in Theming; the first is the default.
+    inline constexpr const char *kTdbRegions[] = { "US", "EN", "JA", "FR", "DE",
+                                                   "ES", "IT", "AU", "KO", "ZH", "RU" };
+    inline constexpr int kTdbRegionCount = (int)(sizeof(kTdbRegions) / sizeof(kTdbRegions[0]));
+
+    // Music player layout, shared by DrawMusic and its touch handler.
+    inline constexpr int kMuArtX = 80, kMuArtY = 110, kMuArt = 300;
+    inline constexpr int kMuListX = 460, kMuListY = 100, kMuRowH = 44, kMuRows = 10;
+    inline constexpr int kMuBarY = 612;
 
     // Return true when row *r* belongs to the wallpaper-effects block.
     inline bool IsEffectRow(int r) {
@@ -51,14 +60,37 @@ namespace sl::menu::ui {
     // Return true when row *r* is the blur-radius setting (hidden when blur off).
     inline bool IsBlurRadiusRow(int r) { return r == EF_WallpaperBlurRadius; }
     // Return true when row *r* belongs to the ribbon block.
-    inline bool IsRibbonRow(int r) {
-        return r >= EF_RibbonLines && r <= EF_RibbonYCenter;
+    // Ribbon, Ribbon glow and Grid all steer off the same six numbers - the
+    // editor just calls them different things (see the label override in
+    // DrawThemeEditor). Gradient, Stars and Aurora have nothing to tune.
+    inline bool StyleHasParams(int style) {
+        return style != BackgroundStyle_Gradient;
     }
-    // Return true when the wallpaper path is a directory (video frame sequence).
+
+    // Only the grid (its sun) and the ocean (its reflection) have anything to
+    // place horizontally; showing the row for the others would be a knob
+    // that does nothing.
+    inline bool StyleHasFxX(int style) {
+        return style == BackgroundStyle_Grid || style == BackgroundStyle_Ocean;
+    }
+
+    // Same story for the camera: only a style with a projection has one.
+    inline bool StyleHasFxCam(int style) { return style == BackgroundStyle_Grid; }
+
+    // The two effect colours only mean something to a style that draws with
+    // them, which is the same set.
+    inline bool IsFxColourRow(int r) { return r == EF_FxA || r == EF_FxB; }
+
+    inline bool IsRibbonRow(int r) {
+        return r >= EF_RibbonLines && r <= EF_FxCam;
+    }
+    // Return true when the wallpaper path names a video file (played back by
+    // gfx::VideoPlayer) rather than a still image. v1 scope is H.264 in an
+    // .mp4 container - see scripts/build-ffmpeg.sh.
     inline bool IsVideoPath(const char *path) {
         if (!path || !path[0]) return false;
-        struct stat st;
-        return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+        size_t len = strlen(path);
+        return len >= 4 && strcasecmp(path + len - 4, ".mp4") == 0;
     }
 
     // The entries the user can hide from the main menu. Theming is
@@ -76,6 +108,7 @@ namespace sl::menu::ui {
         { ItemKind::Wifi,         "Network"       },
         { ItemKind::Power,        "Power"         },
         { ItemKind::HomebrewMenu, "Homebrew menu" },
+        { ItemKind::FileManager,  "Files"         },
     };
     inline constexpr int kSysEntryN = (int)(sizeof(kSysEntries) / sizeof(kSysEntries[0]));
 
@@ -196,7 +229,7 @@ namespace sl::menu::ui {
     // Tiles, on the unit grid a Windows 8 / Windows Phone start screen uses: one
     // square unit, a fixed gap, and wider tiles built from whole units so every
     // edge lines up however they are mixed.
-    inline constexpr int kGridGap     = 8;     // Metro's gap is tight
+    inline constexpr int kGridGap     = 5;     // Windows 10 Mobile packs tiles tight
     // The band the wall is laid out inside. The side margin matches the one the
     // top bar clock already uses, and the bottom stops clear of the hint line;
     // nine columns at a fixed 130px unit would have reached within 23px of the
@@ -339,6 +372,13 @@ namespace sl::menu::ui {
     // solid square floating behind a ghost icon.
     inline SDL_Color IconPlate(const Theme &t, Uint8 item_alpha) {
         return WithAlpha(t.icon_bg, (Uint8)((int)item_alpha * t.icon_bg_alpha / 255));
+    }
+
+    // The artwork on that plate. Same idea, one step simpler: the icon's own
+    // alpha carries the shape, so the row's fade is the only thing scaling it.
+    // Pass it to DrawImageTinted, which multiplies this alpha by its own.
+    inline SDL_Color IconTint(const Theme &t, Uint8 item_alpha) {
+        return WithAlpha(t.icon_fg, item_alpha);
     }
 
     // Editor palette.
@@ -613,6 +653,21 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v1.4.0" },
+            { false, "USB file transfer - plug into a computer on the menu to copy files, with progress shown" },
+            { false, "File manager: browse the SD card, copy, move, rename and delete" },
+            { false, "Album plays video clips, with a full photo viewer and slideshow" },
+            { false, "Music has a full player: album art, track list, seeking, repeat, shuffle, volume" },
+            { false, "Flow is real 3D - solid boxes with lighting, reflections and printed box scans" },
+            { false, "Box art from GameTDB, full box scans included, with a region choice" },
+            { false, "SteamGridDB is optional now; box art downloads show their progress" },
+            { false, "Box art loads in the background - no more stutter landing on a game" },
+            { false, "Grid looks like Windows 10 Mobile tiles; Shelf like the Xbox 360" },
+            { false, "New Ocean background, Retrowave hills, and every background runs on the GPU" },
+            { false, "Simpler first-run setup, with a gallery to pick your layout" },
+            { false, "The theme editor saves when you close it" },
+            { false, "Fixed: red and blue swapped, crashes on bad images and big ROM libraries, choppy clip audio" },
+            { false, "Fixed: some games showing another game's Steam news" },
             { true,  "v1.3.0" },
             { false, "Settings are per user now - theme, layout, favourites and the rest follow the account" },
             { false, "Your existing settings carry over to the first account that opens the menu" },
@@ -702,124 +757,13 @@ namespace sl::menu::ui {
             case EF_Accent:    return &c.accent;
             case EF_Secondary: return &c.dim;
             case EF_Title:     return &c.title;
+            case EF_IconFg:    return &c.icon_fg;
             case EF_IconBg:    return &c.icon_bg;
+            case EF_FxA:       return &c.fx_a;
+            case EF_FxB:       return &c.fx_b;
             default:           return nullptr;
         }
     }
-
-    // =========================================================================
-    // Blurred wallpapers are cached on the card as finished pixels.
-    //
-    // The blur is the single most expensive thing between a HOME press and the
-    // menu appearing, and it was being redone from scratch on every launch to
-    // produce a result that only changes when the wallpaper or the radius does.
-    //
-    // The blob is raw RGBA at the reduced size - about 225 KB for a 720p
-    // wallpaper - rather than a PNG. It is written once and read many times, so
-    // trading a little space for a read that needs no decoding is the right way
-    // round: re-encoding as PNG would put an image decode back on the path this
-    // is meant to clear, which is most of what we are trying to avoid.
-    //
-    // One file per wallpaper, named from its path. The source's size and mtime
-    // and the radius all live in the header and are checked on load, so editing
-    // the image or changing the radius rebuilds that entry in place instead of
-    // leaving a stale copy behind. The cache cannot grow past one file per
-    // wallpaper actually used.
-        inline constexpr const char *kBlurCacheDir = "sdmc:/slaunch/cache/blur";
-        inline constexpr u32 kBlurMagic   = 0x314C4253;  // 'SBL1'
-        inline constexpr u32 kBlurVersion = 1;
-
-        struct BlurHeader {
-            u32 magic, version, w, h, radius, reserved;
-            u64 src_size, src_mtime;
-        };
-
-        // FNV-1a over the wallpaper path. This only names the file - the header
-        // decides whether an entry is usable - so a collision costs a rebuild,
-        // never a wrong image.
-        inline u64 BlurKey(const char *path) {
-            u64 h = 1469598103934665603ULL;
-            for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
-                h ^= (u64)*p;
-                h *= 1099511628211ULL;
-            }
-            return h;
-        }
-
-        inline std::string BlurCachePath(const char *path) {
-            char buf[96];
-            snprintf(buf, sizeof(buf), "%s/%016llx.blur",
-                     kBlurCacheDir, (unsigned long long)BlurKey(path));
-            return std::string(buf);
-        }
-
-        // Any mismatch at all is reported as a miss, and a miss just means the
-        // blur runs as it always did.
-        inline SDL_Texture *ReadBlurCache(SDL_Renderer *rend, const char *cache_path,
-                                   int radius, const struct stat &src) {
-            FILE *f = fopen(cache_path, "rb");
-            if (!f) return nullptr;
-
-            BlurHeader h{};
-            if (fread(&h, sizeof(h), 1, f) != 1) { fclose(f); return nullptr; }
-            if (h.magic != kBlurMagic || h.version != kBlurVersion ||
-                h.radius != (u32)radius ||
-                h.src_size  != (u64)src.st_size ||
-                h.src_mtime != (u64)src.st_mtime ||
-                h.w == 0 || h.h == 0 || h.w > 4096 || h.h > 4096) {
-                fclose(f);
-                return nullptr;
-            }
-
-            const size_t bytes = (size_t)h.w * (size_t)h.h * 4;
-            std::vector<uint8_t> rgba(bytes);
-            const bool ok = fread(rgba.data(), 1, bytes, f) == bytes;
-            fclose(f);
-            if (!ok) return nullptr;   // truncated; rebuild over the top of it
-
-            SDL_Texture *tex = SDL_CreateTexture(rend, SDL_PIXELFORMAT_RGBA8888,
-                                                 SDL_TEXTUREACCESS_STATIC,
-                                                 (int)h.w, (int)h.h);
-            if (!tex) return nullptr;
-            SDL_UpdateTexture(tex, nullptr, rgba.data(), (int)h.w * 4);
-            SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-            return tex;
-        }
-
-        inline void WriteBlurCache(const char *cache_path, int radius,
-                            const struct stat &src,
-                            int w, int h, const uint8_t *rgba) {
-            mkdir("sdmc:/slaunch", 0777);
-            mkdir("sdmc:/slaunch/cache", 0777);
-            mkdir(kBlurCacheDir, 0777);
-
-            // Written alongside and renamed into place. Writing over the real
-            // file would leave a half-written blob if the console sleeps or
-            // loses power mid-write, and the size check above would not catch
-            // it - a short read is detected, but a full-length file with stale
-            // tail bytes is not.
-            const std::string tmp = std::string(cache_path) + ".tmp";
-            FILE *f = fopen(tmp.c_str(), "wb");
-            if (!f) return;
-
-            BlurHeader hdr{};
-            hdr.magic     = kBlurMagic;
-            hdr.version   = kBlurVersion;
-            hdr.w         = (u32)w;
-            hdr.h         = (u32)h;
-            hdr.radius    = (u32)radius;
-            hdr.src_size  = (u64)src.st_size;
-            hdr.src_mtime = (u64)src.st_mtime;
-
-            const size_t bytes = (size_t)w * (size_t)h * 4;
-            const bool ok = fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
-                            fwrite(rgba, 1, bytes, f) == bytes;
-            fclose(f);
-            if (!ok) { remove(tmp.c_str()); return; }
-
-            remove(cache_path);   // FAT rename will not overwrite
-            rename(tmp.c_str(), cache_path);
-        }
 
         // =========================================================================
         // PS3 XMB-style ribbon background: translucent ribbons flowing across the
@@ -836,30 +780,78 @@ namespace sl::menu::ui {
         // Two superimposed sine waves at different spatial and temporal rates keep
         // the flow from looking like a metronome.
         //
-        // Cost is deliberately one filled rect per column per ribbon, the same as
-        // the flat-line version this replaces: Gfx::FillTriangle rasterises a
-        // scanline at a time, so an actual triangle mesh would cost hundreds of
-        // draw calls per ribbon and is not an option here.
+        // Drawn on the GPU as one triangle strip per ribbon (kRibbonVs). The
+        // rect-per-column version below it is the fallback for when GL is not
+        // available, and costs a filled rect per column per ribbon on the CPU.
         // =========================================================================
 
-        inline void DrawRibbonBackground(gfx::Gfx *gfx, const Theme &t) {
+        // GPU ribbon: one triangle strip per ribbon, the wave evaluated per
+        // vertex from the same per-ribbon numbers the rect version uses. The
+        // strip joins column to column, so steep sections stay one sheet
+        // without the rect version's gap-filling spans.
+        inline constexpr const char *kRibbonVs = R"(
+uniform vec4 uW1;    // spatial freq, temporal freq, phase, amplitude
+uniform vec4 uW2;    // spatial freq 2, temporal freq 2, base y, flat height
+uniform vec4 uCol;
+uniform float uStep;
+uniform float uGlow;
+varying vec4 vCol;
+varying float vAdd, vEdge, vHi;
+float Wave(float nx) {
+    float w1 = sin((nx * uW1.x + uTime * uW1.y + uW1.z) * TAU);
+    float w2 = sin((nx * uW2.x - uTime * uW2.y + uW1.z * 1.7) * TAU);
+    return uW2.z + (w1 + 0.45 * w2) * uW1.w;
+}
+void main() {
+    float x  = aV.x * uStep;
+    float y0 = Wave(x / 1280.0), y1 = Wave((x + uStep) / 1280.0);
+    float slope = (y1 - y0) / uStep;
+    float face  = inversesqrt(1.0 + slope * slope);   // 1 flat on, 0 edge on
+    float h     = floor(uW2.w * (0.28 + 0.72 * face)) + 1.0;
+    float half_ = h * 0.5 + abs(y1 - y0) * 0.5;
+    vHi = 0.0;
+    if (uGlow > 0.5) {                                 // additive bloom pass
+        half_ += h;
+        vCol = vec4(uCol.rgb, 0.0);
+        vAdd = uCol.a * 0.35 * face;
+    } else {
+        vCol = vec4(uCol.rgb, uCol.a * (0.30 + 0.70 * face * face));
+        vAdd = 0.0;
+        float sheen = face * face * face;
+        if (sheen > 0.35) vHi = min(1.0, uCol.a * sheen * 1.6);
+    }
+    vEdge = aV.y * 2.0 * half_;                        // px below the top edge
+    gl_Position = Clip(vec2(x, y0 - half_ + vEdge));
+}
+)";
+        inline constexpr const char *kRibbonFs = R"(
+varying vec4 vCol;
+varying float vAdd, vEdge, vHi;
+void main() {
+    float a = vCol.a;
+    if (vEdge < 1.0) a = vHi + a * (1.0 - vHi);        // leading-edge sheen
+    gl_FragColor = vec4(vCol.rgb * (a + vAdd), a);
+}
+)";
+
+        inline void DrawRibbonBackground(gfx::Gfx *gfx, const Theme &t, bool glow = false) {
             const int W = gfx::Gfx::Width;
             const int H = gfx::Gfx::Height;
             const float elapsed = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
 
             // Pre-compute the three palette colors.
             SDL_Color colors[3];
-            colors[0] = t.accent; // accent
+            colors[0] = t.fx_a;  // primary
             colors[1] = SDL_Color{255, 255, 255, 0}; // white wash
-            colors[2] = t.dim;    // dim tint
+            colors[2] = t.fx_b;   // secondary
 
             // Clamp theme parameters to safe ranges.
-            int numLines   = t.ribbon_line_count;
-            int thickness  = t.ribbon_thickness;
-            int amplitude  = t.ribbon_amplitude;
-            int seed       = t.ribbon_seed;
-            int layers     = t.ribbon_layers;
-            int y_center    = t.ribbon_y_center;
+            int numLines   = t.Fx().lines;
+            int thickness  = t.Fx().thickness;
+            int amplitude  = t.Fx().amplitude;
+            int seed       = t.Fx().seed;
+            int layers     = t.Fx().layers;
+            int y_center    = t.Fx().y;
             if (numLines   <  1) numLines   =  1;
             if (numLines   > 40) numLines   = 40;
             if (thickness  <  1) thickness  =  1;
@@ -878,7 +870,10 @@ namespace sl::menu::ui {
             if (y_center  < -400) y_center  = -400;
             if (y_center  > 1120) y_center  = 1120;
 
-            const int step = 4;
+            // The glow variant trades draw calls for detail: half the column
+            // width, so the surface is sampled twice as finely and the curl
+            // reads as a curve rather than as a staircase.
+            const int step = glow ? 2 : 4;
             const float margin = 40.0f;
             const float usableH = (float)(H - 2 * margin);
 
@@ -896,6 +891,9 @@ namespace sl::menu::ui {
                 const float h = sinf(v) * 43758.5453f;
                 return h - floorf(h);
             };
+
+            const bool gpu = gfx->FxBegin(gfx->FxProgram(kRibbonVs, kRibbonFs));
+            if (gpu) gfx->FxSet("uStep", (float)step);
 
             for (int L = 0; L < layers; L++) {
                 const float lh1 = hashf((float)L * 12.9898f + (float)seed * 3.17f);
@@ -1002,6 +1000,19 @@ namespace sl::menu::ui {
                     return baseY + (w1 + 0.45f * w2) * lineAmp;
                 };
 
+                if (gpu) {
+                    gfx->FxSet("uW1", spatialFreq, temporalFreq, phase, lineAmp);
+                    gfx->FxSet("uW2", spatialFreq2, temporalFreq2, baseY, flatH);
+                    gfx->FxSet("uCol", c);
+                    if (glow) {
+                        gfx->FxSet("uGlow", 1.0f);
+                        gfx->FxStrip(W / step + 1);
+                    }
+                    gfx->FxSet("uGlow", 0.0f);
+                    gfx->FxStrip(W / step + 1);
+                    continue;
+                }
+
                 // One filled column per step, spanning the ribbon's thickness at
                 // that point. Consecutive columns share edges, so the result is a
                 // continuous surface rather than a dotted line.
@@ -1022,23 +1033,683 @@ namespace sl::menu::ui {
                     SDL_Color cc = c;
                     cc.a = (Uint8)((float)c.a * (0.30f + 0.70f * face * face));
 
-                    gfx->FillRect(x, (int)(y0 - h * 0.5f), step, h, cc);
+                    // Span the column from this sample to the next, not just the
+                    // thickness at this one. Foreshortening thins the band
+                    // exactly where the wave is steepest, which is where
+                    // consecutive samples are furthest apart - so a fixed-height
+                    // rect left the steep sections as a row of disconnected
+                    // dashes. Covering the gap is what makes it read as one
+                    // continuous sheet instead of a dotted line.
+                    const float top = std::min(y0, y1) - h * 0.5f;
+                    const float bot = std::max(y0, y1) + h * 0.5f;
 
-                    // A brighter hairline along the top edge, strongest where the
-                    // ribbon faces us. This is the highlight that separates one
-                    // ribbon from the one behind it.
+                    // Bloom: the same column, spread wider and added rather than
+                    // blended, under the ribbon itself. Additive is what makes
+                    // it read as the ribbon emitting light instead of as a
+                    // second, fatter ribbon behind it.
+                    if (glow) {
+                        const float bh = (bot - top) + h * 2.0f;
+                        SDL_Color gl = c;
+                        gl.a = (Uint8)((float)c.a * 0.35f * face);
+                        gfx->FillRectAdd(x, (int)(top - h), step, (int)bh + 1, gl);
+                    }
+
+                    gfx->FillRect(x, (int)top, step, (int)(bot - top) + 1, cc);
+
+                    // A brighter hairline along the leading edge, strongest where
+                    // the ribbon faces us. This is the highlight that separates
+                    // one ribbon from the one behind it.
                     const float sheen = face * face * face;
                     if (sheen > 0.35f) {
                         SDL_Color hi = cc;
                         hi.a = (Uint8)std::min(255.0f, (float)c.a * sheen * 1.6f);
-                        gfx->FillRect(x, (int)(y0 - h * 0.5f), step, 1, hi);
+                        gfx->FillRect(x, (int)top, step, 1, hi);
                     }
 
                     y0 = y1;
                 }
             }
+            }
+            if (gpu) gfx->FxEnd();
+        }
+
+        inline const char *BackgroundName(int style) {
+            switch (style) {
+                case BackgroundStyle_Ribbon: return T("Ribbon");
+                case BackgroundStyle_Stars:  return T("Stars");
+                case BackgroundStyle_Aurora: return T("Aurora");
+                case BackgroundStyle_Grid:   return T("Retrowave");
+                case BackgroundStyle_RibbonHD: return T("Ribbon glow");
+                case BackgroundStyle_Ocean:  return T("Ocean");
+                default:                     return T("Gradient");
+            }
+        }
+
+        // ---- other background styles ----------------------------------------
+        // All three are the same deal as the ribbon: theme colours, no assets,
+        // filled rects only, animated off the system tick. Anything needing a
+        // per-pixel pass (plasma, real noise) is out - this runs every frame
+        // under everything else the menu draws.
+
+        inline float BgHash(float v) {           // 0..1, deterministic
+            const float h = sinf(v) * 43758.5453f;
+            return h - floorf(h);
+        }
+
+        // Starfield. Sizes spread wide enough to read as depth, and the
+        // brightest few get a cross flare - one wide rect and one tall one
+        // through the centre, which is what a bright point looks like through
+        // any real lens and the cheapest way to say "this one is close".
+        //   line_count -> how many       thickness -> largest size
+        //   amplitude  -> twinkle speed   seed      -> which sky
+        //   layers     -> flare size      y_center  -> horizon (none below it)
+        // GPU stars: one quad per star, every property hashed from its index in
+        // the vertex shader; the fragment shader draws core, cross flare and
+        // halo inside the quad.
+        inline constexpr const char *kStarsVs = R"(
+uniform vec4 uA, uB;
+uniform vec4 uP;        // max size, twinkle speed, seed, flare
+uniform float uFloor;   // horizon: no stars below it
+varying vec2 vL;        // px from the star's top-left corner
+varying vec4 vC;
+varying vec3 vS;        // size, flare length, halo spread
+void main() {
+    float fi  = aV.z + uP.z;
+    vec2  pos = floor(vec2(Hash(fi * 1.37) * 1280.0, Hash(fi * 3.71) * uFloor));
+    float mag = Hash(fi * 5.1);
+    float tw  = 0.55 + 0.45 * sin(uTime * (0.2 + Hash(fi * 7.3) * uP.y) + fi);
+    float sz  = 1.0 + floor(mag * uP.x);
+    vec4  c   = mag > 0.82 ? uA : uB;
+    vC = vec4(c.rgb, (0.18 + 0.82 * mag * mag) * tw);
+    bool  flare = mag > 0.93 && uP.w > 0.5;
+    float fl  = flare ? floor(sz * uP.w) : 0.0;
+    float spr = flare ? sz * 3.0 : 0.0;
+    float ext = max(fl, spr);
+    vS = vec3(sz, fl, spr);
+    vL = Corner() * (sz + 2.0 * ext) - ext;
+    gl_Position = Clip(pos + vL);
+}
+)";
+        inline constexpr const char *kStarsFs = R"(
+varying vec2 vL;
+varying vec4 vC;
+varying vec3 vS;
+void main() {
+    float sz = vS.x, fl = vS.y;
+    float a = 0.0;
+    if (vL.x >= 0.0 && vL.y >= 0.0 && vL.x < sz && vL.y < sz) {
+        a = vC.a;
+    } else if (fl > 0.0) {
+        float mid = floor(sz * 0.5);
+        bool h = floor(vL.y) == mid && vL.x >= -fl && vL.x < sz + fl;
+        bool v = floor(vL.x) == mid && vL.y >= -fl && vL.y < sz + fl;
+        if (h || v) a = vC.a * 0.35;
+    }
+    vec3 add = vec3(0.0);
+    if (vS.z > 0.0) {                          // halo rings, added
+        vec2  d  = max(max(-vL, vL - sz), 0.0);
+        float dd = ceil(max(d.x, d.y));
+        if (dd > 0.0 && dd <= vS.z) {
+            float f = 1.0 - dd / vS.z;
+            add = vC.rgb * vC.a * f * f * 0.45;
         }
     }
+    gl_FragColor = vec4(vC.rgb * a + add, a);
+}
+)";
+
+        inline void DrawStarsBackground(gfx::Gfx *gfx, const Theme &t) {
+            const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+            const float now = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
+
+            int   count = t.Fx().lines * 12;  if (count > 480) count = 480;
+            if (count < 12) count = 12;
+            const float maxSz  = 1.0f + (float)t.Fx().thickness * 0.25f;
+            const float tspeed = (float)t.Fx().amplitude * 0.05f;
+            const float seed   = (float)t.Fx().seed * 4.7f + 1.0f;
+            const float flare  = (float)t.Fx().layers * 0.6f;
+            float floorY = (float)t.Fx().y;
+            if (floorY < 40.0f) floorY = 40.0f;
+            if (floorY > (float)H) floorY = (float)H;
+
+            if (gfx->FxBegin(gfx->FxProgram(kStarsVs, kStarsFs))) {
+                gfx->FxSet("uA", t.fx_a);
+                gfx->FxSet("uB", t.fx_b);
+                gfx->FxSet("uP", maxSz, tspeed, seed, flare);
+                gfx->FxSet("uFloor", floorY);
+                gfx->FxQuads(count);
+                gfx->FxEnd();
+                return;
+            }
+
+            for (int i = 0; i < count; i++) {
+                const float fi = (float)i + seed;
+                const int x = (int)(BgHash(fi * 1.37f) * W);
+                const int y = (int)(BgHash(fi * 3.71f) * floorY);
+                const float mag = BgHash(fi * 5.1f);               // 0 faint .. 1 bright
+                const float tw  = 0.55f + 0.45f * sinf(now * (0.2f + BgHash(fi * 7.3f) * tspeed) + fi);
+                const int   sz  = 1 + (int)(mag * maxSz);
+                SDL_Color c = (mag > 0.82f) ? t.fx_a : t.fx_b;
+                c.a = (Uint8)(255.0f * (0.18f + 0.82f * mag * mag) * tw);
+
+                if (mag > 0.93f && flare > 0.5f) {
+                    // Close star: core, cross flare, and a soft halo.
+                    const int fl = (int)((float)sz * flare);
+                    SDL_Color f = c; f.a = (Uint8)(c.a * 0.35f);
+                    gfx->FillRect(x - fl, y + sz / 2, fl * 2 + sz, 1, f);
+                    gfx->FillRect(x + sz / 2, y - fl, 1, fl * 2 + sz, f);
+                    gfx->GlowRect(x, y, sz, sz, c, sz * 3);
+                }
+                gfx->FillRect(x, y, sz, sz, c);
+            }
+        }
+
+        // Aurora. Curtains, not columns: each band is a hanging sheet whose
+        // bottom edge waves, lit from the bottom and fading out toward the top,
+        // with vertical striations running through it - the rays are what make
+        // it read as aurora rather than as a smear. Colour crossfades between
+        // the accent and the title colour along its length.
+        // GPU aurora: one strip per curtain, a column every 3px from the top of
+        // the curtain (aV.y = 0) to its hem (1); the slice fade is quantised in
+        // the fragment shader so "softness" keeps its meaning.
+        inline constexpr const char *kAuroraVs = R"(
+uniform vec4 uBand;   // index, drift, centre, reach
+uniform vec4 uG;      // hem y, slices, brightness norm, seed
+varying float vK, vI;
+void main() {
+    float x = aV.x * 3.0, nx = x / 1280.0, fb = uBand.x, drift = uBand.y;
+    float edge = 1.0 - abs(x - uBand.z) / uBand.w;
+    float env  = edge > 0.0 ? edge * (0.45 + 0.55 * edge) : 0.0;
+    float hem  = uG.x * (0.55 + 0.30 * fb)
+               + sin((nx * 2.3 + drift) * TAU) * 70.0
+               + sin((nx * 5.1 - drift * 1.7) * TAU) * 26.0;
+    float top  = hem - (720.0 * 0.42 + 60.0 * Hash(fb * 4.4 + nx + uG.w));
+    float rs   = Hash(floor(nx * 90.0) + fb * 13.0);
+    float ray  = 0.35 + 0.65 * (0.5 + 0.5 * sin(uTime * (0.35 + rs * 0.5) + rs * TAU));
+    vI = 110.0 / 255.0 * ray * env * uG.z;
+    vK = aV.y;
+    gl_Position = Clip(vec2(x, mix(top, hem, aV.y)));
+}
+)";
+        inline constexpr const char *kAuroraFs = R"(
+uniform vec4 uA, uB, uG;
+varying float vK, vI;
+void main() {
+    float k = min(floor(vK * uG.y), uG.y - 1.0) / (uG.y - 1.0);
+    float a = k * k * (1.0 - 0.25 * k) * vI;
+    if (a < 3.0 / 255.0) discard;
+    gl_FragColor = vec4(mix(uB.rgb, uA.rgb, k) * a, 0.0);   // additive
+}
+)";
+
+        inline void DrawAuroraBackground(gfx::Gfx *gfx, const Theme &t) {
+            const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+            const float now = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
+            //   line_count -> curtains      thickness -> width
+            //   amplitude  -> sway           seed      -> which sky
+            //   layers     -> softness       y_center  -> where the hem hangs
+            const int colStep = 3;
+            int slices = 6 + t.Fx().layers;              // vertical steps in the fade
+            if (slices < 4) slices = 4;
+            // One curtain per unit, so the number in the editor is the number
+            // on screen. Capped because past a handful they stop being separate
+            // sheets and start being a fog.
+            int bands = t.Fx().lines;
+            if (bands < 1) bands = 1;
+            if (bands > 8) bands = 8;
+            const float sway   = (float)t.Fx().amplitude * 2.4f;
+            const float wide   = 0.10f + (float)t.Fx().thickness * 0.035f;
+            const float sseed  = (float)t.Fx().seed * 0.31f;
+            // More curtains must not mean a brighter sky: without this, turning
+            // the count up adds light everywhere they overlap and the screen
+            // washes out instead of filling with separate sheets.
+            const float bandNorm = 1.0f / sqrtf((float)bands);
+            const float hemY   = (float)t.Fx().y;
+
+            const bool gpu = gfx->FxBegin(gfx->FxProgram(kAuroraVs, kAuroraFs));
+            if (gpu) {
+                gfx->FxSet("uA", t.fx_a);
+                gfx->FxSet("uB", t.fx_b);
+                gfx->FxSet("uG", hemY, (float)slices, bandNorm, sseed);
+            }
+
+            for (int b = 0; b < bands; b++) {
+                const float fb = (float)b;
+                const float drift = now * (0.035f + 0.02f * BgHash(fb * 2.7f)) + fb * 2.1f;
+
+                // Each curtain hangs over part of the sky and fades out at both
+                // ends. Without this every band spans the full width, they all
+                // add together everywhere, and the result is a wash over the
+                // whole screen rather than lights in it.
+                const float centre = W * (0.18f + 0.64f * (bands > 1 ? fb / (float)(bands - 1) : 0.5f))
+                                   + sinf(drift * 2.0f + sseed) * sway;
+                const float reach  = W * (wide + 0.10f * BgHash(fb * 6.1f + sseed));
+                if (gpu) {
+                    gfx->FxSet("uBand", fb, drift, centre, reach);
+                    gfx->FxStrip(W / colStep + 1);
+                    continue;
+                }
+
+                for (int x = 0; x < W; x += colStep) {
+                    const float nx = (float)x / (float)W;
+                    const float edge = 1.0f - fabsf((float)x - centre) / reach;
+                    if (edge <= 0.0f) continue;
+                    const float env = edge * (0.45f + 0.55f * edge);  // soft ends
+
+                    // Where this column of the curtain hangs from and to. Two
+                    // unrelated waves so the hem never repeats across the width.
+                    const float hem = hemY * (0.55f + 0.30f * fb)
+                                    + sinf((nx * 2.3f + drift) * 6.2831853f) * 70.0f
+                                    + sinf((nx * 5.1f - drift * 1.7f) * 6.2831853f) * 26.0f;
+                    const float top = hem - (H * 0.42f + 60.0f * BgHash(fb * 4.4f + nx + sseed));
+
+                    // Rays: a fast, shallow noise across x that brightens and
+                    // dims neighbouring columns independently.
+                    // Rays brighten and dim on their own clock. This used to
+                    // hash floorf(now * 0.6f), which is a step function: every
+                    // column re-hashed on the same tick and the whole curtain
+                    // changed at once, every second and a bit. Each column now
+                    // has a fixed phase and rides a sine, so they drift past
+                    // each other instead of switching together.
+                    const float rseed = BgHash(floorf(nx * 90.0f) + fb * 13.0f);
+                    const float ray = 0.35f + 0.65f *
+                        (0.5f + 0.5f * sinf(now * (0.35f + rseed * 0.5f)
+                                            + rseed * 6.2831853f));
+
+                    const float sliceH = (hem - top) / (float)slices;
+                    if (sliceH < 0.5f) continue;
+
+                    for (int s2 = 0; s2 < slices; s2++) {
+                        const float k = (float)s2 / (float)(slices - 1);   // 0 top .. 1 hem
+                        // Brightest just above the hem, gone at the top.
+                        const float lum = k * k * (1.0f - 0.25f * k);
+                        SDL_Color c;
+                        c.r = (Uint8)(t.fx_b.r + ((int)t.fx_a.r - (int)t.fx_b.r) * k);
+                        c.g = (Uint8)(t.fx_b.g + ((int)t.fx_a.g - (int)t.fx_b.g) * k);
+                        c.b = (Uint8)(t.fx_b.b + ((int)t.fx_a.b - (int)t.fx_b.b) * k);
+                        // Per slice: slices stack vertically, they do not
+                        // overlap, so this is the alpha that actually lands.
+                        c.a = (Uint8)(110.0f * lum * ray * env * bandNorm);
+                        if (c.a < 3) continue;
+                        gfx->FillRectAdd(x, (int)(top + sliceH * s2), colStep,
+                                         (int)sliceH + 1, c);
+                    }
+                }
+            }
+            if (gpu) gfx->FxEnd();
+        }
+
+        // Retrowave grid: a scrolling perspective floor under a banded sun,
+        // with a hill silhouette along the horizon. Every parameter is a theme
+        // field - the editor shows them under grid-specific labels, so the same
+        // six knobs serve this and the ribbon.
+        //
+        //   line_count -> verticals        thickness -> line width
+        //   amplitude  -> scroll speed     seed      -> hills (0 = none)
+        //   layers     -> sun size         y_center  -> horizon
+        // GPU retrowave, one program for the whole scene so it costs a single
+        // hand-over from SDL per frame (each one flushes SDL's batch):
+        //   mode 0  a row of the floor, across the screen at depth wz
+        //   mode 1  a vertical, out along z at a fixed wx
+        //   mode 3  the sun, one quad cut into its bands per pixel
+        // The terrain is HeightAt's (C++ copy in DrawGridBackground, which
+        // must match): random hills on the grid's own points, either side of
+        // a flat strip down the middle. Wireframe only - nothing is filled.
+        inline constexpr const char *kGridVs = R"(
+uniform vec4 uTerr;  // height, seed, distance travelled, grid spacing in x
+uniform vec4 uCam;   // eye, focal length, vanishing x, horizon
+uniform vec4 uLine;  // mode, wz / wx / far wz, width, steps / near wz
+uniform vec4 uSun;   // centre x, centre y, radius, horizon
+varying vec2 vP;
+varying float vA;
+// Every grid point gets its own height: smooth value noise over a few cells
+// makes the hills, a little per-point jitter keeps them rocky, and the rows
+// and verticals run straight between points, so the hills come out faceted.
+// The strip down the middle stays flat. Must match GridPointH in C++.
+float PointH(float ix, float iz) {
+    vec2 c = vec2(ix, iz) / 3.0, i = floor(c), f = fract(c);
+    f = f * f * (3.0 - 2.0 * f);
+    float s = uTerr.y;
+    float n = mix(mix(Hash(i.x * 12.9898 + i.y * 78.233 + s), Hash((i.x + 1.0) * 12.9898 + i.y * 78.233 + s), f.x),
+                  mix(Hash(i.x * 12.9898 + (i.y + 1.0) * 78.233 + s), Hash((i.x + 1.0) * 12.9898 + (i.y + 1.0) * 78.233 + s), f.x), f.y);
+    float jit = Hash(ix * 3.17 + iz * 11.3 + s * 0.5);
+    float side = clamp((abs(ix * uTerr.w) - 0.5) / 0.6, 0.0, 1.0);
+    return uTerr.x * side * (n * n * 5.4 + 0.75 * jit);
+}
+float HeightAt(float wx, float wz) {
+    if (uTerr.x <= 0.0) return 0.0;
+    vec2 g = vec2(wx / uTerr.w, wz + uTerr.z), i = floor(g), f = g - i;
+    return mix(mix(PointH(i.x, i.y), PointH(i.x + 1.0, i.y), f.x),
+               mix(PointH(i.x, i.y + 1.0), PointH(i.x + 1.0, i.y + 1.0), f.x), f.y);
+}
+float ProjY(float wx, float wz) { return uCam.w + (uCam.x - HeightAt(wx, wz)) / wz; }
+// Lines climbing a hill glow brighter the higher they get, so the hills read
+// at a distance where the plain's own rows have faded out.
+float Lift(float wx, float wz) { return min(HeightAt(wx, wz) / wz / 90.0, 1.0) * 0.8; }
+void main() {
+    float mode = uLine.x;
+    vec2 p;
+    vA = 0.0;
+    if (mode > 2.5) {
+        p = uSun.xy - uSun.z + Corner() * 2.0 * uSun.z;
+    } else if (mode > 0.5) {
+        float t = aV.x / uLine.w, wz = 0.26 + (17.0 - 0.26) * t * t;
+        p = vec2(uCam.z + uLine.y * uCam.y / wz + (aV.y - 0.5) * uLine.z, ProjY(uLine.y, wz));
+        vA = 150.0 / (0.6 + wz * 0.6) / 255.0 + Lift(uLine.y, wz);
+    } else {
+        float X = aV.x * 4.0, wz = uLine.y, wx = (X - uCam.z) * wz / uCam.y;
+        p = vec2(X, ProjY(wx, wz) + aV.y * uLine.z);
+        vA = 190.0 / (0.6 + wz * 0.9) / 255.0 + Lift(wx, wz);
+    }
+    vP = p;
+    gl_Position = Clip(p);
+}
+)";
+        inline constexpr const char *kGridFs = R"(
+uniform vec4 uLine, uSun, uA, uB;
+varying vec2 vP;
+varying float vA;
+void main() {
+    if (uLine.x > 2.5) {                             // sun
+        float r = uSun.z, top = uSun.y - r;
+        float yy = top + floor((vP.y - top) / 2.0) * 2.0;
+        float dy = yy - uSun.y;
+        if (yy > uSun.w || abs(vP.x - uSun.x) > sqrt(max(0.0, r * r - dy * dy))) discard;
+        if (dy > r * 0.10) {                         // slots, widening downward
+            float band = 9.0 + dy / r * 20.0;
+            if (mod(dy, band) > band * 0.52) discard;
+        }
+        float k = (min(floor((yy - top) / (2.0 * r) * 8.0), 7.0) + 0.5) / 8.0;
+        gl_FragColor = vec4(mix(uB.rgb, uA.rgb, k) * (210.0 / 255.0), 210.0 / 255.0);
+    } else {
+        float a = min(vA, 1.0);
+        gl_FragColor = vec4(uA.rgb * a, a);
+    }
+}
+)";
+
+        inline void DrawGridBackground(gfx::Gfx *gfx, const Theme &t) {
+            const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+            const float now = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
+
+            int cols   = t.Fx().lines;  if (cols < 2)  cols = 2;   if (cols > 40) cols = 40;
+            int width  = t.Fx().thickness;   if (width < 1) width = 1;  if (width > 20) width = 20;
+            int speed  = t.Fx().amplitude;   if (speed < 1) speed = 1;  if (speed > 60) speed = 60;
+            int hills  = t.Fx().seed;        if (hills < 0) hills = 0;  if (hills > 99) hills = 99;
+            int sun    = t.Fx().layers;      if (sun < 1)   sun = 1;    if (sun > 12) sun = 12;
+            float horizon = (float)t.Fx().y;
+            if (horizon < 80.0f)          horizon = 80.0f;
+            if (horizon > (float)H - 40)  horizon = (float)H - 40.0f;
+
+            const float lw  = 0.5f + (float)width * 0.25f;
+            const float vx  = W * 0.5f;
+            const float run = now * ((float)speed * 0.03f);
+            int cam = t.Fx().cam; if (cam < 5) cam = 5; if (cam > 200) cam = 200;
+            const float eye   = ((float)H - horizon) * 0.01f * (float)cam;
+            const float fx    = (float)W * 0.60f;
+            const float terr  = (float)hills * 3.4f;   // screen lift is terr/wz, so far hills stay gentle
+            const float hseed = (float)hills * 0.37f;
+            const float spacing = 6.4f / (float)cols;   // between verticals, world x
+
+            if (gfx->FxBegin(gfx->FxProgram(kGridVs, kGridFs))) {
+                gfx->FxSet("uTerr", terr, hseed, run, spacing);
+                gfx->FxSet("uCam", eye, fx, vx, horizon);
+                gfx->FxSet("uA", t.fx_a);
+                gfx->FxSet("uB", t.fx_b);
+                if (sun > 1) {
+                    const float r = (float)sun * 16.0f;
+                    gfx->FxSet("uSun", (float)W * (float)t.Fx().x * 0.01f,
+                               horizon - r * 0.30f, r, horizon);
+                    gfx->FxSet("uLine", 3.0f, 0.0f, 0.0f, 0.0f);
+                    gfx->FxQuads(1);
+                }
+                const float phase = fmodf(run, 1.0f);
+                for (int i = 17; i >= 0; i--) {
+                    const float wz = (float)i - phase;
+                    if (wz < 0.26f) continue;
+                    gfx->FxSet("uLine", 0.0f, wz, lw, 0.0f);
+                    gfx->FxStrip(W / 4 + 1);
+                }
+                // Verticals run out across everything visible (|wx| < 0.83 wz
+                // at the far row), so the hills out to the sides have both
+                // sets of lines on them, not rows alone.
+                const int steps = 40;
+                const int reach = std::max(cols / 2, (int)ceilf(14.5f / spacing));
+                for (int i = -reach; i <= reach; i++) {
+                    gfx->FxSet("uLine", 1.0f, (float)i * spacing, lw, (float)steps);
+                    gfx->FxStrip(steps + 1);
+                }
+                gfx->FxEnd();
+                SDL_Color hz = t.fx_a; hz.a = 90;
+                gfx->FillRect(0, (int)horizon, W, 1, hz);
+                return;
+            }
+
+            // ---- sun: bands that thin out toward the bottom -----------------
+            if (sun > 1) {
+                const float r   = (float)sun * 16.0f;
+                const float cy  = horizon - r * 0.30f;
+                const float sx  = (float)W * (float)t.Fx().x * 0.01f;   // sun, not the vanishing point
+                for (int q = 0; q < 8; q++) {          // 8 colour steps, 8 batches
+                    alignas(16) SDL_Rect rows[64];
+                    int n = 0;
+                    const float k0 = (float)q / 8.0f, k1 = (float)(q + 1) / 8.0f;
+                    for (float yy = cy - r + r * 2.0f * k0; yy < cy - r + r * 2.0f * k1; yy += 2.0f) {
+                        if (yy > horizon) break;
+                        const float dy = yy - cy;
+                        const float hw = sqrtf(fmaxf(0.0f, r * r - dy * dy));
+                        // Gaps widen toward the bottom of the disc, which is the
+                        // whole look - a solid circle is just a circle.
+                        // Slots, cut only below the middle and widening as they
+                        // go down. Measured from the centre rather than from
+                        // screen y, or the pattern slides with the horizon and
+                        // the disc reads as striped noise instead of as a sun.
+                        if (dy > r * 0.10f) {
+                            const float g    = dy / r;                 // 0 .. 1
+                            const float band = 9.0f + g * 20.0f;       // slot pitch
+                            if (fmodf(dy, band) > band * 0.52f) continue;
+                        }
+                        if (n < 64) rows[n++] = SDL_Rect{ (int)(sx - hw), (int)yy, (int)(hw * 2), 2 };
+                    }
+                    const float k = (k0 + k1) * 0.5f;
+                    SDL_Color c;                        // fx_b at the top -> fx_a at the base
+                    c.r = (Uint8)(t.fx_b.r + ((int)t.fx_a.r - (int)t.fx_b.r) * k);
+                    c.g = (Uint8)(t.fx_b.g + ((int)t.fx_a.g - (int)t.fx_b.g) * k);
+                    c.b = (Uint8)(t.fx_b.b + ((int)t.fx_a.b - (int)t.fx_b.b) * k);
+                    c.a = 210;
+                    gfx->FillRects(rows, n, c);
+                }
+            }
+
+            // ---- the floor, as a displaced wireframe -------------------------
+            // Hills are the mesh, not a cardboard cut-out behind it: every
+            // vertex is lifted by a height field, so the rows bend over the
+            // rises and the verticals climb them. A silhouette pasted on the
+            // horizon reads as a backdrop the moment anything moves; this
+            // scrolls through the landscape because it is the landscape.
+            //
+            // Camera at the origin looking down +z. A point (wx, wz, height)
+            // lands at vx + wx*f/wz across, and horizon + (eye - height)/wz
+            // down - so height lifts a vertex toward the horizon, exactly as
+            // distance flattens it.
+            // Eye height above the ground. Low puts you down among the hills
+            // with the rows stretched wide; high looks down on the grid and
+            // tightens it. It scales the whole projection, so it is the one
+            // number that changes the shape of the scene rather than its
+            // contents.
+
+            // Mirrors PointH / HeightAt in kGridVs: random hills on the grid's
+            // own points (one per vertical, one per row, in world z so they
+            // come toward you), flat down the middle, straight lines between.
+            auto pointH = [&](float ix, float iz) -> float {
+                const float cx = ix / 3.0f, cz = iz / 3.0f;
+                const float i0 = floorf(cx), k0 = floorf(cz);
+                float fx = cx - i0, fz = cz - k0;
+                fx = fx * fx * (3.0f - 2.0f * fx);
+                fz = fz * fz * (3.0f - 2.0f * fz);
+                auto h = [&](float a, float b) { return BgHash(a * 12.9898f + b * 78.233f + hseed); };
+                const float n0 = h(i0, k0) + (h(i0 + 1, k0) - h(i0, k0)) * fx;
+                const float n1 = h(i0, k0 + 1) + (h(i0 + 1, k0 + 1) - h(i0, k0 + 1)) * fx;
+                const float n  = n0 + (n1 - n0) * fz;
+                const float jit  = BgHash(ix * 3.17f + iz * 11.3f + hseed * 0.5f);
+                const float side = std::clamp((fabsf(ix * spacing) - 0.5f) / 0.6f, 0.0f, 1.0f);
+                return terr * side * (n * n * 5.4f + 0.75f * jit);
+            };
+            auto heightAt = [&](float wx, float wz) -> float {
+                if (terr <= 0.0f) return 0.0f;
+                const float gx = wx / spacing, gz = wz + run;
+                const float ix = floorf(gx), iz = floorf(gz);
+                const float fx = gx - ix, fz = gz - iz;
+                const float a = pointH(ix, iz)     + (pointH(ix + 1, iz)     - pointH(ix, iz))     * fx;
+                const float b = pointH(ix, iz + 1) + (pointH(ix + 1, iz + 1) - pointH(ix, iz + 1)) * fx;
+                return a + (b - a) * fz;
+            };
+            auto projY = [&](float h, float wz) { return horizon + (eye - h) / wz; };
+            auto projX = [&](float wx, float wz) { return vx + wx * fx / wz; };
+
+            // Rows: sampled across the screen rather than across the world.
+            // Stepping in world x puts the near samples hundreds of pixels
+            // apart, and a span between two far-apart points is a filled
+            // bounding box - which is why the near rows came out as blocks.
+            // Four pixels at a time keeps every span short enough to be a line.
+            {
+                const int STEP = 4;
+                const int MAXN  = gfx::Gfx::Width / 4 + 2;
+                alignas(16) SDL_Rect seg[MAXN];
+                // Starts at i = 0, so the nearest row is under the bottom edge
+                // rather than stopping short of it and leaving a bare strip.
+                for (int i = 0; i <= 17; i++) {
+                    const float wz = (float)i - fmodf(run, 1.0f);
+                    if (wz < 0.26f) continue;
+
+                    int n = 0;
+                    float py = projY(heightAt((0.0f - vx) * wz / fx, wz), wz);
+                    for (int x = STEP; x <= W && n < MAXN; x += STEP) {
+                        const float wx = ((float)x - vx) * wz / fx;   // unproject
+                        const float Y  = projY(heightAt(wx, wz), wz);
+                        const int y0 = (int)fminf(py, Y), y1 = (int)fmaxf(py, Y);
+                        seg[n++] = SDL_Rect{ x - STEP, y0, STEP, (y1 - y0) + (int)lw };
+                        py = Y;
+                    }
+                    SDL_Color c = t.fx_a;
+                    c.a = (Uint8)(190.0f / (0.6f + wz * 0.9f));
+                    gfx->FillRects(seg, n, c);
+                }
+            }
+
+            // Verticals: constant wx, walked out in z. Segmented so they follow
+            // the ground rather than cutting through it, and drawn with the
+            // antialiased line so the near ones do not stair-step.
+            {
+                const int STEPS = 10;
+                constexpr float kNear = 0.26f;   // under the bottom edge, as above
+                for (int i = -cols / 2; i <= cols / 2; i++) {
+                    const float wx = (float)i * (6.4f / (float)cols);
+                    float px = projX(wx, kNear);
+                    float py = projY(heightAt(wx, kNear), kNear);
+                    for (int s2 = 1; s2 <= STEPS; s2++) {
+                        const float wz = kNear + (17.0f - kNear) * ((float)s2 / (float)STEPS)
+                                                                 * ((float)s2 / (float)STEPS);
+                        const float X = projX(wx, wz);
+                        const float Y = projY(heightAt(wx, wz), wz);
+                        SDL_Color c = t.fx_a;
+                        c.a = (Uint8)(150.0f / (0.6f + wz * 0.6f));
+                        gfx->LineAA(px, py, X, Y, c, lw);
+                        px = X; py = Y;
+                    }
+                }
+            }
+
+            // Where the ground meets the sky. Bright enough to read as an edge,
+            // not so bright that it becomes the brightest thing on screen - it
+            // is the horizon, not a light source.
+            SDL_Color hz = t.fx_a; hz.a = 90;
+            gfx->FillRect(0, (int)horizon, W, 1, hz);
+        }
+
+        // Wallpaper snow: one quad per flake, placed in the vertex shader.
+        inline constexpr const char *kSnowVs = R"(
+varying float vA;
+void main() {
+    float seed = aV.z * 7.77;
+    float sz  = 1.0 + floor((sin(seed * 1.7) * 0.5 + 0.5) * 3.0);
+    float y   = floor(mod(uTime * (15.0 + sin(seed * 2.3) * 10.0) + seed * 100.0, 760.0) - 20.0);
+    float x   = floor((sin(seed * 3.1) * 0.5 + 0.5) * 1280.0)
+              + floor(sin(uTime * 0.5 + seed) * sin(seed * 5.1) * 30.0);
+    vA = (60.0 + floor((sin(seed * 4.3) * 0.5 + 0.5) * 140.0)) / 255.0;
+    gl_Position = Clip(vec2(x, y) + Corner() * sz);
+}
+)";
+        inline constexpr const char *kSnowFs = R"(
+varying float vA;
+void main() { gl_FragColor = vec4(vA, vA, vA, vA); }
+)";
+
+        // Ocean, Hotline Miami 2 style: flat neon water in chunky pixels. Each
+        // wave is a thin bright stripe across the screen; the stripes pack
+        // tighter toward the horizon (spacing follows 1/distance), bend and
+        // shimmer along their length, and drift toward the viewer. A column of
+        // reflected light, broken into dashes by the same waves, wobbles down
+        // from the horizon. Above the horizon nothing is drawn, so the theme's
+        // own gradient is the sky. Nothing at all is drawn without the GPU
+        // path; the gradient stands in.
+        //
+        //   thickness -> swell (how far stripes bend)   amplitude -> speed
+        //   layers    -> wave density                   y -> horizon
+        //   x         -> where the reflection falls, percent of width
+        inline constexpr const char *kOceanVs = R"(
+varying vec2 vP;
+void main() {
+    vP = aV.xy * vec2(1280.0, 720.0);
+    gl_Position = Clip(vP);
+}
+)";
+        inline constexpr const char *kOceanFs = R"(
+uniform vec4 uDeep, uCrest;
+uniform vec4 uSea;    // horizon y, swell, speed, density
+uniform vec4 uSea2;   // reflection x, pixel size
+varying vec2 vP;
+void main() {
+    float px = uSea2.y;
+    vec2  p  = floor(vP / px) * px + px * 0.5;          // chunky pixels
+    float hz = uSea.x;
+    if (p.y < hz) discard;
+    float d  = (p.y - hz) / max(720.0 - hz, 1.0);       // 0 horizon .. 1 bottom
+    float t  = uTime * uSea.z;
+    float z  = 1.0 / (d + 0.04);                        // distance out to sea
+
+    float bend = sin(p.x * 0.011 + t * 1.3 + z * 0.7) * (0.25 + d)
+               + sin(p.x * 0.029 - t * 2.3 + z * 1.9) * 0.45 * d;
+    float wave = z * uSea.w * 2.2 + bend * uSea.y - t * 0.9;
+    float band = fract(wave);
+    float crest = step(0.80 - 0.10 * d, band);          // thicker up close
+
+    float rw   = 10.0 + d * 150.0;
+    float rx   = abs(p.x - uSea2.x + sin(p.y * 0.21 + t * 3.1) * d * 16.0);
+    float dash = step(0.40, fract(wave * 2.0 + 0.25));
+    float refl = step(rx, rw * (0.55 + 0.45 * sin(z * 2.7 + t * 4.0))) * dash;
+
+    vec3 col = mix(uDeep.rgb * 0.45, uDeep.rgb, d);     // darker toward the horizon
+    col = mix(col, uCrest.rgb, crest * (0.30 + 0.70 * d));
+    col = mix(col, min(uCrest.rgb * 1.3 + 0.15, 1.0), refl * (1.0 - 0.45 * d));
+    gl_FragColor = vec4(col, 1.0);
+}
+)";
+        inline void DrawOceanBackground(gfx::Gfx *gfx, const Theme &t) {
+            float horizon = (float)t.Fx().y;
+            if (horizon < 40.0f)  horizon = 40.0f;
+            if (horizon > 680.0f) horizon = 680.0f;
+            if (!gfx->FxBegin(gfx->FxProgram(kOceanVs, kOceanFs))) return;
+            gfx->FxSet("uDeep", t.fx_a);
+            gfx->FxSet("uCrest", t.fx_b);
+            gfx->FxSet("uSea", horizon,
+                       0.15f + (float)t.Fx().thickness * 0.06f,     // swell
+                       0.25f + (float)t.Fx().amplitude * 0.035f,    // speed
+                       0.5f + (float)t.Fx().layers * 0.25f);        // density
+            gfx->FxSet("uSea2", (float)gfx::Gfx::Width * (float)t.Fx().x * 0.01f, 3.0f, 0.0f, 0.0f);
+            gfx->FxStrip(2);
+            gfx->FxEnd();
+        }
 
     // ---- per-entry tile config ----------------------------------------------
     //
@@ -1312,8 +1983,9 @@ namespace sl::menu::ui {
         // Any mismatch is a miss, and a miss just means the decode runs as it
         // always did. The source's size and mtime are checked, so replacing a
         // cover - by hand or through the picker - rebuilds this entry.
-        inline SDL_Texture *ReadCoverTex(SDL_Renderer *rend, const char *cpath,
-                                  const struct stat &src, int tw, int th) {
+        // A surface, not a texture, so this can run on the art worker.
+        inline SDL_Surface *ReadCoverSurf(const char *cpath, const struct stat &src,
+                                          int tw, int th) {
             FILE *f = fopen(cpath, "rb");
             if (!f) return nullptr;
 
@@ -1327,17 +1999,22 @@ namespace sl::menu::ui {
                 return nullptr;
             }
 
-            const size_t bytes = (size_t)tw * th * 2;
-            std::vector<u8> px(bytes);
-            const bool ok = fread(px.data(), 1, bytes, f) == bytes;
+            SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(0, tw, th, 16,
+                                                               SDL_PIXELFORMAT_RGB565);
+            if (!surf) { fclose(f); return nullptr; }
+            // One read for the whole image when rows are packed (they are for
+            // every size we cache): each read is a round trip to the card's
+            // filesystem, and 720 of them cost more than the data does.
+            bool ok = true;
+            if (surf->pitch == tw * 2)
+                ok = fread(surf->pixels, 1, (size_t)tw * th * 2, f) == (size_t)tw * th * 2;
+            else
+                for (int y = 0; ok && y < th; y++)
+                    ok = fread((u8 *)surf->pixels + (size_t)y * surf->pitch,
+                               1, (size_t)tw * 2, f) == (size_t)tw * 2;
             fclose(f);
-            if (!ok) return nullptr;          // truncated; rebuild over the top
-
-            SDL_Texture *tex = SDL_CreateTexture(rend, SDL_PIXELFORMAT_RGB565,
-                                                 SDL_TEXTUREACCESS_STATIC, tw, th);
-            if (!tex) return nullptr;
-            SDL_UpdateTexture(tex, nullptr, px.data(), tw * 2);
-            return tex;
+            if (!ok) { SDL_FreeSurface(surf); return nullptr; }   // truncated; rebuild
+            return surf;
         }
 
         inline void WriteCoverTex(const char *cpath, const struct stat &src,
@@ -1351,7 +2028,7 @@ namespace sl::menu::ui {
 
             // Written beside and renamed in, so a power cut mid-write cannot
             // leave a full-length file with a stale tail that reads back as
-            // valid - the same reason the blur cache does it this way.
+            // valid.
             const std::string tmp = std::string(cpath) + ".tmp";
             FILE *f = fopen(tmp.c_str(), "wb");
             if (!f) return;

@@ -70,6 +70,11 @@ namespace sl::menu::dbg {
         fprintf(fp, "rlimit.peak           = %llu\n", (unsigned long long)m_mem_rl_peak);
         fprintf(fp, "malloc.in_use         = %llu\n", (unsigned long long)m_malloc_used);
         fprintf(fp, "malloc.arena          = %llu\n", (unsigned long long)m_malloc_arena);
+        fprintf(fp, "tex.created           = %ld\n", c.tex_created);
+        fprintf(fp, "tex.failures          = %ld\n", c.tex_failures);
+        fprintf(fp, "tex.pool_slots        = %ld\n", c.tex_slots);
+        fprintf(fp, "tex.cached            = %ld\n", c.tex_cached);
+        fprintf(fp, "tex.cached_bytes      = %llu\n", (unsigned long long)c.tex_bytes);
         fprintf(fp, "frame.fps             = %.2f\n", m_fps);
         fprintf(fp, "frame.avg_ms          = %.3f\n", m_ms_avg);
         fprintf(fp, "frame.worst_ms        = %.3f\n", m_ms_worst);

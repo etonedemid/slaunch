@@ -23,8 +23,11 @@ assets/fonts/Wingdings.ttf
 projects/sInstaller/romfs/payload
 graphify-out
 NEXT_TASKS.md
-# Staged by the installer Makefile from assets/ at build time
+# Staged by the installer Makefile from assets/ at build time. romfs/ is
+# wiped and rebuilt wholesale on every build (see its `rm -rf $(ROMFS)`), so
+# nothing in here is a source file - the originals live in assets/.
 projects/sInstaller/romfs/ui
+projects/sInstaller/romfs/splash.bin
 # Local build helper
 wsl_build_debug.sh
 *.elf
