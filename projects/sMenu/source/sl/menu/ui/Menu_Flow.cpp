@@ -56,20 +56,7 @@ namespace sl::menu::ui {
     // uploads them on the main thread.
     void Menu::QueueArt(int kind, u64 id) {
         if (!m_art_pending.insert({kind, id}).second) return;   // already asked
-        if (!m_art_started) {
-            // Core 1, away from the render thread on core 0: at a lower
-            // priority on the same core it only ever ran in the gaps between
-            // frames, which is why art trickled in. Core 0 if 1 is refused.
-            if (R_FAILED(threadCreate(&m_art_thread, &Menu::ArtTrampoline, this,
-                                      nullptr, 0x20000, 0x3B, 1)) &&
-                R_FAILED(threadCreate(&m_art_thread, &Menu::ArtTrampoline, this,
-                                      nullptr, 0x20000, 0x3B, -2))) {
-                m_art_pending.erase({kind, id});
-                return;
-            }
-            threadStart(&m_art_thread);
-            m_art_started = true;
-        }
+        if (!StartArt()) { m_art_pending.erase({kind, id}); return; }
         std::lock_guard<std::mutex> lk(m_art_mx);
         m_art_q.push_back(ArtJob{ id, kind, m_art_epoch, nullptr, false });
         // Scrolling through a big library asks for far more than anyone will
@@ -81,45 +68,100 @@ namespace sl::menu::ui {
         }
         m_art_cv.notify_one();
     }
+    bool Menu::StartArt() {
+        if (m_art_started) return true;
+        // Core 1, away from the render thread on core 0: at a lower priority
+        // on the same core it only ever ran in the gaps between frames, which
+        // is why art trickled in. Core 0 if 1 is refused.
+        if (R_FAILED(threadCreate(&m_art_thread, &Menu::ArtTrampoline, this,
+                                  nullptr, 0x20000, 0x3B, 1)) &&
+            R_FAILED(threadCreate(&m_art_thread, &Menu::ArtTrampoline, this,
+                                  nullptr, 0x20000, 0x3B, -2)))
+            return false;
+        threadStart(&m_art_thread);
+        m_art_started = true;
+        return true;
+    }
+    // Every installed game, in menu order. Called again whenever the app list
+    // changes; titles already cached cost a stat and a header read each.
+    void Menu::WarmArt() {
+        m_art_warm_queued = true;
+        std::vector<u64> ids;
+        for (const auto &it : m_items)
+            if (it.kind == ItemKind::Game && it.app_id != 0) ids.push_back(it.app_id);
+        if (ids.empty() || !StartArt()) return;
+        std::reverse(ids.begin(), ids.end());      // taken from the back
+        std::lock_guard<std::mutex> lk(m_art_mx);
+        m_art_warm = std::move(ids);
+        m_art_cv.notify_one();
+    }
+    void Menu::HoldArt(bool hold) {
+        std::lock_guard<std::mutex> lk(m_art_mx);
+        if (m_art_hold == hold) return;
+        m_art_hold = hold;
+        m_art_cv.notify_one();
+    }
+    SDL_Surface *Menu::LoadArt(int kind, u64 id, bool warm, bool &built) {
+        static const char *const kSuffix[] = { ".jpg", "_wrap.png", "_hero.jpg" };
+        static const char *const kKey[]    = { "", "_wrap", "_hero" };
+        static const int kW[] = { kCoverTexW, 700, kDeckHeroW };
+        static const int kH[] = { kCoverTexH, 540, kDeckRowH };
+        built = false;
+        char path[96], key[32];
+        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX%s",
+                 (unsigned long long)id, kSuffix[kind]);
+        snprintf(key, sizeof(key), "%016llX%s", (unsigned long long)id, kKey[kind]);
+        struct stat src {};
+        if (stat(path, &src) != 0) return nullptr;   // no file: a null result, remembered
+        const std::string cpath = TexCachePath(key);
+        const int w = kW[kind], h = kH[kind];
+        if (warm && CoverCacheFresh(cpath.c_str(), src, w, h)) return nullptr;
+
+        SDL_Surface *surf = warm ? nullptr : ReadCoverSurf(cpath.c_str(), src, w, h);
+        if (!surf) {
+            // Hero art is 3.1:1 and its tile 16:9, so it is cropped; covers
+            // and box scans already have their tile's shape.
+            surf = kind == Art_Hero ? DecodeCoverSurfaceCropped(path, w, h, 0.5f)
+                                    : DecodeCoverSurface(path, w, h);
+            if (surf) { WriteCoverTex(cpath.c_str(), src, surf); built = true; }
+        }
+        if (warm) { if (surf) SDL_FreeSurface(surf); return nullptr; }
+        // SDL's GLES2 renderer has no RGB565 texture, so uploading one converts
+        // it pixel by pixel on the main thread. Converting here leaves the
+        // upload a plain copy.
+        if (surf) {
+            SDL_Surface *conv = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
+            if (conv) { SDL_FreeSurface(surf); surf = conv; }
+        }
+        return surf;
+    }
     void Menu::ArtTrampoline(void *self) {
         Menu *m = static_cast<Menu *>(self);
         for (;;) {
-            ArtJob j;
+            ArtJob j {};
+            u64 warm_id = 0;
             {
                 std::unique_lock<std::mutex> lk(m->m_art_mx);
-                m->m_art_cv.wait(lk, [m] { return m->m_art_quit || !m->m_art_q.empty(); });
+                m->m_art_cv.wait(lk, [m] {
+                    return m->m_art_quit || !m->m_art_q.empty() ||
+                           (!m->m_art_warm.empty() && !m->m_art_hold);
+                });
                 if (m->m_art_quit) return;
-                j = m->m_art_q.back();              // newest first: what is on screen now
-                m->m_art_q.pop_back();
-            }
-            static const char *const kSuffix[] = { ".jpg", "_wrap.png", "_hero.jpg" };
-            static const char *const kKey[]    = { "", "_wrap", "_hero" };
-            static const int kW[] = { kCoverTexW, 700, kDeckHeroW };
-            static const int kH[] = { kCoverTexH, 540, kDeckRowH };
-            char path[96], key[32];
-            snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX%s",
-                     (unsigned long long)j.id, kSuffix[j.kind]);
-            snprintf(key, sizeof(key), "%016llX%s", (unsigned long long)j.id, kKey[j.kind]);
-            struct stat src {};
-            if (stat(path, &src) == 0) {           // no file: a null result, remembered
-                const std::string cpath = TexCachePath(key);
-                const int w = kW[j.kind], h = kH[j.kind];
-                j.surf = ReadCoverSurf(cpath.c_str(), src, w, h);
-                if (!j.surf) {
-                    // Hero art is 3.1:1 and its tile 16:9, so it is cropped;
-                    // covers and box scans already have their tile's shape.
-                    j.surf = j.kind == Art_Hero ? DecodeCoverSurfaceCropped(path, w, h, 0.5f)
-                                                : DecodeCoverSurface(path, w, h);
-                    if (j.surf) { WriteCoverTex(cpath.c_str(), src, j.surf); j.built = true; }
-                }
-                // SDL's GLES2 renderer has no RGB565 texture, so uploading one
-                // converts it pixel by pixel on the main thread. Converting
-                // here leaves the upload a plain copy.
-                if (j.surf) {
-                    SDL_Surface *conv = SDL_ConvertSurfaceFormat(j.surf, SDL_PIXELFORMAT_ABGR8888, 0);
-                    if (conv) { SDL_FreeSurface(j.surf); j.surf = conv; }
+                if (!m->m_art_q.empty()) {
+                    j = m->m_art_q.back();          // newest first: what is on screen now
+                    m->m_art_q.pop_back();
+                } else {
+                    warm_id = m->m_art_warm.back();
+                    m->m_art_warm.pop_back();
                 }
             }
+            if (warm_id) {
+                bool built;
+                for (int kind = Art_Cover; kind <= Art_Hero; kind++)
+                    LoadArt(kind, warm_id, true, built);
+                continue;
+            }
+            j.surf = LoadArt(j.kind, j.id, false, j.built);
             std::lock_guard<std::mutex> lk(m->m_art_mx);
             m->m_art_done.push_back(j);
         }
@@ -161,6 +203,7 @@ namespace sl::menu::ui {
             std::lock_guard<std::mutex> lk(m_art_mx);
             m_art_quit = true;
             m_art_q.clear();
+            m_art_warm.clear();
         }
         m_art_cv.notify_one();
         threadWaitForExit(&m_art_thread);
@@ -244,6 +287,17 @@ namespace sl::menu::ui {
     // cropped out as the cover when the game has none yet.
     namespace {
         constexpr const char *kTdbIndex = "sdmc:/slaunch/cache/gametdb_switch.txt";
+
+        // Written beside and renamed in, like net::Download, so the art worker
+        // never decodes a half-written file.
+        bool SavePngWhole(SDL_Surface *surf, const char *path) {
+            const std::string part = std::string(path) + ".part";
+            if (IMG_SavePNG(surf, part.c_str()) != 0) { remove(part.c_str()); return false; }
+            remove(path);                          // FAT rename will not overwrite
+            if (rename(part.c_str(), path) == 0) return true;
+            remove(part.c_str());
+            return false;
+        }
         // Where a scan's panels sit across its width.
         constexpr float kScanSpine0 = 0.476f, kScanSpine1 = 0.524f;
 
@@ -320,7 +374,7 @@ namespace sl::menu::ui {
                 // console, and SDL_image's escape from a libjpeg error takes
                 // the whole menu down (see ImageLooksWhole in Http.cpp).
                 snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_wrap.png", (unsigned long long)app_id);
-                ok = IMG_SavePNG(w, path) == 0;
+                ok = SavePngWhole(w, path);
                 SDL_FreeSurface(w);
             }
             if (ok && need_cover) {
@@ -330,7 +384,7 @@ namespace sl::menu::ui {
                     // Named .jpg because that is where every layout looks for a
                     // cover; the loader goes by the file's contents, not its name.
                     snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX.jpg", (unsigned long long)app_id);
-                    cover_made = IMG_SavePNG(c, path) == 0;
+                    cover_made = SavePngWhole(c, path);
                     SDL_FreeSurface(c);
                     if (cover_made) {
                         snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_tdb", (unsigned long long)app_id);

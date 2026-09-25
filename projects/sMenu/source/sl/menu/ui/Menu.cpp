@@ -730,6 +730,7 @@ namespace sl::menu::ui {
     void Menu::SetApps(std::vector<AppEntry> apps) {
         m_apps = std::move(apps);
         m_play_dirty = true;   // new/removed titles -> re-query their play stats
+        m_art_warm_queued = false;   // and warm the art of any new ones
         RebuildItems();
         // Drop the cursor onto the suspended game so it's one button away. Only
         // mark it done once the jump actually lands - the game may not be in the
@@ -2296,6 +2297,15 @@ namespace sl::menu::ui {
         if (g_phase_done && !g_cover_logged && g_frame1_tick != 0 &&
             (armGetSystemTick() - g_frame1_tick) > armGetSystemTickFreq() * 3)
             CoverStatsFlush();
+        // Report anything that crashed since the menu last looked - once the
+        // menu is up and on its main screen, not over setup or another dialog.
+        if (g_phase_done && !m_crash_checked && m_screen == Screen::Main &&
+            m_dialog == Dialog::None && !m_options_open)
+            CheckCrashReports();
+        // Warm the art cache once the menu has had a few seconds to itself.
+        if (g_phase_done && !m_art_warm_queued && g_frame1_tick != 0 &&
+            (armGetSystemTick() - g_frame1_tick) > armGetSystemTickFreq() * 3)
+            WarmArt();
 
         PollArt();          // covers, box scans, hero art decoded on the worker
         PollShotDecode();   // background hero panels, uploaded when they land

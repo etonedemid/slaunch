@@ -167,6 +167,9 @@ sudo pacman -U https://pkg.devkitpro.org/devkitpro-keyring.pkg.tar.xz
 #   Server = https://pkg.devkitpro.org/packages/linux/$arch
 sudo pacman -Sy switch-dev switch-sdl2 switch-sdl2_ttf switch-sdl2_image \
                switch-sdl2_mixer switch-curl switch-mbedtls
+# recommended: SDL2_image 2.8 and SDL2_mixer 2.8 from packaging/devkitpro
+# (see its README) in place of devkitPro's 2.0.4 - that SDL2_image decodes
+# JPEGs with libjpeg, and a corrupt one crashes the menu
 # devkitPro's profile script exports DEVKITPRO but not the compiler's own bin
 # dir, which the Makefiles need on PATH:
 #   export DEVKITA64=$DEVKITPRO/devkitA64; export PATH=$DEVKITA64/bin:$PATH

@@ -303,6 +303,17 @@ namespace sl::menu::audio {
         std::sort(m_tracks.begin(), m_tracks.end());
     }
 
+    void Music::Rescan() {
+        // The resume worker owns the track list while it runs.
+        if (m_loading.load(std::memory_order_acquire)) return;
+        const std::string cur = (m_index >= 0 && m_index < (int)m_tracks.size())
+                              ? m_tracks[m_index] : std::string();
+        ScanTracks();
+        const auto f = std::find(m_tracks.begin(), m_tracks.end(), cur);
+        if (f != m_tracks.end())             m_index = (int)(f - m_tracks.begin());
+        else if (m_index >= (int)m_tracks.size()) m_index = 0;
+    }
+
     void Music::PlayCurrent(double start_seconds) {
         if (!m_ok || m_tracks.empty()) return;
         if (m_index < 0 || m_index >= (int)m_tracks.size()) m_index = 0;

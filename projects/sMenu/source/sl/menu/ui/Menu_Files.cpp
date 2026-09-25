@@ -510,12 +510,78 @@ namespace sl::menu::ui {
             m_usb_rate_bytes = m_usb.bytes;
         }
 
-        // Something arrived or went: the folder on screen may be out of date.
+        // The art warm-up stays off the card while a transfer is using it.
+        const bool moving = m_usb.op != usb::MtpOp::None;
+        if (moving != m_usb_moving) { m_usb_moving = moving; HoldArt(moving); }
+
+        // Something arrived or went: the folder on screen may be out of date,
+        // and once the transfer has settled, so may the rest of the menu.
         const u32 changes = m_usb.received + m_usb.deleted;
         if (changes != m_usb_changes) {
             m_usb_changes = changes;
+            m_usb_dirty = true;
             if (m_screen == Screen::Files) FmScan();
         }
+        if (m_usb_dirty && !moving && now - m_usb_active_tick > freq * 3 / 2) {
+            m_usb_dirty = false;
+            RefreshAfterUsb();
+        }
+    }
+    // Everything the menu lists from the card, looked at again after a USB
+    // transfer, so what was copied on shows up without a restart.
+    void Menu::RefreshAfterUsb() {
+        // Homebrew and launcher shortcuts: rescanned in the background, and
+        // only if they had been scanned at all (XMB or the browser asked).
+        if (m_hb_scanned && !m_hb_scan_running) { m_hb_scanned = false; StartHbScan(); }
+
+        m_music.Rescan();
+
+        // Icon packs are saved by index, and a new folder can sort in front of
+        // the current one: find it again by name. The icons are reloaded either
+        // way, in case new ones were copied into the pack in use.
+        {
+            const std::string cur = (m_icon_pack_idx > 0 && m_icon_pack_idx <= (int)m_icon_packs.size())
+                                  ? m_icon_packs[m_icon_pack_idx - 1] : std::string();
+            ScanIconPacks();
+            int idx = 0;
+            for (int i = 0; i < (int)m_icon_packs.size(); i++)
+                if (m_icon_packs[i] == cur) { idx = i + 1; break; }
+            if (idx != m_icon_pack_idx) { m_icon_pack_idx = idx; SaveIconPackSetting(); }
+            InvalidateSysIcons();
+        }
+
+        // Fonts: the same, by path. Not while the Fonts screen is up, whose
+        // live preview holds an index of its own.
+        if (m_screen != Screen::Fonts) {
+            const std::string cur = (m_font_applied > 0 && m_font_applied < (int)m_font_paths.size())
+                                  ? m_font_paths[m_font_applied] : std::string();
+            ScanFonts();
+            int idx = 0;
+            for (int i = 0; i < (int)m_font_paths.size(); i++)
+                if (!cur.empty() && m_font_paths[i] == cur) { idx = i; break; }
+            if (idx != m_font_applied) {
+                // Gone from the card: fall back to the system font for real.
+                if (idx == 0) { ApplyFont(0); SaveFontConfig(); }
+                m_font_applied = idx;
+            }
+            m_font_cursor = m_font_applied;
+            m_font_preview = m_font_applied;
+        }
+
+        // Art that was looked for and not found may be there now. Hits stay;
+        // a replaced cover is picked up next time the menu starts.
+        auto forget = [this](std::unordered_map<u64, SDL_Texture *> &m) {
+            for (auto it = m.begin(); it != m.end(); )
+                it = it->second ? std::next(it) : m.erase(it);
+        };
+        forget(m_covers);
+        forget(m_game_wraps);
+        forget(m_hero_art);
+        for (auto it = m_shots.begin(); it != m_shots.end(); )
+            it = (it->second.a || it->second.b) ? std::next(it) : m_shots.erase(it);
+        m_tdb_front.clear();
+        m_art_epoch++;                // in-flight misses are dropped, not kept
+        m_art_warm_queued = false;    // and new art gets cached
     }
     void Menu::DrawUsbTag(int right_x, int y) {
         if (!m_usb.connected) return;

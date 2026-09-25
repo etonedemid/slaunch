@@ -22,6 +22,12 @@ COMMON_SRC := ../../libs/sCommon/source/sl/os/Applications.cpp
 PKGCONF  := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
 SDL_CFLAGS := $(shell $(PKGCONF) --cflags sdl2 SDL2_ttf SDL2_image SDL2_mixer)
 SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image SDL2_mixer)
+# SDL2_image before 2.8 decodes JPEGs with libjpeg, whose error path crashes
+# on the console: one corrupt image takes the menu down. 2.8 uses stb_image.
+# devkitPro still ships 2.0.4; newer packages are in packaging/devkitpro.
+ifneq ($(shell $(PKGCONF) --atleast-version=2.8.0 SDL2_image && echo ok),ok)
+$(warning SDL2_image is older than 2.8 - see packaging/devkitpro/README.md)
+endif
 
 # libcurl (+ mbedtls/zlib) for the network widgets (weather, chat).
 CURL_CFLAGS := $(shell $(PKGCONF) --cflags libcurl)
@@ -49,7 +55,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 1.4.0
+APP_VERSION := 1.4.1
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE

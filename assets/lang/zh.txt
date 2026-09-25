@@ -466,3 +466,11 @@ Sending=正在发送
 USB transfer done=USB 传输完成
 %u received, %u sent, %u deleted=已接收 %u，已发送 %u，已删除 %u
 Connected to a computer: SD card open for file transfer=已连接到电脑：可通过 USB 传输 SD 卡文件
+
+# --- crash reports ---
+App crash detected! :(=检测到应用崩溃！:(
+%s crashed. Atmosphère usually saves the crash details, check the logs: atmosphere/crash_reports/%s=%s 已崩溃。Atmosphère 通常会保存崩溃详情，请查看日志：atmosphere/crash_reports/%s
+%s hit a fatal error. Atmosphère usually saves the crash details, check the logs: atmosphere/fatal_reports/%s=%s 发生致命错误。Atmosphère 通常会保存详情，请查看日志：atmosphere/fatal_reports/%s
+(%d crashes since you last saw this menu)=(自上次打开菜单以来崩溃 %d 次)
+Program=程序
+OK=确定

@@ -457,3 +457,11 @@ Sending=Sende
 USB transfer done=USB-Übertragung abgeschlossen
 %u received, %u sent, %u deleted=%u empfangen, %u gesendet, %u gelöscht
 Connected to a computer: SD card open for file transfer=Mit Computer verbunden: SD-Karte für Dateiübertragung geöffnet
+
+# --- crash reports ---
+App crash detected! :(=App-Absturz erkannt! :(
+%s crashed. Atmosphère usually saves the crash details, check the logs: atmosphere/crash_reports/%s=%s ist abgestürzt. Atmosphère speichert die Absturzdetails normalerweise, siehe Logs: atmosphere/crash_reports/%s
+%s hit a fatal error. Atmosphère usually saves the crash details, check the logs: atmosphere/fatal_reports/%s=%s hatte einen schweren Fehler. Atmosphère speichert die Details normalerweise, siehe Logs: atmosphere/fatal_reports/%s
+(%d crashes since you last saw this menu)=(%d Abstürze seit dem letzten Öffnen des Menüs)
+Program=Programm
+OK=OK

@@ -1,4 +1,5 @@
 #include <sl/menu/net/Http.hpp>
+#include <string>
 #include <curl/curl.h>
 #include <cctype>
 #include <cstring>
@@ -154,11 +155,16 @@ namespace sl::menu::net {
                   std::atomic<uint64_t> *now, std::atomic<uint64_t> *total) {
         if (now)   now->store(0);
         if (total) total->store(0);
-        FILE *fp = fopen(path, "wb");
+        // Downloaded beside the target and renamed in once it is whole, so
+        // nothing ever finds a half-written file under the real name - the art
+        // worker decodes whatever is there, and a truncated JPEG is a libjpeg
+        // error, which takes the menu down (see ImageLooksWhole).
+        const std::string part = std::string(path) + ".part";
+        FILE *fp = fopen(part.c_str(), "wb");
         if (!fp) return false;
 
         CURL *curl = curl_easy_init();
-        if (!curl) { fclose(fp); remove(path); return false; }
+        if (!curl) { fclose(fp); remove(part.c_str()); return false; }
 
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteFileCb);
@@ -183,8 +189,12 @@ namespace sl::menu::net {
         curl_easy_cleanup(curl);
         fclose(fp);
 
-        const bool ok = rc == CURLE_OK && http >= 200 && http < 300 && ImageLooksWhole(path);
-        if (!ok) remove(path);   // don't leave a 404 page or partial file behind
+        bool ok = rc == CURLE_OK && http >= 200 && http < 300 && ImageLooksWhole(part.c_str());
+        if (ok) {
+            remove(path);                          // FAT rename will not overwrite
+            ok = rename(part.c_str(), path) == 0;
+        }
+        if (!ok) remove(part.c_str());   // don't leave a 404 page or partial file behind
         return ok;
     }
 

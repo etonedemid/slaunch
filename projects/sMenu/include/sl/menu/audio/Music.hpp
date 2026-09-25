@@ -52,6 +52,9 @@ namespace sl::menu::audio {
         std::vector<u8> CoverArt(int i) const;
 
         void SaveState();
+        // Re-list the music folder (files copied on or off over USB), keeping
+        // the current track where it is. Playback is left alone.
+        void Rescan();
 
     private:
         void ScanTracks();

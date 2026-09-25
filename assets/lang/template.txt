@@ -481,3 +481,11 @@ Sending=Sending
 USB transfer done=USB transfer done
 %u received, %u sent, %u deleted=%u received, %u sent, %u deleted
 Connected to a computer: SD card open for file transfer=Connected to a computer: SD card open for file transfer
+
+# --- crash reports ---
+App crash detected! :(=App crash detected! :(
+%s crashed. Atmosphère usually saves the crash details, check the logs: atmosphere/crash_reports/%s=%s crashed. Atmosphère usually saves the crash details, check the logs: atmosphere/crash_reports/%s
+%s hit a fatal error. Atmosphère usually saves the crash details, check the logs: atmosphere/fatal_reports/%s=%s hit a fatal error. Atmosphère usually saves the crash details, check the logs: atmosphere/fatal_reports/%s
+(%d crashes since you last saw this menu)=(%d crashes since you last saw this menu)
+Program=Program
+OK=OK

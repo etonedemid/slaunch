@@ -459,3 +459,11 @@ Sending=送信中
 USB transfer done=USB転送が完了しました
 %u received, %u sent, %u deleted=受信 %u・送信 %u・削除 %u
 Connected to a computer: SD card open for file transfer=パソコンに接続しました：SDカードのファイル転送が可能です
+
+# --- crash reports ---
+App crash detected! :(=アプリのクラッシュを検出しました :(
+%s crashed. Atmosphère usually saves the crash details, check the logs: atmosphere/crash_reports/%s=%s がクラッシュしました。通常 Atmosphère が詳細を保存します。ログを確認してください: atmosphere/crash_reports/%s
+%s hit a fatal error. Atmosphère usually saves the crash details, check the logs: atmosphere/fatal_reports/%s=%s で致命的なエラーが発生しました。通常 Atmosphère が詳細を保存します。ログを確認してください: atmosphere/fatal_reports/%s
+(%d crashes since you last saw this menu)=(前回メニューを表示してから %d 件のクラッシュ)
+Program=プログラム
+OK=OK

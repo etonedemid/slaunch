@@ -230,7 +230,13 @@ namespace sl::menu::ui {
                             // reader a news card opens into.
                             DeckMenu, DeckLibrary, DeckNews };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower,
-                            ConfirmRetroArch, ConfirmDelete };
+                            ConfirmRetroArch, ConfirmDelete,
+                            CrashReport };   // a notice: one OK, no choice
+        // Once per start: anything that crashed since the menu last looked
+        // left a report in atmosphere/crash_reports (fatal_reports for a
+        // fatal error), and gets a dialog saying so. See the definition.
+        bool m_crash_checked = false;
+        void CheckCrashReports();
 
         void RebuildItems();
 
@@ -697,10 +703,24 @@ namespace sl::menu::ui {
         u32                     m_art_epoch = 0;   // bumped when art on disk changes
         bool                    m_art_started = false;
         Thread                  m_art_thread {};
+        // Warm-up: once the menu has settled, the worker goes through every
+        // installed game and builds any cache entry that is missing or stale,
+        // so a game is fast the first time you land on it too. Only while
+        // nothing is waiting in m_art_q, and never during a USB transfer.
+        std::vector<u64>        m_art_warm;                  // under m_art_mx
+        bool                    m_art_hold = false;          // under m_art_mx
+        bool                    m_art_warm_queued = false;   // this app list is queued
         void   QueueArt(int kind, u64 id);
         void   PollArt();
         void   StopArt();
+        bool   StartArt();
+        void   WarmArt();
+        void   HoldArt(bool hold);
         static void ArtTrampoline(void *self);
+        // One title's art of one kind: its cache entry read (or, on a miss,
+        // built) and returned as an upload-ready surface. With `warm`, only
+        // built when missing and never returned.
+        static SDL_Surface *LoadArt(int kind, u64 id, bool warm, bool &built);
 
         // ---- SteamGridDB cover fetch ---------------------------------------
         // One title at a time on a worker, newest request wins, results land in
@@ -731,6 +751,9 @@ namespace sl::menu::ui {
         u64    m_usb_rate_tick = 0, m_usb_rate_bytes = 0;
         double m_usb_rate = 0.0;               // bytes a second, smoothed
         u32    m_usb_changes = 0;              // received + deleted, to refresh Files
+        bool   m_usb_moving = false;           // a file is moving right now
+        bool   m_usb_dirty  = false;           // the card changed; refresh when it settles
+        void   RefreshAfterUsb();
         void   PollUsb();
         void   DrawUsbStatus();
         void   DrawUsbTag(int right_x, int y);   // right-aligned to right_x

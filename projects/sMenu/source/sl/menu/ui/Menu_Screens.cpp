@@ -1603,6 +1603,10 @@ namespace sl::menu::ui {
         fclose(fp);
     }
     Menu::Action Menu::OnButtonDialog(Btn b, u64 &out_app_id) {
+        if (m_dialog == Dialog::CrashReport) {
+            if (b == Btn::A || b == Btn::B) { m_dialog = Dialog::None; m_dialog_title.clear(); m_dialog_note.clear(); }
+            return Action::None;
+        }
         if (b == Btn::Up || b == Btn::Down) m_dialog_cursor ^= 1;
         if (b == Btn::B) { m_dialog = Dialog::None; m_pending_launch = 0; return Action::None; }
         if (b == Btn::A) {
@@ -3194,7 +3198,8 @@ namespace sl::menu::ui {
                         : WrapText(FontSize::Small, m_dialog_note, bw - 60);
         const int nlh = m_gfx->LineHeight(FontSize::Small) + 4;
         const int noteH = (int)note.size() * nlh;
-        int bh = 276 + std::max(0, noteH - nlh);
+        const int nopts = m_dialog == Dialog::CrashReport ? 1 : 2;   // a notice has only OK
+        int bh = 276 + std::max(0, noteH - nlh) - (2 - nopts) * 48;
         int bx = cx - bw / 2, by = gfx::Gfx::Height / 2 - bh / 2;
         m_gfx->FillRect(bx, by, bw, bh, WithAlpha(t.bg_bottom, 245));
         m_gfx->FillRect(bx, by, bw, 4, t.accent);
@@ -3208,13 +3213,112 @@ namespace sl::menu::ui {
             m_gfx->TextCentered(FontSize::Small, cx, by + 88 + (int)l * nlh, t.dim, note[l].c_str());
 
         const char *opts[2] = { T("Yes"), T("No") };
-        for (int i = 0; i < 2; i++) {
+        if (nopts == 1) opts[0] = T("OK");
+        for (int i = 0; i < nopts; i++) {
             bool sel = (i == m_dialog_cursor);
             int y = by + 136 + std::max(0, noteH - nlh) + i * 48;
             if (sel) m_gfx->FillRect(cx - 90, y - 4, 180, 42, WithAlpha(t.accent, 60));
             m_gfx->TextCentered(FontSize::Normal, cx, y, sel ? t.accent : t.fg, opts[i]);
         }
-        DrawHint({ {{"up","down"}, "Choose"}, {{"a"}, "Confirm"}, {{"b"}, "Cancel"} });
+        // One button explains itself, and a hint would only land on top of
+        // the layout's own hint row.
+        if (nopts == 2) DrawHint({ {{"up","down"}, "Choose"}, {{"a"}, "Confirm"}, {{"b"}, "Cancel"} });
+    }
+
+    // ---- crash reports ------------------------------------------------------
+    // When a game or homebrew crashes, Atmosphere writes a report and the
+    // system comes back to the menu as if nothing happened. This is the
+    // "something happened" - the way the stock HOME menu says an app closed
+    // because of an error - plus where the details went.
+    //
+    // Reports are named <posix seconds>_<program id>.log. The newest time the
+    // menu has already reported is kept in cache/crash_seen.txt. With no such
+    // file (first run), whatever is already on the card is taken as seen:
+    // old crashes from before sLaunch was installed are not news.
+    void Menu::CheckCrashReports() {
+        m_crash_checked = true;
+        constexpr const char *kSeen = "sdmc:/slaunch/cache/crash_seen.txt";
+        static const char *const kDirs[] = { "sdmc:/atmosphere/crash_reports",
+                                             "sdmc:/atmosphere/fatal_reports" };
+
+        struct Report { unsigned long long time = 0, id = 0; int dir = 0; std::string file; };
+        Report newest;
+        int fresh = 0;
+        unsigned long long seen = 0;
+        bool have_seen = false;
+        if (FILE *fp = fopen(kSeen, "r")) {
+            have_seen = fscanf(fp, "time=%llu", &seen) == 1;
+            fclose(fp);
+        }
+        // Atmosphère stamps reports with the clock at crash time, and a clock
+        // that was wrong then (seen: year 2168) would otherwise sort above every
+        // real crash forever, so a report from the future is ignored and a
+        // "seen" stamp from the future is forgotten.
+        const unsigned long long future = (unsigned long long)time(nullptr) + 86400;
+        if (seen > future) { seen = 0; have_seen = false; }   // re-baseline quietly
+        for (int d = 0; d < 2; d++) {
+            DIR *dir = opendir(kDirs[d]);
+            if (!dir) continue;
+            while (struct dirent *e = readdir(dir)) {
+                unsigned long long t = 0, id = 0;
+                int n = 0;
+                if (sscanf(e->d_name, "%llu_%16llx.log%n", &t, &id, &n) != 2 ||
+                    e->d_name[n] != '\0') continue;
+                if (t > future) continue;
+                if (have_seen && t > seen) fresh++;
+                if (t > newest.time) newest = Report{ t, id, d, e->d_name };
+            }
+            closedir(dir);
+        }
+        if (newest.time > seen || !have_seen) {
+            mkdir("sdmc:/slaunch", 0777);
+            mkdir("sdmc:/slaunch/cache", 0777);
+            if (FILE *fp = fopen(kSeen, "w")) {
+                fprintf(fp, "time=%llu\n", std::max(seen, newest.time));
+                fclose(fp);
+            }
+        }
+        if (!have_seen || fresh == 0) return;
+
+        // Who it was. The menu's own id, an installed game, or - for homebrew,
+        // which runs under hbloader and a borrowed program id - whatever the
+        // menu last launched, if it was launched before the crash.
+        std::string who;
+        if (newest.id == 0x0100000000001042ULL) who = "sLaunch";
+        if (newest.id == 0x010000000000100DULL) who = T("Album");
+        for (const auto &a : m_apps)
+            if (who.empty() && a.app_id == newest.id) who = a.name;
+        if (FILE *fp = fopen("sdmc:/slaunch/cache/last_launch.txt", "r")) {
+            long long t = 0;
+            unsigned long long id = 0;
+            char nro[256] = "";
+            if (fscanf(fp, "time=%lld\nid=%llx\nnro=%255[^\n]", &t, &id, nro) >= 2 &&
+                nro[0] && (unsigned long long)t <= newest.time && id == newest.id) {
+                const char *base = strrchr(nro, '/');
+                who = base ? base + 1 : nro;
+            }
+            fclose(fp);
+        }
+        if (who.empty()) {
+            char buf[40];
+            snprintf(buf, sizeof(buf), "%s %016llX", T("Program"), newest.id);
+            who = buf;
+        }
+
+        char note[512];
+        snprintf(note, sizeof(note), T(newest.dir == 1
+                     ? "%s hit a fatal error. Atmosphère usually saves the crash details, check the logs: atmosphere/fatal_reports/%s"
+                     : "%s crashed. Atmosphère usually saves the crash details, check the logs: atmosphere/crash_reports/%s"),
+                 who.c_str(), newest.file.c_str());
+        m_dialog_note = note;
+        if (fresh > 1) {
+            char more[96];
+            snprintf(more, sizeof(more), T("(%d crashes since you last saw this menu)"), fresh);
+            m_dialog_note += std::string(" ") + more;
+        }
+        m_dialog_title  = T("App crash detected! :(");
+        m_dialog_cursor = 0;
+        m_dialog        = Dialog::CrashReport;
     }
 
     // ---- Deck layout --------------------------------------------------------

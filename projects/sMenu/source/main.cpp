@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
+#include <ctime>
 #include <vector>
 #include <string>
 #include <memory>
@@ -395,10 +396,25 @@ extern "C" void __appExit() {
 // over the whole screen. So to launch a game or open a system applet, the menu
 // sends the request and then EXITS; the daemon carries out the action once our
 // slot is free, and relaunches the menu afterwards (uLaunch's model).
+// What the menu last handed off to, so a crash report found on the next start
+// can be put to a name. Homebrew runs under hbloader and a borrowed program id,
+// so the report alone cannot say which .nro it was. See CheckCrashReports.
+// Applet homebrew (and hbmenu) run in the album slot - sSystem's
+// ecs::HbloaderProgramId - and full-RAM homebrew under its donor game's id.
+constexpr u64 kAlbumSlotProgramId = 0x010000000000100DULL;
+static void RecordLaunch(u64 program_id, const char *nro) {
+    if (FILE *fp = fopen("sdmc:/slaunch/cache/last_launch.txt", "w")) {
+        fprintf(fp, "time=%lld\nid=%016llX\nnro=%s\n", (long long)time(nullptr),
+                (unsigned long long)program_id, nro ? nro : "");
+        fclose(fp);
+    }
+}
+
 static void DispatchAction(Menu::Action action, u64 launch_id,
                            bool &has_suspended, u64 &suspended_id) {
     switch (action) {
         case Menu::Action::LaunchApp:
+            RecordLaunch(launch_id, nullptr);
             if (has_suspended && launch_id == suspended_id)
                 menu::smi::ResumeApp();
             else
@@ -406,6 +422,7 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
             g_Running = false; // hand off to the daemon
             break;
         case Menu::Action::ResumeApp:
+            RecordLaunch(suspended_id, nullptr);
             menu::smi::ResumeApp();
             g_Running = false;
             break;
@@ -415,19 +432,29 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
             has_suspended = false; suspended_id = 0;
             g_UI->ClearSuspendedApp();
             break;
-        case Menu::Action::OpenAlbum:        menu::smi::OpenAlbum();        g_Running = false; break;
+        case Menu::Action::OpenAlbum:
+            RecordLaunch(kAlbumSlotProgramId, nullptr);   // the real Album, in the same slot
+            menu::smi::OpenAlbum();
+            g_Running = false;
+            break;
         case Menu::Action::OpenUserPage:     menu::smi::OpenUserPage();     g_Running = false; break;
         case Menu::Action::OpenNetConnect:   menu::smi::OpenNetConnect();   g_Running = false; break;
         case Menu::Action::OpenMiiEdit:      menu::smi::OpenMiiEdit();      g_Running = false; break;
         case Menu::Action::OpenWebBrowser:   menu::smi::OpenWebBrowser();   g_Running = false; break;
         case Menu::Action::OpenControllers:  menu::smi::OpenControllers();  g_Running = false; break;
-        case Menu::Action::OpenHomebrewMenu: menu::smi::OpenHomebrewMenu(); g_Running = false; break;
+        case Menu::Action::OpenHomebrewMenu:
+            RecordLaunch(kAlbumSlotProgramId, "Homebrew menu");
+            menu::smi::OpenHomebrewMenu();
+            g_Running = false;
+            break;
         case Menu::Action::LaunchHomebrew:
+            RecordLaunch(kAlbumSlotProgramId, g_UI->HomebrewPath().c_str());
             menu::smi::OpenHomebrew(g_UI->HomebrewPath().c_str(),
                                     g_UI->HomebrewArgv().c_str());
             g_Running = false;
             break;
         case Menu::Action::LaunchHomebrewApp:
+            RecordLaunch(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str());
             menu::smi::LaunchHomebrewApp(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str(),
                                          g_UI->HomebrewArgv().c_str());
             g_Running = false;

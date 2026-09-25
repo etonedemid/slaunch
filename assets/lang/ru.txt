@@ -457,3 +457,11 @@ Sending=Отправка
 USB transfer done=Передача по USB завершена
 %u received, %u sent, %u deleted=Получено: %u, отправлено: %u, удалено: %u
 Connected to a computer: SD card open for file transfer=Подключено к компьютеру: SD-карта открыта для передачи файлов
+
+# --- crash reports ---
+App crash detected! :(=Обнаружен сбой приложения! :(
+%s crashed. Atmosphère usually saves the crash details, check the logs: atmosphere/crash_reports/%s=%s аварийно завершилось. Atmosphère обычно сохраняет подробности, проверьте журналы: atmosphere/crash_reports/%s
+%s hit a fatal error. Atmosphère usually saves the crash details, check the logs: atmosphere/fatal_reports/%s=%s: критическая ошибка. Atmosphère обычно сохраняет подробности, проверьте журналы: atmosphere/fatal_reports/%s
+(%d crashes since you last saw this menu)=(сбоев с последнего открытия меню: %d)
+Program=Программа
+OK=ОК

@@ -10,6 +10,7 @@
 #include <stratosphere.hpp>
 #include <cstring>
 #include <cstdio>
+#include <cerrno>
 #include <cstdarg>
 #include <cstdlib>
 #include <sys/stat.h>
@@ -69,16 +70,54 @@ static int  g_MenuFastExits  = 0;
 
 static void LaunchMenu();   // defined below
 
+// Writes (or appends to) a file on the SD card through the raw fs API, not
+// stdio. The fallback for when fopen fails: on some consoles every stdio write
+// from this process has failed silently while fs sessions opened directly (as
+// ECS does) kept working. path is card-relative ("/slaunch/...").
+static bool SdRawWrite(const char *path, const void *data, size_t len, bool append) {
+    FsFileSystem sd;
+    if (R_FAILED(fsOpenSdCardFileSystem(&sd))) return false;
+    char p[FS_MAX_PATH] = {};
+    strncpy(p, path, sizeof(p) - 1);
+    if (!append) fsFsDeleteFile(&sd, p);
+    fsFsCreateFile(&sd, p, 0, 0);            // fails harmlessly if it exists
+    FsFile f;
+    bool ok = false;
+    if (R_SUCCEEDED(fsFsOpenFile(&sd, p, FsOpenMode_Write | FsOpenMode_Append, &f))) {
+        s64 off = 0;
+        if (append) fsFileGetSize(&f, &off);
+        ok = R_SUCCEEDED(fsFileWrite(&f, off, data, len, FsWriteOption_Flush));
+        fsFileClose(&f);
+    }
+    fsFsClose(&sd);
+    return ok;
+}
+
 // Bring-up diagnostics: the daemon has full SD access via its NPDM.
 static void DaemonLog(const char *fmt, ...) {
-    mkdir("sdmc:/slaunch", 0777);
-    FILE *fp = fopen("sdmc:/slaunch/daemon.log", "a");
-    if (!fp) return;
+    char line[512];
     va_list ap; va_start(ap, fmt);
-    vfprintf(fp, fmt, ap);
+    int n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
     va_end(ap);
-    fputc('\n', fp);
-    fclose(fp);
+    if (n < 0) return;
+    n = n < (int)sizeof(line) - 1 ? n : (int)sizeof(line) - 2;
+    line[n++] = '\n';
+
+    mkdir("sdmc:/slaunch", 0777);
+    if (FILE *fp = fopen("sdmc:/slaunch/daemon.log", "a")) {
+        fwrite(line, 1, n, fp);
+        fclose(fp);
+        return;
+    }
+    // Say once why stdio failed, then keep logging around it.
+    static bool told = false;
+    if (!told) {
+        told = true;
+        char why[96];
+        const int w = snprintf(why, sizeof(why), "log: fopen failed, errno %d - raw fs from here\n", errno);
+        SdRawWrite("/slaunch/daemon.log", why, w, true);
+    }
+    SdRawWrite("/slaunch/daemon.log", line, n, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -117,11 +156,17 @@ static void CleanupHbOverride() {
 // to hand it. Without the second line the loader falls back to the quoted path,
 // which is what hbmenu passes for a plain launch.
 static void WriteHbTarget(const char *nro_path, const char *argv) {
-    FILE *tf = fopen("sdmc:/slaunch/hbtarget.txt", "w");
-    if (!tf) return;
-    fprintf(tf, "%s\n", nro_path);
-    if (argv && argv[0]) fprintf(tf, "%s\n", argv);
-    fclose(tf);
+    char buf[FS_MAX_PATH + 600];
+    const int n = snprintf(buf, sizeof(buf), (argv && argv[0]) ? "%s\n%s\n" : "%s\n",
+                           nro_path, argv);
+    if (n <= 0 || n >= (int)sizeof(buf)) return;
+    if (FILE *tf = fopen("sdmc:/slaunch/hbtarget.txt", "w")) {
+        const bool ok = fwrite(buf, 1, n, tf) == (size_t)n;
+        if (fclose(tf) == 0 && ok) return;
+    }
+    // Without this file hbloader boots hbmenu.nro instead of the chosen .nro.
+    const bool ok = SdRawWrite("/slaunch/hbtarget.txt", buf, n, false);
+    DaemonLog("hb: hbtarget.txt via stdio failed (errno %d), raw fs %s", errno, ok ? "ok" : "FAILED");
 }
 
 // The donor title the menu last picked. Only read when a queued request asks
@@ -256,9 +301,23 @@ static bool HandleKeyboardRequest() {
 // Carry out the queued action once the menu applet has closed. Games/resume
 // leave the menu closed (the game runs); opening a system applet blocks until
 // it exits and then the menu comes back.
+// The SD mount from boot dies if the card is swapped while the console sleeps
+// (the removal notice only comes while awake). New processes mount it fresh
+// and work, but everything written here - hbtarget.txt above all, without
+// which hbloader boots hbmenu.nro instead of the chosen .nro - failed silently.
+static void EnsureSdMounted() {
+    s64 total = 0;
+    FsFileSystem *fs = fsdevGetDeviceFileSystem("sdmc");
+    if (fs && R_SUCCEEDED(fsFsGetTotalSpace(fs, "/", &total))) return;
+    fsdevUnmountDevice("sdmc");
+    const Result rc = fsdevMountSdmc();
+    DaemonLog("sd: mount was dead, remounted rc=0x%x", rc);
+}
+
 static void RunPendingAction() {
     const Pending p = g_Pending;
     g_Pending = Pending::None;
+    EnsureSdMounted();
 
     switch (p) {
         case Pending::LaunchApp:
@@ -736,6 +795,18 @@ namespace ams {
 
     namespace init {
 
+        // Heaps first: libstratosphere only calls Startup() after
+        // InitializeSystemModule(), which already logs through stdio, and a
+        // stdio call that finds no heap leaves fopen failing with ENOMEM for
+        // the rest of the run.
+        void InitializeSystemModuleBeforeConstructors() {
+            // libstratosphere heap (new/delete/malloc via ams) + libnx heap
+            // (internal malloc_r used by the stdlib).
+            init::InitializeAllocator(g_StratHeap, StratHeapSize);
+            fake_heap_start = g_LibnxHeap;
+            fake_heap_end   = g_LibnxHeap + LibnxHeapSize;
+        }
+
         void InitializeSystemModule() {
             __nx_applet_type     = AppletType_SystemApplet;
             __nx_fs_num_sessions = 3;
@@ -807,13 +878,6 @@ namespace ams {
             fsdevUnmountAll(); fsExit();
         }
 
-        void Startup() {
-            // libstratosphere heap (new/delete/malloc via ams) + libnx heap
-            // (internal malloc_r used by the stdlib).
-            init::InitializeAllocator(g_StratHeap, StratHeapSize);
-            fake_heap_start = g_LibnxHeap;
-            fake_heap_end   = g_LibnxHeap + LibnxHeapSize;
-        }
 
     }
 

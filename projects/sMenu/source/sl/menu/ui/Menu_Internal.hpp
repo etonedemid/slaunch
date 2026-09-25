@@ -653,6 +653,9 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v1.4.1" },
+            { false, "Much better loading speed for Flow and the other modes" },
+            { false, "Fixed homebrew launching and logging (SD card file access)" },
             { true,  "v1.4.0" },
             { false, "USB file transfer - plug into a computer on the menu to copy files, with progress shown" },
             { false, "File manager: browse the SD card, copy, move, rename and delete" },
@@ -1983,21 +1986,32 @@ void main() {
         // Any mismatch is a miss, and a miss just means the decode runs as it
         // always did. The source's size and mtime are checked, so replacing a
         // cover - by hand or through the picker - rebuilds this entry.
+        // Reads the header and says whether it describes this source at this
+        // size. Leaves `f` just past the header, where the pixels start.
+        inline bool CoverHeaderMatches(FILE *f, const struct stat &src, int tw, int th) {
+            CoverTexHeader h {};
+            return fread(&h, sizeof(h), 1, f) == 1 &&
+                   h.magic == kCoverTexMagic && h.version == kCoverTexVersion &&
+                   h.w == (u32)tw && h.h == (u32)th &&
+                   h.src_size  == (u64)src.st_size &&
+                   h.src_mtime == (u64)src.st_mtime;
+        }
+        // Whether the cache already holds this source: the header only, for
+        // the warm-up pass, which has no use for the pixels.
+        inline bool CoverCacheFresh(const char *cpath, const struct stat &src, int tw, int th) {
+            FILE *f = fopen(cpath, "rb");
+            if (!f) return false;
+            const bool ok = CoverHeaderMatches(f, src, tw, th);
+            fclose(f);
+            return ok;
+        }
+
         // A surface, not a texture, so this can run on the art worker.
         inline SDL_Surface *ReadCoverSurf(const char *cpath, const struct stat &src,
                                           int tw, int th) {
             FILE *f = fopen(cpath, "rb");
             if (!f) return nullptr;
-
-            CoverTexHeader h {};
-            if (fread(&h, sizeof(h), 1, f) != 1) { fclose(f); return nullptr; }
-            if (h.magic != kCoverTexMagic || h.version != kCoverTexVersion ||
-                h.w != (u32)tw || h.h != (u32)th ||
-                h.src_size  != (u64)src.st_size ||
-                h.src_mtime != (u64)src.st_mtime) {
-                fclose(f);
-                return nullptr;
-            }
+            if (!CoverHeaderMatches(f, src, tw, th)) { fclose(f); return nullptr; }
 
             SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(0, tw, th, 16,
                                                                SDL_PIXELFORMAT_RGB565);
