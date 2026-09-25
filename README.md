@@ -2,9 +2,7 @@
 
 slaunch is a home replacement that supports theming, widgets, bg music, several UI modes and more.
 
-[Discord](https://discord.gg/dv28MgtaNn) · Licensed under **GPL-3.0** (see
-`LICENSE`) — required by the hardware video decoder ported into sMenu; see
-`THIRDPARTY.md`.
+[Discord](https://discord.gg/dv28MgtaNn) 
 
 <img width="1280" height="720" alt="2026092401121200-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/fc5fcfc0-1348-454c-a057-2459c590818a" />
 <img width="1280" height="720" alt="2026092323471800-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/a70ddc69-c610-4c96-9c30-7dcecc787b1d" />
