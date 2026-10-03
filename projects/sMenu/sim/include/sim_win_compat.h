@@ -48,10 +48,10 @@
 #include <direct.h>
 #include <dirent.h>
 
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_image.h>
-#include <SDL2/SDL_ttf.h>
-#include <SDL2/SDL_mixer.h>
+#include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
+#include <SDL3_ttf/SDL_ttf.h>
+#include <SDL3_mixer/SDL_mixer.h>
 
 // <algorithm> declares std::remove(first, last, value) - three arguments, and
 // the same name as C's one-argument remove(). Pulling it in here, before the

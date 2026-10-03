@@ -4,7 +4,7 @@
 #include <sl/menu/net/Http.hpp>
 #include <sl/menu/net/ContentFilter.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -125,13 +125,13 @@ namespace sl::menu::ui {
                                     : DecodeCoverSurface(path, w, h);
             if (surf) { WriteCoverTex(cpath.c_str(), src, surf); built = true; }
         }
-        if (warm) { if (surf) SDL_FreeSurface(surf); return nullptr; }
+        if (warm) { if (surf) SDL_DestroySurface(surf); return nullptr; }
         // SDL's GLES2 renderer has no RGB565 texture, so uploading one converts
         // it pixel by pixel on the main thread. Converting here leaves the
         // upload a plain copy.
         if (surf) {
-            SDL_Surface *conv = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
-            if (conv) { SDL_FreeSurface(surf); surf = conv; }
+            SDL_Surface *conv = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_ABGR8888);
+            if (conv) { SDL_DestroySurface(surf); surf = conv; }
         }
         return surf;
     }
@@ -182,13 +182,13 @@ namespace sl::menu::ui {
             m_art_pending.erase({j.kind, j.id});
             // The art on the card changed while this was in flight (a fetch or
             // the picker landed): drop it, and the next frame asks again.
-            if (j.epoch != m_art_epoch) { if (j.surf) SDL_FreeSurface(j.surf); continue; }
+            if (j.epoch != m_art_epoch) { if (j.surf) SDL_DestroySurface(j.surf); continue; }
             auto &map = j.kind == Art_Cover ? m_covers
                       : j.kind == Art_Wrap  ? m_game_wraps : m_hero_art;
             SDL_Texture *tex = nullptr;
             if (j.surf) {
                 tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), j.surf);
-                SDL_FreeSurface(j.surf);
+                SDL_DestroySurface(j.surf);
             }
             auto old = map.find(j.id);
             if (old != map.end() && old->second) m_gfx->FreeImage(old->second);
@@ -210,7 +210,7 @@ namespace sl::menu::ui {
         threadClose(&m_art_thread);
         m_art_started = false;
         for (ArtJob &j : m_art_done)
-            if (j.surf) SDL_FreeSurface(j.surf);
+            if (j.surf) SDL_DestroySurface(j.surf);
         m_art_done.clear();
         m_art_pending.clear();
     }
@@ -292,7 +292,7 @@ namespace sl::menu::ui {
         // never decodes a half-written file.
         bool SavePngWhole(SDL_Surface *surf, const char *path) {
             const std::string part = std::string(path) + ".part";
-            if (IMG_SavePNG(surf, part.c_str()) != 0) { remove(part.c_str()); return false; }
+            if (!IMG_SavePNG(surf, part.c_str())) { remove(part.c_str()); return false; }
             remove(path);                          // FAT rename will not overwrite
             if (rename(part.c_str(), path) == 0) return true;
             remove(part.c_str());
@@ -357,13 +357,13 @@ namespace sl::menu::ui {
             SDL_Surface *raw = IMG_Load(tmp);
             remove(tmp);
             if (!raw) return false;
-            SDL_Surface *src = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGB24, 0);
-            SDL_FreeSurface(raw);
-            if (!src || src->w < 100 || src->h < 100) { if (src) SDL_FreeSurface(src); return false; }
+            SDL_Surface *src = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGB24);
+            SDL_DestroySurface(raw);
+            if (!src || src->w < 100 || src->h < 100) { if (src) SDL_DestroySurface(src); return false; }
 
             auto scaled = [&](const SDL_Rect *from, int w, int h) -> SDL_Surface * {
-                SDL_Surface *d = SDL_CreateRGBSurfaceWithFormat(0, w, h, 24, SDL_PIXELFORMAT_RGB24);
-                if (d) SDL_BlitScaled(src, from, d, nullptr);
+                SDL_Surface *d = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGB24);
+                if (d) SDL_BlitSurfaceScaled(src, from, d, nullptr, SDL_SCALEMODE_LINEAR);
                 return d;
             };
             char path[96];
@@ -375,7 +375,7 @@ namespace sl::menu::ui {
                 // the whole menu down (see ImageLooksWhole in Http.cpp).
                 snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_wrap.png", (unsigned long long)app_id);
                 ok = SavePngWhole(w, path);
-                SDL_FreeSurface(w);
+                SDL_DestroySurface(w);
             }
             if (ok && need_cover) {
                 const int fx = (int)(src->w * kScanSpine1);
@@ -385,14 +385,14 @@ namespace sl::menu::ui {
                     // cover; the loader goes by the file's contents, not its name.
                     snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX.jpg", (unsigned long long)app_id);
                     cover_made = SavePngWhole(c, path);
-                    SDL_FreeSurface(c);
+                    SDL_DestroySurface(c);
                     if (cover_made) {
                         snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX_tdb", (unsigned long long)app_id);
                         if (FILE *f = fopen(path, "w")) fclose(f);
                     }
                 }
             }
-            SDL_FreeSurface(src);
+            SDL_DestroySurface(src);
             return ok;
         }
     }
@@ -475,7 +475,7 @@ namespace sl::menu::ui {
 
             // URL-encode the title for the search path.
             std::string q;
-            for (unsigned char c : m->m_cover_name) {
+            for (unsigned char c : net::SearchName(m->m_cover_name)) {
                 if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
                 else if (c == ' ') q += "%20";
                 else {
@@ -495,7 +495,6 @@ namespace sl::menu::ui {
                 }
             };
 
-            // Check if this game should be filtered due to adult content
             if (net::ContentFilter::ShouldFilterGameByName(m->m_cover_name)) {
                 end = CoverState::Filtered;
                 logline("filtered", 0, 0, m->m_cover_name.size());
@@ -636,10 +635,9 @@ namespace sl::menu::ui {
                     if (!okd && (http == 0 || http >= 500)) m->m_steam_dead = true;
 
                     if (okd) {
-                        // Check if Steam store page indicates adult content
                         if (net::ContentFilter::ShouldFilterBySteamTags(body)) {
                             logline("steam-filtered", 0, 0, body.size());
-                            shots = 0;  // Don't download filtered screenshots
+                            shots = 0;
                         } else {
                             // Each screenshot carries a thumbnail and a full-size
                             // image; the panels are drawn a few hundred pixels wide,
@@ -666,6 +664,20 @@ namespace sl::menu::ui {
             // a misleading one.
         } while (false);
 
+        // Every source answered and none had anything: remember that, or the
+        // same dead lookups go out again on every menu start (covers.log had
+        // one title searched 78 times). Not after a network failure.
+        if (!(m->m_cover_ok || m->m_wrap_ok || m->m_shots_ok || m->m_hero_ok) &&
+            end != CoverState::Failed && end != CoverState::BadKey && !m->m_steam_dead) {
+            char miss[96];
+            snprintf(miss, sizeof(miss), "sdmc:/slaunch/covers/%016llX_miss",
+                     (unsigned long long)m->m_cover_id);
+            if (FILE *f = fopen(miss, "w")) {
+                fprintf(f, "%lld %d\n", (long long)time(nullptr), m->SgdbActive() ? 1 : 0);
+                fclose(f);
+            }
+        }
+
         m->m_cover_state.store((int)end, std::memory_order_release);
         // The outcome, for the status bar: something new landed, nothing was
         // found, or the network let us down.
@@ -680,8 +692,22 @@ namespace sl::menu::ui {
         // No key is no longer the end of it: GameTDB and Steam need none.
         SgdbKeyPresent();                  // loads the key, if there is one
         if (m_cover_tried.count(app_id))  return;
-
         m_cover_tried[app_id] = true;
+
+        // Looked for recently and nothing was there. Retried after a week, or
+        // at once if SteamGridDB was switched on or off since.
+        char miss[96];
+        snprintf(miss, sizeof(miss), "sdmc:/slaunch/covers/%016llX_miss",
+                 (unsigned long long)app_id);
+        if (FILE *f = fopen(miss, "r")) {
+            long long when = 0; int sgdb = -1;
+            const bool got = fscanf(f, "%lld %d", &when, &sgdb) == 2;
+            fclose(f);
+            if (got && sgdb == (SgdbActive() ? 1 : 0) &&
+                time(nullptr) - when < 7 * 24 * 3600)
+                return;
+        }
+
         m_cover_id   = app_id;
         m_cover_name = name;
         m_fetch_title = name;
@@ -801,12 +827,12 @@ namespace sl::menu::ui {
         FlowShots s;
         if (m_shot_surf_a) {
             s.a = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_shot_surf_a);
-            SDL_FreeSurface(m_shot_surf_a);
+            SDL_DestroySurface(m_shot_surf_a);
             m_shot_surf_a = nullptr;
         }
         if (m_shot_surf_b) {
             s.b = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_shot_surf_b);
-            SDL_FreeSurface(m_shot_surf_b);
+            SDL_DestroySurface(m_shot_surf_b);
             m_shot_surf_b = nullptr;
         }
         // Recorded even when both are null, so a title with no hero art is not
@@ -1317,22 +1343,48 @@ namespace sl::menu::ui {
             else if (auto g = m_game_wraps.find(it.app_id); g != m_game_wraps.end()) gw = g->second;
             const bool scan_front = gw && TdbFront(it.app_id);
 
-            auto draw_side = [&](const float face[4][3], bool spine) {
-                m_gfx->DrawQuad3D(nullptr, face, side_col, 255, 255, false, 4);
-                if (spine && gw) {
-                    const float uv_spine[4] = { kScanSpine0, 0.0f, kScanSpine1, 1.0f };
-                    m_gfx->DrawQuad3D(gw, face, tint, 255, 255, false, 4, uv_spine);
-                } else if (spine && m_flow_wrap) {
-                    const float uv_spine[4] = { kWrapSpine0, 0.0f, kWrapSpine1, 1.0f };
-                    m_gfx->DrawQuad3D(m_flow_wrap, face, tint, 255, 255,
-                                      false, 4, uv_spine);
+            // The reflection's geometry: mirrored about the box's OWN bottom
+            // edge, not about a fixed floor. kFlowFloor is the bottom of an
+            // unscaled case, so while the launch bounce grows the selected one
+            // its base hung below that line and the reflection - still folded
+            // about the old one - rode up over the box it was supposed to be
+            // sitting on. Taking the plane from the scaled half-height keeps the
+            // two exactly edge to edge at every size, and is identical to the
+            // constant for every box that is not bouncing.
+            const float floor_y = gFlowY - half_h;
+            auto mirror = [&](const float src[4][3], float out[4][3]) {
+                for (int k = 0; k < 4; k++) {
+                    const int j = (k == 0) ? 3 : (k == 1) ? 2 : (k == 2) ? 1 : 0;
+                    out[k][0] = src[j][0];
+                    out[k][2] = src[j][2];
+                    out[k][1] = 2.0f * floor_y - src[j][1];
                 }
             };
-            auto draw_back = [&]() {
-                m_gfx->DrawQuad3D(nullptr, back, back_col, 255, 255, false, 4);
+
+            // Each face takes its geometry and a fade, so the reflection is
+            // drawn by the same code as the box: mirrored geometry, flipped
+            // texture, alpha running from a0 at the box's base to a1 away from
+            // it. Only the box itself (a0 = a1 = 255) gets the back's
+            // screenshot panels.
+            auto draw_side = [&](const float face[4][3], bool spine,
+                                 Uint8 a0 = 255, Uint8 a1 = 255, bool flip = false) {
+                m_gfx->DrawQuad3D(nullptr, face, side_col, a0, a1, flip, 4);
+                if (spine && gw) {
+                    const float uv_spine[4] = { kScanSpine0, 0.0f, kScanSpine1, 1.0f };
+                    m_gfx->DrawQuad3D(gw, face, tint, a0, a1, flip, 4, uv_spine);
+                } else if (spine && m_flow_wrap) {
+                    const float uv_spine[4] = { kWrapSpine0, 0.0f, kWrapSpine1, 1.0f };
+                    m_gfx->DrawQuad3D(m_flow_wrap, face, tint, a0, a1,
+                                      flip, 4, uv_spine);
+                }
+            };
+            auto draw_back = [&](const float bf[4][3] = nullptr,
+                                 Uint8 a0 = 255, Uint8 a1 = 255, bool flip = false) {
+                if (!bf) bf = back;
+                m_gfx->DrawQuad3D(nullptr, bf, back_col, a0, a1, flip, 4);
                 if (gw) {                   // the real back of the case
                     const float uv_back[4] = { 0.0f, 0.0f, kScanSpine0, 1.0f };
-                    m_gfx->DrawQuad3D(gw, back, tint, 255, 255, false, 12, uv_back);
+                    m_gfx->DrawQuad3D(gw, bf, tint, a0, a1, flip, 12, uv_back);
                     return;
                 }
 
@@ -1356,7 +1408,7 @@ namespace sl::menu::ui {
                 static const FlowShots kNoShots;
                 auto shit = m_shots.find(it.app_id);
                 const FlowShots &sh = (shit != m_shots.end()) ? shit->second : kNoShots;
-                if (sh.a || sh.b) {
+                if ((sh.a || sh.b) && !flip) {
                     // Two 16:9 panels stacked flush: the full width of the case,
                     // starting at its top edge, with nothing between them. The
                     // height still follows from the width (h = w * 9/16) so they
@@ -1387,32 +1439,35 @@ namespace sl::menu::ui {
 
                 if (m_flow_wrap) {
                     const float uv_back[4] = { 0.0f, 0.0f, kWrapSpine0, 1.0f };
-                    m_gfx->DrawQuad3D(m_flow_wrap, back, tint, 255, 255,
-                                      false, 12, uv_back);
+                    m_gfx->DrawQuad3D(m_flow_wrap, bf, tint, a0, a1,
+                                      flip, 12, uv_back);
                 }
             };
-            auto draw_front = [&]() {
-                m_gfx->DrawQuad3D(nullptr, corners, blank, 255, 255);
+            auto draw_front = [&](const float cf[4][3] = nullptr,
+                                  Uint8 a0 = 255, Uint8 a1 = 255, bool flip = false) {
+                if (!cf) cf = corners;
+                m_gfx->DrawQuad3D(nullptr, cf, blank, a0, a1, flip);
                 if (showing_back) return;   // its printing faces away from us
                 if (cover) {
-                    m_gfx->DrawQuad3D(cover, corners, tint, 255, 255);
+                    m_gfx->DrawQuad3D(cover, cf, tint, a0, a1, flip);
                 } else if (gw) {
                     const float uv_front[4] = { kScanSpine1, 0.0f, 1.0f, 1.0f };
-                    m_gfx->DrawQuad3D(gw, corners, tint, 255, 255, false, 12, uv_front);
+                    m_gfx->DrawQuad3D(gw, cf, tint, a0, a1, flip, 12, uv_front);
                     return;                 // printed already
                 } else if (icon) {
                     // Square icon inset on the face, leaving case above and below.
                     float inset[4][3];
                     FlowCorners(x, z, angle, half_w * 0.82f, half_w * 0.82f, inset);
-                    m_gfx->DrawQuad3D(icon, inset, tint, 255, 255);
+                    if (flip) { float m[4][3]; mirror(inset, m); memcpy(inset, m, sizeof(m)); }
+                    m_gfx->DrawQuad3D(icon, inset, tint, a0, a1, flip);
                 }
                 // The printed wrap over the art is what makes this a boxed game
                 // rather than a picture on a slab - unless the art is a scan of
                 // the real thing, which has its own.
                 if (m_flow_wrap && !scan_front) {
                     const float uv_front[4] = { kWrapFront0, 0.0f, kWrapFront1, 1.0f };
-                    m_gfx->DrawQuad3D(m_flow_wrap, corners, tint, 255, 255,
-                                      false, 12, uv_front);
+                    m_gfx->DrawQuad3D(m_flow_wrap, cf, tint, a0, a1,
+                                      flip, 12, uv_front);
                 }
             };
 
@@ -1462,40 +1517,34 @@ namespace sl::menu::ui {
 
             // Reflection. Mirroring only the front face left the box floating on
             // a reflection narrower than itself; every face the box is built from
-            // gets mirrored, so the reflection has the same silhouette.
+            // gets mirrored - printing and all - so the reflection has the same
+            // silhouette and shows the same case.
             //
-            // Mirrored about the box's OWN bottom edge, not about a fixed floor.
-            // kFlowFloor is the bottom of an unscaled case, so while the launch
-            // bounce grows the selected one its base hung below that line and the
-            // reflection - still folded about the old one - rode up over the box
-            // it was supposed to be sitting on. Taking the plane from the scaled
-            // half-height keeps the two exactly edge to edge at every size, and
-            // is identical to the constant for every box that is not bouncing.
-            const float floor_y = gFlowY - half_h;
-            auto mirror = [&](const float src[4][3], float out[4][3]) {
-                for (int k = 0; k < 4; k++) {
-                    const int j = (k == 0) ? 3 : (k == 1) ? 2 : (k == 2) ? 1 : 0;
-                    out[k][0] = src[j][0];
-                    out[k][2] = src[j][2];
-                    out[k][1] = 2.0f * floor_y - src[j][1];
-                }
-            };
+            // Only the faces the camera can see. The reflection is translucent,
+            // so a hidden face drawn under it shows through - the far side's
+            // printed spine did, as a stripe across the mirrored front. A face
+            // of a box is visible when the camera (the origin) is on its outer
+            // side: its centre minus the box's centre is the outward normal.
             {
-                float m[4][3], face[4][3];
-                // Sides first, then the face you are actually looking at, so the
-                // reflection stacks the same way the box does.
-                side_face(half_w, face);  mirror(face, m);
-                m_gfx->DrawQuad3D(nullptr, m, blank, 70, 0, true, 4);
-                side_face(-half_w, face); mirror(face, m);
-                m_gfx->DrawQuad3D(nullptr, m, blank, 70, 0, true, 4);
-
-                mirror(showing_back ? back : corners, m);
-                if (showing_back) {
-                    m_gfx->DrawQuad3D(nullptr, m, blank, 80, 0, true, 4);
-                } else {
-                    m_gfx->DrawQuad3D(cover ? cover : nullptr, m,
-                                      cover ? tint : blank, 90, 0, true);
-                }
+                auto centre = [](const float f[4][3], float c[3]) {
+                    for (int k = 0; k < 3; k++)
+                        c[k] = 0.25f * (f[0][k] + f[1][k] + f[2][k] + f[3][k]);
+                };
+                float cf[3], cbk[3], box[3];
+                centre(corners, cf); centre(back, cbk);
+                for (int k = 0; k < 3; k++) box[k] = 0.5f * (cf[k] + cbk[k]);
+                auto seen = [&](const float f[4][3]) {
+                    float c[3];
+                    centre(f, c);
+                    float d = 0.0f;
+                    for (int k = 0; k < 3; k++) d += (c[k] - box[k]) * c[k];
+                    return d < 0.0f;
+                };
+                float m[4][3];
+                if (seen(face_l)) { mirror(face_l, m); draw_side(m, true,  70, 0, true); }
+                if (seen(face_r)) { mirror(face_r, m); draw_side(m, false, 70, 0, true); }
+                if (showing_back) { mirror(back, m);    draw_back(m, 80, 0, true); }
+                else              { mirror(corners, m); draw_front(m, 90, 0, true); }
             }
         }
 

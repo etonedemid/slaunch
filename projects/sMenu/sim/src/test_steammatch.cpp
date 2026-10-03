@@ -19,7 +19,10 @@ int main() {
     const std::string hades = R"([{"appid":"9","name":"Hades II"}])";
     assert(SteamAppFor(hades, "Hades").empty());
     const std::string bg = R"([{"appid":"7","name":"Baldur's Gate 3"}])";
-    assert(SteamAppFor(bg, "Baldur\xe2\x80\x99s Gate 3").empty() || true);   // curly quote: tolerated either way
+    assert(SteamAppFor(bg, "Baldur\xe2\x80\x99s Gate 3") == "7");   // curly quote in the Switch title
     assert(SteamAppFor(bg, "Baldur's Gate 3") == "7");
+    assert(sl::menu::net::SearchName("Assassin\xe2\x80\x99s Creed\xc2\xae The Ezio Collection")
+           == "Assassin's Creed The Ezio Collection");
+    assert(sl::menu::net::SearchName("Super Smash Bros.\xe2\x84\xa2 Ultimate") == "Super Smash Bros. Ultimate");
     puts("test_steammatch: ok");
 }

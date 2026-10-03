@@ -1,7 +1,7 @@
 #!/bin/sh
 # Stage the Windows cross-build dependencies.
 #
-# SDL2 and libcurl for MinGW are not in the Arch repositories, so the official
+# SDL3 and libcurl for MinGW are not in the Arch repositories, so the official
 # prebuilt packages are fetched here. They are headers, import libraries and
 # DLLs - nothing is compiled from source.
 #
@@ -14,10 +14,10 @@ DEST="$1"
 mkdir -p "$DEST"
 cd "$DEST"
 
-SDL_URLS="https://github.com/libsdl-org/SDL/releases/download/release-2.30.12/SDL2-devel-2.30.12-mingw.tar.gz
-https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.8/SDL2_image-devel-2.8.8-mingw.tar.gz
-https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.22.0/SDL2_ttf-devel-2.22.0-mingw.tar.gz
-https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.1/SDL2_mixer-devel-2.8.1-mingw.tar.gz"
+SDL_URLS="https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-devel-3.4.16-mingw.tar.gz
+https://github.com/libsdl-org/SDL_image/releases/download/release-3.4.6/SDL3_image-devel-3.4.6-mingw.tar.gz
+https://github.com/libsdl-org/SDL_ttf/releases/download/release-3.2.2/SDL3_ttf-devel-3.2.2-mingw.tar.gz
+https://github.com/libsdl-org/SDL_mixer/releases/download/release-3.2.4/SDL3_mixer-devel-3.2.4-mingw.tar.gz"
 
 CURL_URL="https://curl.se/windows/latest.cgi?p=win64-mingw.zip"
 
@@ -49,8 +49,8 @@ fi
 # Each package unpacks an x86_64-w64-mingw32/ tree; merge them into one prefix
 # so the Makefile needs a single -I and -L.
 mkdir -p prefix
-for d in SDL2-*/x86_64-w64-mingw32 SDL2_image-*/x86_64-w64-mingw32 \
-         SDL2_ttf-*/x86_64-w64-mingw32 SDL2_mixer-*/x86_64-w64-mingw32; do
+for d in SDL3-*/x86_64-w64-mingw32 SDL3_image-*/x86_64-w64-mingw32 \
+         SDL3_ttf-*/x86_64-w64-mingw32 SDL3_mixer-*/x86_64-w64-mingw32; do
     [ -d "$d" ] && cp -a "$d/." prefix/
 done
 
@@ -63,5 +63,5 @@ for d in curl-*-win64-mingw; do
 done
 
 echo "prefix:"
-echo "  headers: $(ls prefix/include/SDL2 2>/dev/null | wc -l) SDL2, curl: $([ -f prefix/include/curl/curl.h ] && echo yes || echo NO)"
+echo "  headers: $(ls prefix/include/SDL3 2>/dev/null | wc -l) SDL3, curl: $([ -f prefix/include/curl/curl.h ] && echo yes || echo NO)"
 echo "  dlls:    $(ls prefix/bin/*.dll 2>/dev/null | wc -l)"

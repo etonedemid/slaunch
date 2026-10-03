@@ -60,7 +60,6 @@ namespace sl::smi {
     };
     static_assert(sizeof(CommandHeader) == 8);
 
-    // Payload for SetSelectedUser
     struct PayloadSetUser {
         AccountUid uid;
     };

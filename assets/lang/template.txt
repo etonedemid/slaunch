@@ -98,6 +98,11 @@ Update available=Update available
 
 # --- theming + appearance ---
 Menu entries=Menu entries
+Screen timeout=Screen timeout
+Screen timeout (TV)=Screen timeout (TV)
+Never=Never
+min=min
+h=h
 found=found
 Back=Back
 About=About
@@ -489,3 +494,5 @@ App crash detected! :(=App crash detected! :(
 (%d crashes since you last saw this menu)=(%d crashes since you last saw this menu)
 Program=Program
 OK=OK
+Could not do that=Could not do that
+Not enough space in system memory to create this game's save data. Free some up (delete unused data or move games to the SD card) and try again.=Not enough space in system memory to create this game's save data. Free some up (delete unused data or move games to the SD card) and try again.

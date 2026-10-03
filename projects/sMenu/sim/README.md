@@ -28,7 +28,7 @@ projects/sMenu/sim/sync-sd.sh /mnt/e
 cd projects/sMenu/sim && ./slaunch-sim
 ```
 
-Requires `sdl2`, `sdl2_image`, `sdl2_ttf`, `sdl2_mixer`, `libcurl`,
+Requires `sdl3`, `sdl3_image`, `sdl3_ttf`, `sdl3_mixer`, `libcurl`,
 `libavformat`, `libavcodec` and `libavutil` (`apt install libavformat-dev
 libavcodec-dev libavutil-dev` if missing) - all but the last three already
 present in this WSL image. A window needs WSLg, which works here.
@@ -44,7 +44,7 @@ root `README.md`.
 make -C projects/sMenu/sim win
 ```
 
-Cross-compiled with `mingw-w64`, which is already installed. SDL2 for MinGW is
+Cross-compiled with `mingw-w64`, which is already installed. SDL3 for MinGW is
 not in the Arch repositories, so `scripts/get-win-deps.sh` stages the official
 prebuilt packages from libsdl-org into `~/.slaunch-windeps` - headers, import
 libraries and DLLs, nothing built from source. `make win` runs it for you if the
@@ -65,24 +65,6 @@ The paths are rewritten on their way into the C library instead - see
 redirected by the linker rather than by a macro.
 
 Audio works on Windows, where WSL usually has no device.
-
-## GPU effects need real SDL 2
-
-Arch's `sdl2` package is sdl2-compat (SDL2's API on SDL3), and its
-`SDL_GL_BindTexture` binds nothing. The menu detects that and draws Flow's 3D
-boxes and the rounded cards with their CPU fallbacks, which is not what the
-console shows. Build the console's SDL version once and the simulator links
-it automatically (the Makefile adds a runpath when it exists):
-
-```bash
-curl -LO https://github.com/libsdl-org/SDL/releases/download/release-2.28.5/SDL2-2.28.5.tar.gz
-tar xzf SDL2-2.28.5.tar.gz && cd SDL2-2.28.5
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSDL_PIPEWIRE=OFF -DSDL_WAYLAND=OFF \
-      -DSDL_TEST=OFF -DSDL_STATIC=OFF -DCMAKE_INSTALL_PREFIX=$HOME/.local/share/slaunch-sim-sdl2
-cmake --build build -j && cmake --install build
-```
-
-Then `make clean && make` here.
 
 ## Controls
 

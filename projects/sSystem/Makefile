@@ -6,7 +6,7 @@
 
 TARGET   := sSystem
 BUILD    := build
-SOURCES  := source source/sl/sys/app source/sl/sys/la source/sl/sys/ecs source/sl/sys/smi \
+SOURCES  := source source/sl/sys/app source/sl/sys/la source/sl/sys/ecs \
             source/sl/sys/pwr source/sl/sys/hb
 INCLUDES := include ../../libs/sCommon/include
 
@@ -25,7 +25,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 # App metadata
 APP_TITLE   := sSystem
 APP_AUTHOR  := sLaunch
-APP_VERSION := 1.4.1
+APP_VERSION := 1.5.0
 
 #---------------------------------------------------------------------------------
 # Compiler flags

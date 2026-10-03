@@ -30,7 +30,6 @@ using namespace sl::sys;   // la::, app::, ecs::
 static constexpr const char *MenuNsoPath = "sdmc:/slaunch/bin/sMenu/main";
 
 static AccountUid g_SelectedUser = {};
-static bool       g_Running      = true;
 
 // A request from the menu is carried out only AFTER the menu applet closes
 // (its slot must be free). The menu sends the command then exits; the loop
@@ -94,7 +93,7 @@ static bool SdRawWrite(const char *path, const void *data, size_t len, bool appe
 }
 
 // Bring-up diagnostics: the daemon has full SD access via its NPDM.
-static void DaemonLog(const char *fmt, ...) {
+void DaemonLog(const char *fmt, ...) {
     char line[512];
     va_list ap; va_start(ap, fmt);
     int n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
@@ -132,6 +131,11 @@ static void PushMenuEvent(MenuMessage evt) {
 
 // A power request that could not be carried out (only reboot-to-payload can
 // fail) leaves its reason here; the menu shows it once and deletes the file.
+// Shown by the menu when a game's save data could not be created.
+static constexpr const char *kNoSpaceMsg =
+    "Not enough space in system memory to create this game's save data. "
+    "Free some up (delete unused data or move games to the SD card) and try again.";
+
 static void WritePowerError(const char *msg) {
     if (!msg || !msg[0]) return;
     mkdir("sdmc:/slaunch", 0777);
@@ -266,6 +270,7 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
         }
 
         case SystemMessage::TerminateApplication:
+            DaemonLog("app: close 0x%016lx (asked by the menu)", app::g_AppId);
             if (app::g_AppRunning) app::Terminate();
             CleanupHbOverride();   // if it was a homebrew-as-app, restore the donor
             break;
@@ -292,11 +297,6 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
     }
 }
 
-static bool HandleKeyboardRequest() {
-    //stub
-    return true;
-}
-
 // ---------------------------------------------------------------------------
 // Carry out the queued action once the menu applet has closed. Games/resume
 // leave the menu closed (the game runs); opening a system applet blocks until
@@ -314,6 +314,22 @@ static void EnsureSdMounted() {
     DaemonLog("sd: mount was dead, remounted rc=0x%x", rc);
 }
 
+// A game is told this user is preselected and mounts their save without
+// asking. An empty or deleted uid makes every game abort on its save mount
+// (2002-1002, issue #6), so fall back to the first account on the console.
+static void EnsureUser() {
+    if (accountUidIsValid(&g_SelectedUser)) {
+        AccountProfile p;
+        if (R_SUCCEEDED(accountGetProfile(&p, g_SelectedUser))) { accountProfileClose(&p); return; }
+    }
+    AccountUid uids[ACC_USER_LIST_SIZE];
+    s32 n = 0;
+    if (R_SUCCEEDED(accountListAllUsers(uids, ACC_USER_LIST_SIZE, &n)) && n > 0) {
+        DaemonLog("user: selected user is not on this console - using the first account");
+        g_SelectedUser = uids[0];
+    }
+}
+
 static void RunPendingAction() {
     const Pending p = g_Pending;
     g_Pending = Pending::None;
@@ -321,10 +337,16 @@ static void RunPendingAction() {
 
     switch (p) {
         case Pending::LaunchApp:
+            EnsureUser();
             if (app::g_AppRunning) app::Terminate();
             CleanupHbOverride();   // dropping an override before a normal launch
-            if (R_FAILED(app::Launch(g_PendingAppId, g_SelectedUser)))
+            if (const Result rc = app::Launch(g_PendingAppId, g_SelectedUser); R_FAILED(rc)) {
+                DaemonLog("app: launch 0x%016lx failed rc=0x%x", g_PendingAppId, rc);
+                if (app::IsNoSpace(rc)) WritePowerError(kNoSpaceMsg);
                 LaunchMenu(); // launch failed -> back to the menu
+            } else {
+                DaemonLog("app: launched 0x%016lx", g_PendingAppId);
+            }
             break;
         case Pending::ResumeApp:
             if (app::g_AppRunning) app::Resume();
@@ -444,6 +466,7 @@ static void RunPendingAction() {
             // hbtarget.txt and boots the .nro. The ECS override is unregistered
             // when the app exits (see the main loop), restoring the game. ECS is
             // runtime-only, so a reboot also clears any stuck override.
+            EnsureUser();
             if (app::g_AppRunning) app::Terminate();
             CleanupHbOverride();   // drop any previous override first
             WriteHbTarget(g_PendingHbPath, g_PendingHbArgv);
@@ -453,6 +476,7 @@ static void RunPendingAction() {
             if (R_SUCCEEDED(rc)) {
                 Result lr = app::Launch(g_PendingDonorId, g_SelectedUser);
                 DaemonLog("hbapp: Launch(0x%016lx) rc=0x%x", g_PendingDonorId, lr);
+                if (app::IsNoSpace(lr)) WritePowerError(kNoSpaceMsg);
                 if (R_SUCCEEDED(lr)) {
                     g_HbOverrideDonor = g_PendingDonorId;   // app runs; cleaned up on exit
                     DaemonLog("hbapp: running as app, will clean up on exit");
@@ -564,10 +588,6 @@ enum SystemAppletMessage : u32 {
     Msg_SdCardRemoved                  = 33,
 };
 
-static void HandleSleep() {
-    pwr::Sleep();
-}
-
 // The SD card was physically removed while the console is on. Everything sMenu
 // and the daemon serve lives on that card (ECS overrides read straight from it),
 // so we must not keep running. Show the warning on the menu if it is up, then
@@ -606,9 +626,12 @@ static void HandleHomeButton() {
                   (unsigned long long)((t1 - t0) * 1000 / hz),
                   (unsigned long long)((t2 - t1) * 1000 / hz));
     } else if (la::IsMenuAlive() && app::g_AppRunning) {
-        // In the menu with a game suspended: resume the game.
+        // In the menu with a game suspended: resume the game - unless the
+        // menu had already asked for something else on its way out.
+        DrainSMIQueue();
         la::StopMenu();
-        app::Resume();
+        if (g_Pending != Pending::None) RunPendingActions();
+        else                            app::Resume();
     }
 }
 
@@ -620,7 +643,7 @@ static void PumpAppletMessages() {
         switch (msg) {
             case Msg_DetectShortPressingHomeButton:  HandleHomeButton(); break;
             case Msg_DetectShortPressingPowerButton:
-            case Msg_AutoPowerDown:                  HandleSleep();      break;
+            case Msg_AutoPowerDown:                  pwr::Sleep();       break;
             case Msg_SdCardRemoved:                  HandleSdCardRemoved(); break;
             default: break;
         }
@@ -731,9 +754,20 @@ static void LaunchMenu() {
                   slot.program_ids[i], ecs::MenuExefsDir, ecs_rc);
     }
 
-    Result la_rc = la::LaunchMenu(slot.applet_id, &status, sizeof(status));
-    DaemonLog("LaunchMenu(slot=%s applet=0x%x) rc=0x%x",
-              slot.name, (int)slot.applet_id, la_rc);
+    // am can refuse a new library applet while the previous one (a homebrew
+    // that crashed or hung on its way out) is still being torn down: give it
+    // a moment before treating the slot as unusable.
+    Result la_rc = 0;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (attempt > 0)
+            svcSleepThread(500'000'000ULL);
+        la_rc = la::LaunchMenu(slot.applet_id, &status, sizeof(status));
+        DaemonLog("LaunchMenu(slot=%s applet=0x%x) rc=0x%x%s",
+                  slot.name, (int)slot.applet_id, la_rc,
+                  attempt > 0 ? " (retry)" : "");
+        if (R_SUCCEEDED(la_rc))
+            break;
+    }
 
     g_MenuTalked     = false;
     g_MenuLaunchTick = armGetSystemTick();
@@ -850,7 +884,23 @@ namespace ams {
             // The log exists from here. Write down what happened above before
             // acting on it, so a console that cannot boot the menu still leaves
             // a readable reason on the card.
-            remove("sdmc:/slaunch/daemon.log");
+            // Keep the previous boot's log: after a fatal the console is
+            // rebooted, and that log is the only record of what happened.
+            remove("sdmc:/slaunch/daemon.prev.log");
+            rename("sdmc:/slaunch/daemon.log", "sdmc:/slaunch/daemon.prev.log");
+            // The menu's and loader's logs are appended to on every launch and
+            // were never trimmed (debug.log reached 1.4 MB). Past a size, the
+            // current one becomes .prev and the one before it goes.
+            for (const char *name : { "boot", "debug", "covers", "ecs", "hbloader", "perf" }) {
+                char cur[64], prev[64];
+                snprintf(cur,  sizeof(cur),  "sdmc:/slaunch/%s.log", name);
+                snprintf(prev, sizeof(prev), "sdmc:/slaunch/%s.prev.log", name);
+                struct stat st;
+                if (stat(cur, &st) == 0 && st.st_size > 256 * 1024) {
+                    remove(prev);
+                    rename(cur, prev);
+                }
+            }
             const u32 ver = hosversionGet();
             DaemonLog("daemon: firmware %u.%u.%u", HOSVER_MAJOR(ver),
                       HOSVER_MINOR(ver), HOSVER_MICRO(ver));
@@ -892,7 +942,6 @@ namespace ams {
         Result idle_rc = appletLoadAndApplyIdlePolicySettings();
         DaemonLog("daemon: idle policy rc=0x%x", idle_rc);
 
-        // Select default user.
         accountGetPreselectedUser(&g_SelectedUser);
         if (!accountUidIsValid(&g_SelectedUser)) {
             AppletHolder sel;
@@ -947,6 +996,10 @@ namespace ams {
 
             // The menu applet closed -> carry out whatever it asked for.
             if (la::g_MenuRunning && !la::IsMenuAlive()) {
+                // It may have queued its last command after the drain above
+                // and then exited; closing the holder would throw that away
+                // and bring the menu straight back instead of the game.
+                DrainSMIQueue();
                 la::StopMenu();
                 NoteMenuExited();   // may switch slots if it never came up
                 RunPendingActions();

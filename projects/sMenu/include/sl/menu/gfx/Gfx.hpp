@@ -1,14 +1,14 @@
 #pragma once
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include <vector>
-#include <SDL2/SDL_ttf.h>
+#include <SDL3_ttf/SDL_ttf.h>
 #include <string>
 #include <unordered_map>
 
-// Thin SDL2 rendering wrapper for sLaunch's menu.
+// Thin SDL3 rendering wrapper for sLaunch's menu.
 // Renders at 1280x720. Text uses the console's shared system font (via the
 // pl service) so no font file needs to be bundled. Wallpapers are loaded with
-// SDL2_image from the SD card.
+// SDL3_image from the SD card.
 
 namespace sl::menu::gfx {
 
@@ -240,6 +240,14 @@ namespace sl::menu::gfx {
         bool Quad3DGpu(SDL_Texture *tex, const float c[4][3], SDL_Color tint,
                        Uint8 alpha_top, Uint8 alpha_bottom, bool flip_v, const float uv[4]);
         SDL_Surface *ScaleSurface(SDL_Surface *raw, int w, int h);     // frees raw
+        void SetLogical();   // 1280x720 layout on the current target, if scaled
+        struct Perf {
+            Uint64 frame_start = 0, window_start = 0;
+            Uint64 draw = 0, present = 0, worst = 0;
+            unsigned frames = 0;
+            bool opened = false;   // perf.log truncated this session
+        } m_perf;
+        void PerfSample(Uint64 t_present);
         void BeginScene();   // called by Clear
         void EndScene();     // called by Present
         bool ShaderFxInit();              // compile on first use; false = unavailable
@@ -265,6 +273,7 @@ namespace sl::menu::gfx {
         // Scratch for DrawQuad3D's subdivision. A member so a face split into
         // a few hundred cells does not allocate every frame.
         std::vector<SDL_Vertex> m_geom;
+        std::vector<SDL_FRect>  m_frects;   // FillRects' conversion scratch
         const char   *m_title      = "sLaunch";
 
         // Content-font sizes are opened on first use, not all at once.
@@ -278,95 +287,44 @@ namespace sl::menu::gfx {
         TTF_Font     *Font(FontSize s);
         void FreeAltFonts();
 
-        // --- Text texture cache -------------------------------------------
-        // Glyph rasterisation + GPU upload is by far the most expensive thing
-        // per frame, so each unique (font,size,string) is rendered once (in
-        // white) and reused; per-draw Color/alpha is applied with texture
-        // Color/alpha modulation. Cleared when the active font changes.
-        // `used` is an LRU stamp. The cache is bounded by the GPU memory it
-        // holds rather than by entry count: a list of long names (a scanned ROM
-        // library) makes each texture several times the size of a short game
-        // title, so a count that was safe for one is not for the other.
-        // `w`/`h` are the text's own size. The texture behind it may be larger
-        // (a pool slot), so drawing always goes through a source rect rather
-        // than taking the whole texture.
-        struct CachedText { SDL_Texture *tex; int w; int h; uint64_t used; };
-
-        // ---- wide-label slot pool ------------------------------------------
-        // List labels are the only text that is both large and constantly
-        // changing: a scanned ROM library draws ~15 of them per frame, every
-        // one a different string, each 220-530 KB and every one a different
-        // width. Caching those as individual textures means a GPU allocation
-        // and a free per label per scroll step, at hundreds of distinct sizes -
-        // measured at 1207 allocations across 859 size classes over 600 frames
-        // of scrolling (scripts: see the churn harness in the commit message).
-        //
-        // The pool replaces that with a fixed set of identically sized slots,
-        // allocated once and then only ever re-uploaded: 24 allocations, one
-        // size, and nothing freed while drawing. Fragmentation and
-        // free-while-bound both stop being possible rather than becoming less
-        // likely, which matters because neither is reproducible off-console.
-        //
-        // Narrow text (the clock, hints, menu rows) keeps the ordinary cache -
-        // it is small, and there is not much of it.
-        // Two width classes, so a short name does not sit in a slot sized for
-        // the longest one. Anything narrower than the first class is left to
-        // the ordinary cache: the clock, the battery, a placeholder initial -
-        // small, few, and the same strings frame after frame.
-        // Anything taller than a slot (FontSize::Large titles) falls back too.
-        // Three width classes. Short strings are by far the most numerous (tile
-        // labels, hints, the clock), so they get the most slots at the least
-        // cost; only a full-width list label needs the big ones. Counts were
-        // picked by measuring until texture creation went flat while scrolling
-        // in every layout - see the sim's "[sim] textures:" line.
-        static constexpr int    kSlotH       = 96;    // tallest list line at 2x
-        static constexpr int    kClassCount  = 3;
-        static constexpr int    kClassW[3]   = { 256, 640, 1456 };
-        static constexpr int    kClassN[3]   = { 48, 24, 20 };   // ~21 MB total
-        struct TextSlot {
-            SDL_Texture *tex = nullptr;
-            std::string  key;
-            int          w = 0, h = 0;
-            int          cls = 0;     // width class this slot was made for
-            uint64_t     used  = 0;
-            uint64_t     frame = 0;   // last frame drawn; never reused inside one
-        };
-        std::vector<TextSlot> m_slots;
-        std::unordered_map<std::string, int> m_slotOf;
-        uint64_t m_frame = 0;
-        // Returns the slot index for `key`, uploading `surf` into it, or -1 when
-        // every slot is already spoken for this frame.
-        // Texture accounting, for the debug overlay and the sim. `creates` is
-        // the number the menu has asked the driver for since start: it should
-        // go flat once the pool is warm, whatever the list is doing.
+        // --- Text --------------------------------------------------------
+        // Drawn by SDL3_ttf's renderer text engine: each glyph is rasterised
+        // once into atlas textures the engine keeps, and each label is a
+        // TTF_Text - laid out once, then drawn as geometry out of the atlas.
+        // Scrolling a list of long names therefore creates no textures at
+        // all. Per-label textures used to, which is what the slot pool that
+        // stood here existed to contain (1207 allocations over 600 frames of
+        // scrolling before it, and on SDL_GPU still an allocation per label).
+        // Cleared when the active font changes; `used` is an LRU stamp.
+        struct CachedText { TTF_Text *text; uint64_t used; };
+        TTF_TextEngine *m_textEngine = nullptr;
+        // Layouts, not textures: small, so bounded by count.
+        static constexpr size_t kTextCacheMax = 1024;
+        std::unordered_map<std::string, CachedText> m_textCache;
+        std::vector<TTF_Text *> m_textRetired;    // destroyed in Present, see below
+        std::vector<TTF_Font *> m_fontRetired;    // closed after them
+        std::unordered_map<std::string, int> m_widthCache;   // TextWidth memo
+        uint64_t m_textClock = 0;
+        // Accounting, for the debug overlay and the sim: `creates` counts
+        // layouts made since start and should go flat once a list has been
+        // seen; there are no text textures, hence no slots and no bytes.
         struct TexStats { long creates; long failures; long slots; long cached; size_t cached_bytes; };
     public:
         TexStats Textures() const {
-            return { m_texCreates, m_texFailures, (long)m_slots.size(),
-                     (long)m_textCache.size(), m_textBytes };
+            return { m_texCreates, m_texFailures, 0, (long)m_textCache.size(), 0 };
         }
     private:
         long m_texCreates = 0;
-        long m_texFailures = 0;   // creations the driver refused
-        int  AcquireSlot(const std::string &key, SDL_Surface *surf);
-        void FreeSlots();
-        CachedText m_pooledRet {};   // GetText returns a reference; pooled hits use this
-        std::unordered_map<std::string, CachedText> m_textCache;
-        std::unordered_map<std::string, int> m_widthCache;   // TextWidth memo
-        uint64_t m_textClock = 0;
-        size_t   m_textBytes = 0;
-        // Only a screenful of labels is ever on screen; this is several times
-        // that, and still a small fraction of what an applet slot has to spare.
-        static constexpr size_t kTextCacheBudget = 6u * 1024 * 1024;
-        // Evicted textures wait here and are destroyed in Present(), never
-        // mid-frame. Freeing one while Mesa still has it bound leaves a buffer
+        long m_texFailures = 0;   // layouts the engine refused
+        // Evicted textures (and text layouts, whose release can free an atlas
+        // texture) wait here and are destroyed in Present(), never mid-frame. Freeing one while Mesa still has it bound leaves a buffer
         // object in its context pointing at released memory, and the next
         // draw's pushbuf_validate walks that list and dereferences the null.
         // That is the crash; SDL only flushes its own pending command queue on
         // destroy, which does not cover a binding Mesa is still holding.
         std::vector<SDL_Texture *> m_textGraveyard;
-        const CachedText &GetText(FontSize s, const char *text);
-        void EvictText(size_t want_free);   // retire least-recently-used entries
+        TTF_Text *GetText(FontSize s, const char *text);
+        void EvictText(size_t count);       // retire least-recently-used entries
         void ReapTextures();                // destroy the retired ones (Present only)
         void ClearTextCache();
 

@@ -1,7 +1,7 @@
 #include <sl/menu/ui/Menu.hpp>
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cmath>
 #include <algorithm>
 #include <cstdio>

@@ -61,7 +61,6 @@ namespace sl::os {
         };
         const auto *e = pick(nacp);
         if (!e) return "Unknown";
-        // Truncate to null terminator
         char name[129] = {};
         strncpy(name, e->name, 128);
         return std::string(name);

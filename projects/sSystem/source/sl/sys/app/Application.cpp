@@ -1,5 +1,8 @@
 #include <sl/sys/app/Application.hpp>
 #include <cstring>
+#include <memory>
+
+void DaemonLog(const char *fmt, ...);   // main.cpp
 
 namespace sl::sys::app {
 
@@ -40,25 +43,103 @@ namespace sl::sys::app {
         return rc;
     }
 
+    // Stock qlaunch creates a game's save data before launching it, and games
+    // rely on that: they mount their save without creating it, and abort with
+    // 2002-1002 (target not found) when it is missing - which is every game
+    // never played on that account before (issue #6). Same as qlaunch / uLaunch:
+    // open it to see if it exists, create it from the NACP sizes if not.
+    static Result EnsureSave(u64 app_id, u64 owner, AccountUid uid, FsSaveDataType type,
+                           FsSaveDataSpaceId space, u64 size, u64 journal) {
+        if (size == 0) return 0;
+        const FsSaveDataAttribute attr = {
+            .application_id = app_id, .uid = uid, .system_save_data_id = 0,
+            .save_data_type = (u8)type, .save_data_rank = FsSaveDataRank_Primary,
+            .save_data_index = 0,
+        };
+        FsFileSystem fs;
+        const Result orc = fsOpenSaveDataFileSystem(&fs, space, &attr);
+        if (R_SUCCEEDED(orc)) { fsFsClose(&fs); return 0; }
+        const FsSaveDataCreationInfo info = {
+            .save_data_size = (s64)size, .journal_size = (s64)journal,
+            .available_size = 0x4000, .owner_id = owner, .flags = 0,
+            .save_data_space_id = (u8)space,
+        };
+        const FsSaveDataMetaInfo meta = {
+            .size = (type == FsSaveDataType_Bcat) ? 0u : 0x40060u,
+            .type = (u8)((type == FsSaveDataType_Bcat) ? FsSaveDataMetaType_None
+                                                       : FsSaveDataMetaType_Thumbnail),
+        };
+        const Result crc = fsCreateSaveDataFileSystem(&attr, &info, &meta);
+        DaemonLog("save: app=0x%016lx type=%d size=0x%lx open rc=0x%x -> create rc=0x%x",
+                  app_id, (int)type, size, orc, crc);
+        return crc;
+    }
+
+    // fs 2002-0030..0045: one of the "not enough free space" results.
+    bool IsNoSpace(Result rc) {
+        return R_MODULE(rc) == 2 /* fs */ && R_DESCRIPTION(rc) >= 30 && R_DESCRIPTION(rc) <= 45;
+    }
+
+    // The first creation that failed, or 0.
+    static Result EnsureSaves(u64 app_id, AccountUid user) {
+        auto ctl = std::make_unique<NsApplicationControlData>();
+        u64 got = 0;
+        const Result rc = nsGetApplicationControlData(NsApplicationControlSource_Storage, app_id,
+                                                      ctl.get(), sizeof(*ctl), &got);
+        DaemonLog("save: app=0x%016lx user=%016lx%016lx control rc=0x%x", app_id,
+                  user.uid[0], user.uid[1], rc);
+        if (R_FAILED(rc)) return 0;   // no NACP: launch as before
+        const NacpStruct &n = ctl->nacp;
+        DaemonLog("save: nacp account=0x%lx device=0x%lx temp=0x%lx cache=0x%lx bcat=0x%lx",
+                  n.user_account_save_data_size, n.device_save_data_size,
+                  n.temporary_storage_size, n.cache_storage_size,
+                  n.bcat_delivery_cache_storage_size);
+        const u64 owner = n.save_data_owner_id;
+        // Every save is still tried after one fails; the first failure decides.
+        Result first = 0;
+        auto keep = [&](Result r) { if (R_FAILED(r) && !first) first = r; };
+        if (accountUidIsValid(&user))
+            keep(EnsureSave(app_id, owner, user, FsSaveDataType_Account, FsSaveDataSpaceId_User,
+                       n.user_account_save_data_size, n.user_account_save_data_journal_size));
+        keep(EnsureSave(app_id, owner, {}, FsSaveDataType_Device, FsSaveDataSpaceId_User,
+                   n.device_save_data_size, n.device_save_data_journal_size));
+        keep(EnsureSave(app_id, owner, {}, FsSaveDataType_Temporary, FsSaveDataSpaceId_Temporary,
+                   n.temporary_storage_size, 0));
+        keep(EnsureSave(app_id, owner, {}, FsSaveDataType_Cache, FsSaveDataSpaceId_User,
+                   n.cache_storage_size, n.cache_storage_journal_size));
+        keep(EnsureSave(app_id, 0x010000000000000CULL, {}, FsSaveDataType_Bcat, FsSaveDataSpaceId_User,
+                   n.bcat_delivery_cache_storage_size, 0x200000));
+        return first;
+    }
+
     Result Launch(u64 app_id, AccountUid user) {
         if (g_AppRunning) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
         // Touch the app (marks as recently used in NS)
         nsTouchApplication(app_id);
+        // Launching anyway would only start a game that aborts on its save
+        // mount; the caller tells the user why instead.
+        if (const Result src = EnsureSaves(app_id, user); IsNoSpace(src))
+            return src;
 
         Result rc = appletCreateApplication(&g_AppHolder, app_id);
         if (rc != 0) return rc;
 
         rc = PushUserParam(user);
-        if (rc != 0) return rc;
+        if (rc == 0) {
+            // Release foreground so the app can acquire it
+            appletUnlockForeground();
+            rc = appletApplicationStart(&g_AppHolder);
+        }
+        // Otherwise the failed app's holder stays open: am keeps it as the
+        // application, and the next launch is refused.
+        if (rc != 0) {
+            appletApplicationClose(&g_AppHolder);
+            memset(&g_AppHolder, 0, sizeof(g_AppHolder));
+            appletRequestToGetForeground();
+            return rc;
+        }
 
-        // Release foreground so the app can acquire it
-        appletUnlockForeground();
-
-        rc = appletApplicationStart(&g_AppHolder);
-        if (rc != 0) return rc;
-
-        // Hand focus to the app
         appletApplicationRequestForApplicationToGetForeground(&g_AppHolder);
 
         g_AppId       = app_id;

@@ -78,6 +78,11 @@ Update available=Actualización disponible
 
 # --- theming + appearance ---
 Menu entries=Entradas del menú
+Screen timeout=Apagado de pantalla
+Screen timeout (TV)=Apagado de pantalla (TV)
+Never=Nunca
+min=min
+h=h
 found=encontrados
 Back=Atrás
 About=Acerca de

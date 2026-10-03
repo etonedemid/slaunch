@@ -13,6 +13,9 @@ namespace sl::sys::app {
 
     // Launch a game. Sends the preselected-user parameter.
     // Caller must have already called SetSelectedUser.
+    // A save could not be created for lack of space (Launch returns it).
+    bool IsNoSpace(Result rc);
+
     Result Launch(u64 app_id, AccountUid user);
 
     // Give foreground back to the currently suspended application

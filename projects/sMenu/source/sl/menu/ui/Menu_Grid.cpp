@@ -3,7 +3,7 @@
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -458,11 +458,11 @@ namespace sl::menu::ui {
         // the widget's own drawing and put back before the blit, which is the
         // part that does need clipping.
         m_gfx->FxClose();   // SDL is used directly below
-        const SDL_bool clipped = SDL_RenderIsClipEnabled(ren);
+        const bool clipped = SDL_RenderClipEnabled(ren);
         SDL_Rect saved{};
-        SDL_RenderGetClipRect(ren, &saved);
+        SDL_GetRenderClipRect(ren, &saved);
         m_gfx->FxClose();   // SDL is used directly below
-        SDL_RenderSetClipRect(ren, nullptr);
+        SDL_SetRenderClipRect(ren, nullptr);
 
         // The widget saves and restores the target around its own cache, so
         // nesting one inside ours is safe.
@@ -477,7 +477,7 @@ namespace sl::menu::ui {
         SDL_SetRenderTarget(ren, prev);
 
         m_gfx->FxClose();   // SDL is used directly below
-        SDL_RenderSetClipRect(ren, clipped ? &saved : nullptr);
+        SDL_SetRenderClipRect(ren, clipped ? &saved : nullptr);
         if (natH <= 0) return;   // nothing rendered yet (first frames)
 
         // Fit rather than stretch: a calendar grid or a clock face pulled to a
@@ -489,10 +489,10 @@ namespace sl::menu::ui {
         const int dh = std::max(1, (int)(natH * s));
 
         SDL_SetTextureAlphaMod(m_tile_wscratch, a);
-        SDL_Rect src{ 0, 0, kTileWidgetW, natH };
-        SDL_Rect dst{ r.x + (r.w - dw) / 2, r.y + (r.h - dh) / 2, dw, dh };
+        const SDL_FRect src{ 0, 0, (float)kTileWidgetW, (float)natH };
+        const SDL_FRect dst{ r.x + (r.w - dw) / 2.0f, r.y + (r.h - dh) / 2.0f, (float)dw, (float)dh };
         m_gfx->FxClose();
-        SDL_RenderCopy(ren, m_tile_wscratch, &src, &dst);
+        SDL_RenderTexture(ren, m_tile_wscratch, &src, &dst);
     }
     // One tile face: a rounded card (colour, or the artwork edge to edge),
     // soft shadow, a glow when selected, and the label on a darkened band.
@@ -683,7 +683,7 @@ namespace sl::menu::ui {
         const SDL_Rect band{ 0, bandTop - 4, gfx::Gfx::Width,
                              (bandBot + 4) - (bandTop - 4) };
         m_gfx->FxClose();   // SDL is used directly below
-        if (ren) SDL_RenderSetClipRect(ren, &band);
+        if (ren) SDL_SetRenderClipRect(ren, &band);
 
         struct Vis { TileRect r; int item; Uint8 a; };
         std::vector<Vis> visible;
@@ -717,7 +717,7 @@ namespace sl::menu::ui {
             for (const auto &v : visible) DrawTileFace(v.r, m_items[v.item], v.item == m_cursor, v.a, -1);
         }
         m_gfx->FxClose();   // SDL is used directly below
-        if (ren) SDL_RenderSetClipRect(ren, nullptr);
+        if (ren) SDL_SetRenderClipRect(ren, nullptr);
 
         // The selected entry's name, in the corner Metro puts its page title.
         const MenuItem &sel = m_items[m_cursor];

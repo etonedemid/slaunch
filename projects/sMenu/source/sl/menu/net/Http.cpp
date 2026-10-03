@@ -198,9 +198,24 @@ namespace sl::menu::net {
         return ok;
     }
 
+    std::string SearchName(const std::string &t) {
+        std::string out;
+        out.reserve(t.size());
+        for (size_t i = 0; i < t.size(); i++) {
+            auto at = [&](const char *seq) { return t.compare(i, strlen(seq), seq) == 0; };
+            if (at("\xc2\xae") || at("\xc2\xa9"))           { i += 1; continue; }   // (R) (C)
+            if (at("\xe2\x84\xa2"))                         { i += 2; continue; }   // (TM)
+            if (at("\xe2\x80\x98") || at("\xe2\x80\x99")) { out += '\''; i += 2; continue; }
+            if (at("\xe2\x80\x9c") || at("\xe2\x80\x9d")) { out += '"';  i += 2; continue; }
+            out += t[i];
+        }
+        return out;
+    }
+
     namespace {
         // Lowercase words, everything else a single space, (TM)/(R) dropped.
-        std::string NormTitle(const std::string &in) {
+        std::string NormTitle(const std::string &raw) {
+            const std::string in = SearchName(raw);   // so "Baldur’s" is "Baldur's"
             std::string out;
             bool sp = false;
             for (size_t i = 0; i < in.size(); i++) {

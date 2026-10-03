@@ -1,8 +1,8 @@
 #include <sl/menu/audio/Music.hpp>
 #include <sl/menu/cfg/UserCfg.hpp>
 #include <string>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_mixer.h>
+#include <SDL3/SDL.h>
+#include <SDL3_mixer/SDL_mixer.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <cstdio>
@@ -10,6 +10,9 @@
 #include <algorithm>
 
 namespace sl::menu::audio {
+
+    static MIX_Mixer *g_mixer = nullptr;
+    MIX_Mixer *Mixer() { return g_mixer; }
 
     namespace {
         constexpr const char *kDir   = "sdmc:/slaunch/music";
@@ -228,24 +231,21 @@ namespace sl::menu::audio {
         ScanTracks();
         LoadState();
 
-        // Mix_OpenAudio needs the SDL audio subsystem; gfx.Init only brought up
-        // VIDEO|JOYSTICK. Bring up AUDIO here, tolerating failure - music is
-        // optional and must never take the menu down.
-        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) { m_ok = false; return false; }
-        if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096) != 0) {
-            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        // gfx.Init only brought up VIDEO|JOYSTICK. Tolerate failure - music
+        // is optional and must never take the menu down.
+        if (!MIX_Init()) { m_ok = false; return false; }
+        g_mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
+        m_track = g_mixer ? MIX_CreateTrack(g_mixer) : nullptr;
+        if (!m_track) {
+            if (g_mixer) MIX_DestroyMixer(g_mixer);
+            g_mixer = nullptr;
+            MIX_Quit();
             m_ok = false;
             return false;
         }
-        int want = MIX_INIT_MP3 | MIX_INIT_OGG | MIX_INIT_FLAC;
-#ifdef MIX_INIT_OPUS
-        want |= MIX_INIT_OPUS;
-#endif
-        Mix_Init(want);
         m_ok = true;
         ApplyVolume();
 
-        m_last_tick = armGetSystemTick();
         if (m_enabled && !m_tracks.empty())
             StartResumeLoad(m_pos);   // resume where we left off, off the main thread
         return true;
@@ -279,12 +279,13 @@ namespace sl::menu::audio {
             m_load_running = false;
         }
         SaveState();
-        if (m_music) { Mix_FreeMusic((Mix_Music *)m_music); m_music = nullptr; }
         if (m_ok) {
-            Mix_HaltMusic();
-            Mix_CloseAudio();
-            Mix_Quit();
-            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+            MIX_DestroyTrack(m_track);          // stops it
+            m_track = nullptr;
+            if (m_music) { MIX_DestroyAudio(m_music); m_music = nullptr; }
+            MIX_DestroyMixer(g_mixer);
+            g_mixer = nullptr;
+            MIX_Quit();
             m_ok = false;
         }
     }
@@ -318,34 +319,33 @@ namespace sl::menu::audio {
         if (!m_ok || m_tracks.empty()) return;
         if (m_index < 0 || m_index >= (int)m_tracks.size()) m_index = 0;
 
-        if (m_music) { Mix_FreeMusic((Mix_Music *)m_music); m_music = nullptr; }
-        Mix_Music *mus = Mix_LoadMUS(m_tracks[m_index].c_str());
+        MIX_StopTrack(m_track, 0);
+        MIX_SetTrackAudio(m_track, nullptr);
+        if (m_music) { MIX_DestroyAudio(m_music); m_music = nullptr; }
+        // Decoded as it plays (predecode off), like SDL2's Mix_Music was.
+        MIX_Audio *mus = MIX_LoadAudio(g_mixer, m_tracks[m_index].c_str(), false);
         if (!mus) { m_pos = 0.0; return; }
         m_music = mus;
+        MIX_SetTrackAudio(m_track, mus);
 
-        Mix_PlayMusic(mus, 1);         // play once; Update() advances at the end
-        if (start_seconds > 0.5) {
-            Mix_RewindMusic();
-            if (Mix_SetMusicPosition(start_seconds) == 0) m_pos = start_seconds;
-            else                                          m_pos = 0.0;
-        } else {
-            m_pos = 0.0;
-        }
+        // Once through; Update() moves on at the end.
+        if (start_seconds < 0.5) start_seconds = 0.0;
+        const SDL_PropertiesID opts = SDL_CreateProperties();
+        SDL_SetNumberProperty(opts, MIX_PROP_PLAY_START_MILLISECOND_NUMBER,
+                              (Sint64)(start_seconds * 1000.0));
+        m_pos = MIX_PlayTrack(m_track, opts) ? start_seconds : 0.0;
+        SDL_DestroyProperties(opts);
     }
 
     void Music::Update() {
-        const u64 now = armGetSystemTick();
-        // While the resume worker loads/seeks, don't touch the mixer and keep the
-        // clock fresh so m_pos doesn't jump by the whole load time afterwards.
-        if (m_loading.load(std::memory_order_acquire)) { m_last_tick = now; return; }
-        const double dt = (double)(now - m_last_tick) / (double)armGetSystemTickFreq();
-        m_last_tick = now;
-
+        // While the resume worker loads/seeks, leave the mixer alone.
+        if (m_loading.load(std::memory_order_acquire)) return;
         if (!m_ok || !m_enabled || m_tracks.empty()) return;
 
-        if (Mix_PlayingMusic() && !Mix_PausedMusic()) {
-            m_pos += dt;
-        } else if (m_music && !Mix_PausedMusic()) {
+        if (MIX_TrackPlaying(m_track)) {
+            const Sint64 ms = MIX_TrackFramesToMS(m_track, MIX_GetTrackPlaybackPosition(m_track));
+            if (ms >= 0) m_pos = (double)ms / 1000.0;
+        } else if (m_music && !MIX_TrackPaused(m_track)) {
             // Track finished.
             if (m_repeat == RepeatOne) {
                 PlayCurrent(0.0);
@@ -354,7 +354,8 @@ namespace sl::menu::audio {
                 m_index = 0;                    // end of the list: stop, ready
                 m_pos = 0.0;                    // to start again from the top
                 m_enabled = false;
-                Mix_FreeMusic((Mix_Music *)m_music);
+                MIX_SetTrackAudio(m_track, nullptr);
+                MIX_DestroyAudio(m_music);
                 m_music = nullptr;
                 SaveState();
             } else {
@@ -369,16 +370,16 @@ namespace sl::menu::audio {
         m_enabled = on;
         if (!m_ok) { SaveState(); return; }
         if (on) {
-            if (m_music && Mix_PausedMusic()) Mix_ResumeMusic();
+            if (m_music && MIX_TrackPaused(m_track)) MIX_ResumeTrack(m_track);
             else PlayCurrent(m_pos);
         } else {
-            if (Mix_PlayingMusic()) Mix_PauseMusic();
+            if (MIX_TrackPlaying(m_track)) MIX_PauseTrack(m_track);
         }
         SaveState();
     }
 
     void Music::ApplyVolume() {
-        if (m_ok) Mix_VolumeMusic(m_volume * MIX_MAX_VOLUME / 100);
+        if (m_ok) MIX_SetTrackGain(m_track, m_volume / 100.0f);
     }
 
     void Music::SetVolume(int vol) {
@@ -454,8 +455,9 @@ namespace sl::menu::audio {
         const double dur = Duration(m_index);
         if (seconds < 0.0) seconds = 0.0;
         if (dur > 0.0 && seconds > dur - 1.0) seconds = std::max(0.0, dur - 1.0);
-        Mix_RewindMusic();
-        if (seconds < 0.5 || Mix_SetMusicPosition(seconds) == 0) m_pos = seconds < 0.5 ? 0.0 : seconds;
+        if (seconds < 0.5) seconds = 0.0;
+        if (MIX_SetTrackPlaybackPosition(m_track, MIX_TrackMSToFrames(m_track, (Sint64)(seconds * 1000.0))))
+            m_pos = seconds;
     }
 
     void Music::CycleRepeat() {

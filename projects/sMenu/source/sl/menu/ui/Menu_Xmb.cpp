@@ -3,7 +3,7 @@
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>

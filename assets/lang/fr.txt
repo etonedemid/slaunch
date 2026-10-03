@@ -76,6 +76,11 @@ Update available=Mise à jour disponible
 
 # --- theming + appearance ---
 Menu entries=Éléments du menu
+Screen timeout=Mise en veille
+Screen timeout (TV)=Mise en veille (TV)
+Never=Jamais
+min=min
+h=h
 found=trouvé(s)
 Back=Retour
 About=À propos

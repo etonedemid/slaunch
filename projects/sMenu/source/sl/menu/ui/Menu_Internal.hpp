@@ -26,11 +26,12 @@ namespace sl::menu::ui {
     // has; a stale hand-counted number there silently makes the last row
     // untappable.
     enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-           TH_IconPack, TH_Antialias, TH_ShelfVert, TH_TileCols, TH_TileRows,
+           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_ShelfVert, TH_TileCols, TH_TileRows,
            TH_TdbRegion, TH_Sgdb, TH_SgdbKey, TH_FlowSet, TH_Wrap,
            TH_Hints, TH_Counter, TH_RetroArch, TH_Shortcuts, TH_Fonts,
            TH_Language, TH_Music,
            TH_Widgets, TH_Entries,
+           TH_Sleep, TH_SleepTv,
            TH_Welcome, TH_Updates,
            TH_About, TH_Back, TH_Count };
 
@@ -260,6 +261,17 @@ namespace sl::menu::ui {
     // there, which is what keeps the three agreeing about where a tile is.
     inline constexpr int kShelfGap     = 20;
     inline constexpr int kShelfAnchorX = 88;    // left edge of the selected cover
+    // PS4 style: the selected tile big at the left, the rest small beside it.
+    inline constexpr int kPsAnchorX = 187, kPsTop = 128, kPsBig = 226, kPsSmall = 134,
+                         kPsGap = 4, kPsBand = 40;
+    // Left edge and size of row position d (0 = selected, < 0 = passed).
+    inline void PsPlace(float d, float &x, float &size) {
+        const float t = std::min(1.0f, std::abs(d));
+        size = kPsBig + (kPsSmall - kPsBig) * t;
+        if (d >= 1.0f)      x = kPsAnchorX + kPsBig + kPsGap + (d - 1.0f) * (kPsSmall + kPsGap);
+        else if (d >= 0.0f) x = kPsAnchorX + d * (kPsBig + kPsGap);
+        else                x = kPsAnchorX + d * (kPsSmall + kPsGap);
+    }
     inline constexpr int kShelfTop     = 150;   // top edge of the cover row
 
     // XMB geometry, matching RetroArch's XMB "PS3" layout.
@@ -653,6 +665,14 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v1.5.0" },
+            { false, "New Shelf style like the PS4 home screen - Shelf is now the default layout" },
+            { false, "Runs on SDL3 and Vulkan: smoother 60 fps scrolling and effects" },
+            { false, "Screen timeout settings (handheld and TV) under Theming" },
+            { false, "Games no longer crash on launch when their save data is missing" },
+            { false, "Clear message when there is no space left for a game's save data" },
+            { false, "Switching accounts now launches games on the right account" },
+            { false, "Album list shows capture dates; fewer repeated box art lookups" },
             { true,  "v1.4.1" },
             { false, "Much better loading speed for Flow and the other modes" },
             { false, "Fixed homebrew launching and logging (SD card file access)" },
@@ -842,7 +862,6 @@ void main() {
             const int H = gfx::Gfx::Height;
             const float elapsed = (float)armGetSystemTick() / (float)armGetSystemTickFreq();
 
-            // Pre-compute the three palette colors.
             SDL_Color colors[3];
             colors[0] = t.fx_a;  // primary
             colors[1] = SDL_Color{255, 255, 255, 0}; // white wash
@@ -2013,8 +2032,7 @@ void main() {
             if (!f) return nullptr;
             if (!CoverHeaderMatches(f, src, tw, th)) { fclose(f); return nullptr; }
 
-            SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(0, tw, th, 16,
-                                                               SDL_PIXELFORMAT_RGB565);
+            SDL_Surface *surf = SDL_CreateSurface(tw, th, SDL_PIXELFORMAT_RGB565);
             if (!surf) { fclose(f); return nullptr; }
             // One read for the whole image when rows are packed (they are for
             // every size we cache): each read is a round trip to the card's
@@ -2027,7 +2045,7 @@ void main() {
                     ok = fread((u8 *)surf->pixels + (size_t)y * surf->pitch,
                                1, (size_t)tw * 2, f) == (size_t)tw * 2;
             fclose(f);
-            if (!ok) { SDL_FreeSurface(surf); return nullptr; }   // truncated; rebuild
+            if (!ok) { SDL_DestroySurface(surf); return nullptr; }   // truncated; rebuild
             return surf;
         }
 
@@ -2074,12 +2092,11 @@ void main() {
             SDL_Surface *raw = IMG_Load(path);
             if (!raw) return nullptr;
 
-            SDL_Surface *dst = SDL_CreateRGBSurfaceWithFormat(
-                    0, tw, th, 16, SDL_PIXELFORMAT_RGB565);
-            if (!dst) { SDL_FreeSurface(raw); return nullptr; }
+            SDL_Surface *dst = SDL_CreateSurface(tw, th, SDL_PIXELFORMAT_RGB565);
+            if (!dst) { SDL_DestroySurface(raw); return nullptr; }
 
-            SDL_BlitScaled(raw, nullptr, dst, nullptr);
-            SDL_FreeSurface(raw);
+            SDL_BlitSurfaceScaled(raw, nullptr, dst, nullptr, SDL_SCALEMODE_LINEAR);
+            SDL_DestroySurface(raw);
             return dst;
         }
 
@@ -2101,12 +2118,11 @@ void main() {
             if (ch > raw->h) ch = raw->h;
             SDL_Rect crop { (raw->w - cw) / 2, (int)((float)(raw->h - ch) * biasY), cw, ch };
 
-            SDL_Surface *dst = SDL_CreateRGBSurfaceWithFormat(
-                    0, tw, th, 16, SDL_PIXELFORMAT_RGB565);
-            if (!dst) { SDL_FreeSurface(raw); return nullptr; }
+            SDL_Surface *dst = SDL_CreateSurface(tw, th, SDL_PIXELFORMAT_RGB565);
+            if (!dst) { SDL_DestroySurface(raw); return nullptr; }
 
-            SDL_BlitScaled(raw, &crop, dst, nullptr);
-            SDL_FreeSurface(raw);
+            SDL_BlitSurfaceScaled(raw, &crop, dst, nullptr, SDL_SCALEMODE_LINEAR);
+            SDL_DestroySurface(raw);
             return dst;
         }
 

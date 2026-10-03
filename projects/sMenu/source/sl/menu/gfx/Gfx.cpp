@@ -1,17 +1,38 @@
 #include <sl/menu/gfx/Gfx.hpp>
+#ifdef SL_VULKAN
+#include "fx_spirv.h"   // scripts/fx-spirv.py, from the effects' GLSL
+#endif
 #include <vector>
 #include <algorithm>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <switch.h>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <utility>
 
 namespace sl::menu::gfx {
 
     static const int kPtSize[(int)FontSize::Count] = { 20, 26, 34, 46 };
 
+    // The Vulkan build's window must be Vulkan from the start: an OpenGL one
+    // brings up Mesa's GL beside NVK, and the process gets killed seconds in.
+#ifdef SL_VULKAN
+    static constexpr SDL_WindowFlags kWindowFlags = SDL_WINDOW_VULKAN;
+#else
+    static constexpr SDL_WindowFlags kWindowFlags = SDL_WINDOW_OPENGL;
+#endif
+
+    static SDL_FRect F(int x, int y, int w, int h) {
+        return SDL_FRect{ (float)x, (float)y, (float)w, (float)h };
+    }
+    static SDL_FRect F(const SDL_Rect &r) { return F(r.x, r.y, r.w, r.h); }
+
     // Log the SDL error string so we see *why* a step fails, not just where.
+#ifdef SL_VULKAN
+    static void FxFrameDone();
+#endif
+
     static void GfxLog(const char *step) {
         FILE *fp = fopen("sdmc:/slaunch/boot.log", "a");
         if (!fp) return;
@@ -20,25 +41,23 @@ namespace sl::menu::gfx {
     }
 
     bool Gfx::Init() {
-        // Linear sampling, set before anything is created because SDL2 captures
-        // the scale mode into each texture AT CREATION - a hint set later leaves
-        // every existing texture on the old mode.
-        //
-        // The default is nearest, which point-samples: fine for an axis-aligned
-        // blit landing on whole pixels, but Flow's box faces go through
-        // SDL_RenderGeometry with the quad rotated, so every screen pixel snapped
-        // to the nearest texel and the art came apart into stair-steps that
-        // crawled as the box turned. It cleans up the scaled draws everywhere
-        // else too - tile icons come out of a 192px cache into a ~126px box.
-        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+        // Textures sample linearly: SDL3's default, where SDL2 needed a hint.
+        // Nearest point-sampling came apart into crawling stair-steps on Flow's
+        // rotated box faces, and blurred nothing it should have elsewhere.
 
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
+        // Quick parameter checks only. The full ones look every renderer and
+        // texture handle up in a table behind a read-write lock, and on
+        // libnx releasing that lock is a kernel call - thousands of render
+        // calls a frame made it 40% of the menu's time.
+        SDL_SetHint(SDL_HINT_INVALID_PARAM_CHECKS, "1");
+
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK)) {
             GfxLog("SDL_Init"); fatalThrow(MAKERESULT(360, 31));
         }
 
         // SDL_WINDOW_OPENGL makes SDL load the GLES/EGL library before creating
-        // the window; the switch port's CreateWindow requires egl_data to exist
-        // (otherwise "EGL not initialized" -> failure).
+        // the window; the switch port's CreateWindow needs it for a GL window
+        // (a Vulkan one brings its own swapchain).
         // Anti-aliasing: render into a larger surface and let the display
         // filter it down. 1920x1080 rather than twice 720p, because that is the
         // most the console's display accepts.
@@ -58,36 +77,40 @@ namespace sl::menu::gfx {
             m_aa_on = true;
         }
 
-        m_window = SDL_CreateWindow(m_title, SDL_WINDOWPOS_CENTERED,
-                                    SDL_WINDOWPOS_CENTERED,
-                                    win_w, win_h, SDL_WINDOW_OPENGL);
+        m_window = SDL_CreateWindow(m_title, win_w, win_h, kWindowFlags);
         if (!m_window && m_aa_on) {
             // The display would not take it: carry on at native size rather
             // than refusing to start.
             GfxLog("aa window");
             m_aa_on = false;
             m_ss    = 1;
-            m_window = SDL_CreateWindow(m_title, SDL_WINDOWPOS_CENTERED,
-                                        SDL_WINDOWPOS_CENTERED,
-                                        Width, Height, SDL_WINDOW_OPENGL);
+            m_window = SDL_CreateWindow(m_title, Width, Height, kWindowFlags);
         }
         if (!m_window) { GfxLog("SDL_CreateWindow"); fatalThrow(MAKERESULT(360, 32)); }
 
-        m_renderer = SDL_CreateRenderer(
-            m_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-        if (!m_renderer) fatalThrow(MAKERESULT(360, 33)); // CreateRenderer (GPU)
+        // GL, by name: the GPU effects below talk to its context directly.
+        // GLES2 on the console (the path SDL2 always took there), desktop GL
+        // first in the simulator. The Vulkan build draws through SDL_GPU,
+        // and its effects take their SDL-drawn fallbacks.
+#if defined(SL_VULKAN)
+        m_renderer = SDL_CreateRenderer(m_window, "gpu");
+#elif defined(__SWITCH__)
+        m_renderer = SDL_CreateRenderer(m_window, "opengles2,opengl");
+#else
+        m_renderer = SDL_CreateRenderer(m_window, "opengl,opengles2");
+#endif
+        if (!m_renderer) { GfxLog("SDL_CreateRenderer"); fatalThrow(MAKERESULT(360, 33)); }
+        if (FILE *fp = fopen("sdmc:/slaunch/boot.log", "a")) {
+            fprintf(fp, "gfx: renderer %s\n", SDL_GetRendererName(m_renderer));
+            fclose(fp);
+        }
+        SDL_SetRenderVSync(m_renderer, 1);
         SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
+        SetLogical();
 
-        // Everything the menu draws is in 1280x720 coordinates. At a
-        // supersample factor above 1 the output surface is larger, and this is
-        // what keeps every existing coordinate correct without touching a
-        // single call site. The scale is an exact integer, so the mapping lands
-        // on whole pixels rather than blurring across them.
-        if (m_aa_on || m_ss != 1)
-            SDL_RenderSetLogicalSize(m_renderer, Width, Height);
-
-        if (TTF_Init() != 0) fatalThrow(MAKERESULT(360, 34)); // TTF_Init
-        IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
+        if (!TTF_Init()) fatalThrow(MAKERESULT(360, 34)); // TTF_Init
+        m_textEngine = TTF_CreateRendererTextEngine(m_renderer);
+        if (!m_textEngine) { GfxLog("TTF_CreateRendererTextEngine"); fatalThrow(MAKERESULT(360, 37)); }
 
         // Load the system shared font via the pl service, picking the one that
         // matches the console's language. Nintendo Standard covers Latin and
@@ -113,138 +136,45 @@ namespace sl::menu::gfx {
 
         for (int i = 0; i < (int)FontSize::Count; i++) {
             // Fresh RWops per open; the font memory is owned by pl and stays valid.
-            SDL_RWops *rw = SDL_RWFromConstMem(font.address, font.size);
-            m_sysFonts[i] = TTF_OpenFontRW(rw, 1 /*freesrc*/, kPtSize[i] * m_ss);
+            SDL_IOStream *rw = SDL_IOFromConstMem(font.address, font.size);
+            m_sysFonts[i] = TTF_OpenFontIO(rw, true /*closeio*/, (float)(kPtSize[i] * m_ss));
             if (!m_sysFonts[i]) fatalThrow(MAKERESULT(360, 36)); // TTF_OpenFont
             // Light hinting + kerning: the shared font's default (normal)
             // hinting spaces glyphs out oddly at small UI sizes.
             TTF_SetFontHinting(m_sysFonts[i], TTF_HINTING_LIGHT);
-            TTF_SetFontKerning(m_sysFonts[i], 1);
+            TTF_SetFontKerning(m_sysFonts[i], true);
         }
         return true;
     }
 
     void Gfx::ClearTextCache() {
         m_widthCache.clear();
-        for (auto &kv : m_textCache)
-            if (kv.second.tex) m_textGraveyard.push_back(kv.second.tex);
+        for (auto &kv : m_textCache) m_textRetired.push_back(kv.second.text);
         m_textCache.clear();
-        m_textBytes = 0;
-        // Slot textures are kept - only their contents are stale. Dropping the
-        // keys makes every label re-rasterise into a slot on next use, which is
-        // what a font or supersample change needs, with no allocation at all.
-        m_slotOf.clear();
-        for (auto &sl : m_slots) { sl.key.clear(); sl.used = 0; sl.frame = 0; }
     }
 
-    // Upload `surf` into a reusable slot and return its index, or -1 if every
-    // slot has already been drawn this frame.
-    //
-    // A slot drawn earlier in this same frame must never be handed out again:
-    // SDL batches draws and resolves textures at flush time, so overwriting one
-    // now would retroactively change what the earlier row shows. With 24 slots
-    // and ~15 rows on screen that headroom is never actually reached, but the
-    // caller falls back to an ordinary texture if it ever is.
-    int Gfx::AcquireSlot(const std::string &key, SDL_Surface *surf) {
-        auto hit = m_slotOf.find(key);
-        if (hit != m_slotOf.end()) {
-            TextSlot &sl = m_slots[hit->second];
-            sl.used  = ++m_textClock;
-            sl.frame = m_frame;     // claimed for this frame; not recyclable
-            return hit->second;
-        }
-        if (surf->h > kSlotH) return -1;                    // too tall to pool
-        int cls = -1;
-        for (int c = 0; c < kClassCount; c++) if (surf->w <= kClassW[c]) { cls = c; break; }
-        if (cls < 0) return -1;                             // wider than any slot
-
-        int live = 0;
-        for (const auto &sl : m_slots) if (sl.cls == cls) live++;
-
-        int idx = -1;
-        if (live < kClassN[cls]) {                  // grow on demand, never shrink
-            TextSlot sl;
-            sl.tex = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_ARGB8888,
-                                       SDL_TEXTUREACCESS_STATIC, kClassW[cls], kSlotH);
-            m_texCreates++;
-            if (!sl.tex) { m_texFailures++; return -1; }
-            SDL_SetTextureBlendMode(sl.tex, SDL_BLENDMODE_BLEND);
-            sl.cls = cls;
-            m_slots.push_back(sl);
-            idx = (int)m_slots.size() - 1;
-        } else {
-            for (int i = 0; i < (int)m_slots.size(); i++) {
-                if (m_slots[i].cls != cls) continue;
-                if (m_slots[i].frame == m_frame) continue;     // in use this frame
-                if (idx < 0 || m_slots[i].used < m_slots[idx].used) idx = i;
-            }
-            if (idx < 0) return -1;                            // all spoken for
-            m_slotOf.erase(m_slots[idx].key);
-        }
-
-        // Padded by a pixel on the right and bottom so the linear filter cannot
-        // pick up whatever the previous occupant left just outside the text.
-        SDL_Surface *pad = SDL_CreateRGBSurfaceWithFormat(
-            0, std::min(surf->w + 1, kClassW[cls]), std::min(surf->h + 1, kSlotH),
-            32, SDL_PIXELFORMAT_ARGB8888);
-        if (!pad) return -1;
-        SDL_SetSurfaceBlendMode(surf, SDL_BLENDMODE_NONE);   // copy alpha, don't blend
-        SDL_BlitSurface(surf, nullptr, pad, nullptr);
-        SDL_Rect dst{ 0, 0, pad->w, pad->h };
-        SDL_UpdateTexture(m_slots[idx].tex, &dst, pad->pixels, pad->pitch);
-        SDL_FreeSurface(pad);
-
-        TextSlot &sl = m_slots[idx];
-        sl.key = key; sl.w = surf->w; sl.h = surf->h;
-        sl.used = ++m_textClock; sl.frame = m_frame;
-        m_slotOf[key] = idx;
-        return idx;
-    }
-
-    void Gfx::FreeSlots() {
-        for (auto &sl : m_slots) if (sl.tex) SDL_DestroyTexture(sl.tex);
-        m_slots.clear();
-        m_slotOf.clear();
-    }
-
-    // Free at least `want_free` bytes, oldest first.
-    //
-    // This used to be "past 400 entries, throw the whole cache away". With a
-    // few dozen short titles that never fired. With thousands of long ROM names
-    // it fired constantly, and each time it destroyed every label on screen and
-    // rebuilt them the next frame - tens of MB of GPU textures cycling several
-    // times a second, until the allocator handed back nothing and the driver
-    // dereferenced it mid-frame. Evicting only what is needed, least-recently-
-    // used first, keeps the labels that are actually visible resident and makes
-    // the steady state flat however long the list is.
-    void Gfx::EvictText(size_t want_free) {
-        if (m_textCache.empty()) return;
-        // Small scan: the cache holds a few hundred entries at most, and this
-        // runs only when a new label pushes it over budget.
+    // Retire the `count` least recently drawn layouts.
+    void Gfx::EvictText(size_t count) {
         std::vector<std::pair<uint64_t, const std::string *>> order;
         order.reserve(m_textCache.size());
         for (auto &kv : m_textCache) order.push_back({ kv.second.used, &kv.first });
-        std::sort(order.begin(), order.end(),
-                  [](const auto &a, const auto &b) { return a.first < b.first; });
-
-        size_t freed = 0;
-        for (auto &e : order) {
-            if (freed >= want_free) break;
-            auto it = m_textCache.find(*e.second);
-            if (it == m_textCache.end()) continue;
-            const size_t bytes = (size_t)it->second.w * it->second.h * 4;
-            freed += bytes;
-            if (it->second.tex) m_textGraveyard.push_back(it->second.tex);
-            m_textBytes -= std::min(m_textBytes, bytes);
+        count = std::min(count, order.size());
+        std::partial_sort(order.begin(), order.begin() + count, order.end(),
+                          [](const auto &a, const auto &b) { return a.first < b.first; });
+        for (size_t i = 0; i < count; i++) {
+            auto it = m_textCache.find(*order[i].second);
+            m_textRetired.push_back(it->second.text);
             m_textCache.erase(it);
         }
     }
 
     void Gfx::FreeAltFonts() {
-        for (auto &f : m_altFonts) { if (f) TTF_CloseFont(f); f = nullptr; }
+        // Retired, like the layouts that use them, and closed after those in
+        // Present: a TTF_Text must not outlive its font.
+        ClearTextCache();
+        for (auto &f : m_altFonts) { if (f) m_fontRetired.push_back(f); f = nullptr; }
         m_altPath.clear();
         m_altLoaded = false;
-        ClearTextCache(); // cached textures referenced the now-freed fonts
     }
 
     // Opened lazily per size; see the note on Font() in the header. Only one
@@ -255,7 +185,7 @@ namespace sl::menu::gfx {
         // Probed at the smallest size because that is the one every layout
         // draws (clock, battery, hints), so the validating open is not an extra
         // one - it is the first of the sizes that were going to be opened.
-        TTF_Font *probe = TTF_OpenFont(path, kPtSize[(int)FontSize::Small] * m_ss);
+        TTF_Font *probe = TTF_OpenFont(path, (float)(kPtSize[(int)FontSize::Small] * m_ss));
         if (!probe) return false;      // keep the previously active font
 
         FreeAltFonts();
@@ -269,7 +199,7 @@ namespace sl::menu::gfx {
         if (m_useDefault || !m_altLoaded) return m_sysFonts[(int)s];
         const int i = (int)s;
         if (!m_altFonts[i] && !m_altPath.empty()) {
-            m_altFonts[i] = TTF_OpenFont(m_altPath.c_str(), kPtSize[i] * m_ss);
+            m_altFonts[i] = TTF_OpenFont(m_altPath.c_str(), (float)(kPtSize[i] * m_ss));
             // A size that will not open falls back to the system font for that
             // size only, rather than losing the chosen font everywhere.
             if (!m_altFonts[i]) return m_sysFonts[i];
@@ -281,17 +211,17 @@ namespace sl::menu::gfx {
 
     void Gfx::Exit() {
         ClearTextCache();
-        FreeSlots();
         ReapTextures();   // retired textures must not outlive the renderer
+        if (m_textEngine) { TTF_DestroyRendererTextEngine(m_textEngine); m_textEngine = nullptr; }
         if (m_gradTex) SDL_DestroyTexture(m_gradTex);
         if (m_whiteTex) { SDL_DestroyTexture(m_whiteTex); m_whiteTex = nullptr; }
         if (m_scene) { SDL_DestroyTexture(m_scene); m_scene = nullptr; }
         if (m_small) { SDL_DestroyTexture(m_small); m_small = nullptr; }
         FreeAltFonts();
+        ReapTextures();   // closes the fonts FreeAltFonts retired
         for (auto &f : m_sysFonts) { if (f) TTF_CloseFont(f); f = nullptr; }
         if (m_renderer) SDL_DestroyRenderer(m_renderer);
         if (m_window)   SDL_DestroyWindow(m_window);
-        IMG_Quit();
         TTF_Quit();
         SDL_Quit();
     }
@@ -306,15 +236,61 @@ namespace sl::menu::gfx {
     void Gfx::Present() {
         FxClose();   // an open GPU pass must end before SDL draws again
         EndScene();
+        const u64 t_present = armGetSystemTick();
         SDL_RenderPresent(m_renderer);
-        m_frame++;          // slots claimed for the finished frame are free again
+#ifdef SL_VULKAN
+        FxFrameDone();
+#endif
+        PerfSample(t_present);
         // The frame is submitted and nothing is bound from it any more, so this
         // is the one point where dropping a texture cannot pull it out from
         // under a draw that is still referencing it.
         ReapTextures();
     }
 
+    // Where the frame goes, every two seconds, to sdmc:/slaunch/perf.log -
+    // only while sdmc:/slaunch/config/profile exists (dbg::StartProfiler's
+    // switch too), so ordinary runs never write to the card for it:
+    // "draw" is everything between two presents (the menu's own work and its
+    // SDL calls), "present" is
+    // SDL_RenderPresent - on SDL_GPU that is where the frame's GPU commands
+    // are actually recorded and submitted, plus waiting for a swapchain image.
+    void Gfx::PerfSample(Uint64 t_present) {
+        static const bool on = [] {
+            FILE *f = fopen("sdmc:/slaunch/config/profile", "r");
+            if (f) fclose(f);
+            return f != nullptr;
+        }();
+        if (!on) return;
+        const u64 now = armGetSystemTick();
+        Perf &p = m_perf;
+        const u64 draw = t_present - p.frame_start, present = now - t_present;
+        p.draw += draw; p.present += present; p.frames++;
+        if (draw + present > p.worst) p.worst = draw + present;
+        p.frame_start = now;
+        if (!p.window_start) { p = Perf{}; p.window_start = p.frame_start = now; return; }
+        const double freq = (double)armGetSystemTickFreq();
+        const double secs = (now - p.window_start) / freq;
+        if (secs < 2.0) return;
+        if (FILE *fp = fopen("sdmc:/slaunch/perf.log", p.opened ? "a" : "w")) {
+            p.opened = true;
+            fprintf(fp, "%s: %5.1f fps  draw %5.2f ms  present %5.2f ms  worst %5.1f ms\n",
+                    SDL_GetRendererName(m_renderer), p.frames / secs,
+                    p.draw * 1e3 / freq / p.frames, p.present * 1e3 / freq / p.frames,
+                    p.worst * 1e3 / freq);
+            fclose(fp);
+        }
+        const bool opened = p.opened;
+        p = Perf{};
+        p.opened = opened;
+        p.window_start = p.frame_start = now;
+    }
+
     void Gfx::ReapTextures() {
+        for (TTF_Text *t : m_textRetired) TTF_DestroyText(t);
+        m_textRetired.clear();
+        for (TTF_Font *f : m_fontRetired) TTF_CloseFont(f);
+        m_fontRetired.clear();
         for (SDL_Texture *t : m_textGraveyard)
             if (t) SDL_DestroyTexture(t);
         m_textGraveyard.clear();
@@ -324,20 +300,38 @@ namespace sl::menu::gfx {
     void Gfx::BeginScene() {
         if (!m_scene) {
             int ow = 0, oh = 0;
-            SDL_GetRendererOutputSize(m_renderer, &ow, &oh);
+            SDL_GetRenderOutputSize(m_renderer, &ow, &oh);
             if (ow <= 0 || oh <= 0) return;
             m_scene = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_RGBA8888,
                                         SDL_TEXTUREACCESS_TARGET, ow, oh);
             if (!m_scene) return;             // no RT support: draw straight out
             SDL_SetTextureBlendMode(m_scene, SDL_BLENDMODE_NONE);
+            // The frame is laid out in 1280x720 whatever the scene's size: the
+            // mapping belongs to the scene target now, and the window gets
+            // the finished scene 1:1.
+            SDL_SetRenderTarget(m_renderer, m_scene);
+            SetLogical();
+            SDL_SetRenderTarget(m_renderer, nullptr);
+            SDL_SetRenderLogicalPresentation(m_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
         }
         SDL_SetRenderTarget(m_renderer, m_scene);
+    }
+
+    // Everything the menu draws is in 1280x720 coordinates. At a supersample
+    // factor above 1 the output is larger, and this keeps every coordinate
+    // correct without touching a call site; the scale is an exact integer, so
+    // it lands on whole pixels. SDL3 keeps this per render target: set on the
+    // window, and on the scene texture once there is one.
+    void Gfx::SetLogical() {
+        if (m_aa_on || m_ss != 1)
+            SDL_SetRenderLogicalPresentation(m_renderer, Width, Height,
+                                             SDL_LOGICAL_PRESENTATION_STRETCH);
     }
 
     void Gfx::EndScene() {
         if (!m_scene) return;
         SDL_SetRenderTarget(m_renderer, nullptr);
-        SDL_RenderCopy(m_renderer, m_scene, nullptr, nullptr);
+        SDL_RenderTexture(m_renderer, m_scene, nullptr, nullptr);
     }
 
     void Gfx::DrawSceneBlurred(int x, int y, int w, int h, int downscale, Uint8 alpha) {
@@ -346,7 +340,7 @@ namespace sl::menu::gfx {
         if (downscale < 2) downscale = 2;
 
         int ow = 0, oh = 0;
-        SDL_GetRendererOutputSize(m_renderer, &ow, &oh);
+        SDL_GetRenderOutputSize(m_renderer, &ow, &oh);
         const int sw = ow / downscale, sh = oh / downscale;
         if (sw <= 0 || sh <= 0) return;
 
@@ -362,27 +356,20 @@ namespace sl::menu::gfx {
             m_small_div = downscale;
         }
 
-        // Logical size maps every draw from 1280x720 onto the window. It has to
-        // come off while we are drawing into a texture of a different size, or
-        // the scene lands in the top-left corner of it at 1:1.
-        int lw = 0, lh = 0;
-        SDL_RenderGetLogicalSize(m_renderer, &lw, &lh);
-        if (lw || lh) SDL_RenderSetLogicalSize(m_renderer, 0, 0);
-
+        // m_small has no logical size of its own (SDL3 keeps that per target),
+        // so the whole scene lands across all of it.
         SDL_SetRenderTarget(m_renderer, m_small);
-        SDL_RenderCopy(m_renderer, m_scene, nullptr, nullptr);   // bilinear downscale
+        SDL_RenderTexture(m_renderer, m_scene, nullptr, nullptr);   // bilinear downscale
         SDL_SetRenderTarget(m_renderer, m_scene);
-
-        if (lw || lh) SDL_RenderSetLogicalSize(m_renderer, lw, lh);
 
         // Sample back only the part of the scene this rect covers, so it reads
         // as the panel frosting what is behind it rather than as a shrunken
         // copy of the whole screen.
         const float s = (float)ow / (float)Width / (float)downscale;
-        SDL_Rect src { (int)(x * s), (int)(y * s), (int)(w * s), (int)(h * s) };
-        SDL_Rect dst { x, y, w, h };
+        const SDL_FRect src { x * s, y * s, w * s, h * s };
+        const SDL_FRect dst = F(x, y, w, h);
         SDL_SetTextureAlphaMod(m_small, alpha);
-        SDL_RenderCopy(m_renderer, m_small, &src, &dst);
+        SDL_RenderTexture(m_renderer, m_small, &src, &dst);
         SDL_SetTextureAlphaMod(m_small, 255);
     }
 
@@ -398,11 +385,11 @@ namespace sl::menu::gfx {
             const float f = (1.0f - k) * (1.0f - k);       // falls off fast
             SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b,
                                    (Uint8)((float)c.a * f * 0.45f));
-            const SDL_Rect ring[4] = {
-                { x - i,     y - i,     w + 2 * i, 1         },   // top
-                { x - i,     y + h + i, w + 2 * i, 1         },   // bottom
-                { x - i,     y - i,     1,         h + 2 * i },   // left
-                { x + w + i, y - i,     1,         h + 2 * i },   // right
+            const SDL_FRect ring[4] = {
+                F(x - i,     y - i,     w + 2 * i, 1        ),   // top
+                F(x - i,     y + h + i, w + 2 * i, 1        ),   // bottom
+                F(x - i,     y - i,     1,         h + 2 * i),   // left
+                F(x + w + i, y - i,     1,         h + 2 * i),   // right
             };
             SDL_RenderFillRects(m_renderer, ring, 4);
         }
@@ -421,7 +408,7 @@ namespace sl::menu::gfx {
     void Gfx::FillRect(int x, int y, int w, int h, SDL_Color c) {
         FxClose();   // an open GPU pass must end before SDL draws again
         SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a);
-        SDL_Rect r { x, y, w, h };
+        const SDL_FRect r = F(x, y, w, h);
         SDL_RenderFillRect(m_renderer, &r);
     }
 
@@ -436,7 +423,7 @@ namespace sl::menu::gfx {
                                               SDL_TEXTUREACCESS_STREAMING, 1, Height);
             if (m_gradTex) {
                 void *pixels; int pitch;
-                if (SDL_LockTexture(m_gradTex, nullptr, &pixels, &pitch) == 0) {
+                if (SDL_LockTexture(m_gradTex, nullptr, &pixels, &pitch)) {
                     for (int y = 0; y < Height; y++) {
                         float t = (float)y / (float)(Height - 1);
                         Uint8 r = (Uint8)(top.r + (bottom.r - top.r) * t);
@@ -451,67 +438,29 @@ namespace sl::menu::gfx {
             m_gradTop = top; m_gradBottom = bottom; m_gradValid = true;
         }
         if (m_gradTex) {
-            SDL_Rect dst { 0, 0, Width, Height };
-            SDL_RenderCopy(m_renderer, m_gradTex, nullptr, &dst);
+            const SDL_FRect dst = F(0, 0, Width, Height);
+            SDL_RenderTexture(m_renderer, m_gradTex, nullptr, &dst);
         }
     }
 
-    // Rasterise (font,size,string) once, in white, and cache the GPU texture;
-    // Color/alpha are applied per draw via modulation.
-    const Gfx::CachedText &Gfx::GetText(FontSize s, const char *text) {
-        static const CachedText empty = { nullptr, 0, 0 };
-        if (!text || !text[0]) return empty;
-
+    // Lay (font, size, string) out once and keep it; colour is set per draw.
+    TTF_Text *Gfx::GetText(FontSize s, const char *text) {
+        if (!text || !text[0]) return nullptr;
         TTF_Font *font = Font(s); // may be the system or the content font
-        char keybuf[24];
-        snprintf(keybuf, sizeof(keybuf), "%p", (void*)font);
-        std::string key(keybuf); key += '\x1f'; key += text;
+        std::string key((const char *)&font, sizeof(font));
+        key += text;
 
         auto it = m_textCache.find(key);
-        if (it != m_textCache.end()) { it->second.used = ++m_textClock; return it->second; }
+        if (it != m_textCache.end()) { it->second.used = ++m_textClock; return it->second.text; }
 
-        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, text, SDL_Color{255,255,255,255});
-        if (!surf) return empty;
-        CachedText ct;
-        ct.w = surf->w; ct.h = surf->h;
-
-        // Pool slot first: no allocation, nothing freed. This is the path every
-        // list label takes, and the one that used to churn.
-        {
-            const int idx = AcquireSlot(key, surf);
-            if (idx >= 0) {
-                ct.tex  = m_slots[idx].tex;
-                ct.used = ++m_textClock;
-                SDL_FreeSurface(surf);
-                // Deliberately not entered in m_textCache: the slot owns the
-                // texture, and a cache entry would free it out from under the
-                // pool on eviction. m_slotOf is the lookup for these.
-                m_pooledRet = ct;
-                return m_pooledRet;
-            }
-            // Pool full for this frame, or the text is outsized: fall through
-            // and make it an ordinary texture, exactly as before.
-        }
-
-        const size_t bytes = (size_t)surf->w * surf->h * 4;
-        ct.tex = SDL_CreateTextureFromSurface(m_renderer, surf);
+        TTF_Text *t = TTF_CreateText(m_textEngine, font, text, 0);
         m_texCreates++;
-        if (!ct.tex) m_texFailures++;
-        SDL_FreeSurface(surf);
-        if (ct.tex) SDL_SetTextureBlendMode(ct.tex, SDL_BLENDMODE_BLEND);
-
-        // Make room before adding, so the budget is a ceiling rather than
-        // something we notice having already passed.
-        // Free down to half the budget rather than to exactly the budget, so
-        // eviction happens in an occasional burst instead of on every single
-        // new label once the cache is full - which is what scrolling a long
-        // list does, and what turned a rare event into a per-frame one.
-        if (m_textBytes + bytes > kTextCacheBudget)
-            EvictText(m_textBytes + bytes - kTextCacheBudget / 2);
-
-        ct.used = ++m_textClock;
-        m_textBytes += bytes;
-        return m_textCache.emplace(std::move(key), ct).first->second;
+        if (!t) { m_texFailures++; return nullptr; }
+        // A quarter at a time, so eviction is an occasional burst rather than
+        // something every new label pays for once the cache is full.
+        if (m_textCache.size() >= kTextCacheMax) EvictText(kTextCacheMax / 4);
+        m_textCache.emplace(std::move(key), CachedText{ t, ++m_textClock });
+        return t;
     }
 
     // Text is rasterised at m_ss times the layout size (see SetSupersample), so
@@ -524,12 +473,12 @@ namespace sl::menu::gfx {
     // list of long names (a scanned ROM library) made every row take that path:
     // the cache hit its cap and flushed itself several times a second, churning
     // tens of MB of GPU textures until the driver fell over mid-frame.
-    // TTF_SizeUTF8 returns exactly the width TTF_RenderUTF8_Blended's surface
-    // would have, so nothing about layout changes.
+    // TTF_GetStringSize returns exactly the width the drawn text has, so
+    // nothing about layout changes.
     //
     // Memoised by font and string: every layout measures the same labels on
     // every frame (Ellipsize's binary search, word wrap, centred text, the
-    // hint bar), and TTF_SizeUTF8 walks the glyphs each time - a real cost
+    // hint bar), and TTF_GetStringSize walks the glyphs each time - a real cost
     // on the console's CPU, not on a PC. Capped, and emptied whenever the
     // fonts change (ClearTextCache).
     int Gfx::TextWidth(FontSize s, const char *text) {
@@ -541,30 +490,29 @@ namespace sl::menu::gfx {
         auto it = m_widthCache.find(key);
         if (it != m_widthCache.end()) return it->second;
         int w = 0, h = 0;
-        if (TTF_SizeUTF8(font, text, &w, &h) != 0) return 0;
+        if (!TTF_GetStringSize(font, text, 0, &w, &h)) return 0;
         if (m_widthCache.size() >= 4096) m_widthCache.clear();
         m_widthCache.emplace(std::move(key), w / m_ss);
         return w / m_ss;
     }
 
-    int Gfx::LineHeight(FontSize s) { return TTF_FontHeight(Font(s)) / m_ss; }
+    int Gfx::LineHeight(FontSize s) { return TTF_GetFontHeight(Font(s)) / m_ss; }
 
     void Gfx::Text(FontSize s, int x, int y, SDL_Color c, const char *text) {
         FxClose();   // an open GPU pass must end before SDL draws again
-        const CachedText &e = GetText(s, text);
-        if (!e.tex) return;
-        SDL_SetTextureColorMod(e.tex, c.r, c.g, c.b);
-        SDL_SetTextureAlphaMod(e.tex, c.a);   // see FillRect: 0 means invisible
-        // The glyph texture is m_ss times the layout size; the destination is in
-        // layout space, and the logical-size mapping scales it back up to land
-        // on the texture's own pixels one for one.
-        //
-        // Source rect rather than the whole texture: a pooled slot is bigger
-        // than the text in it. For an ordinary cached texture the rect is the
-        // whole thing, so this costs nothing there.
-        SDL_Rect src { 0, 0, e.w, e.h };
-        SDL_Rect dst { x, y, e.w / m_ss, e.h / m_ss };
-        SDL_RenderCopy(m_renderer, e.tex, &src, &dst);
+        if (c.a == 0) return;   // see FillRect: 0 means invisible
+        TTF_Text *t = GetText(s, text);
+        if (!t) return;
+        TTF_SetTextColor(t, c.r, c.g, c.b, c.a);
+        // The glyphs are m_ss times the layout size. Drawing at 1/m_ss scale
+        // from m_ss times the position puts them on the target's own pixels
+        // one for one - the logical-size mapping scales straight back up.
+        if (m_ss == 1) { TTF_DrawRendererText(t, (float)x, (float)y); return; }
+        float sx = 1.0f, sy = 1.0f;
+        SDL_GetRenderScale(m_renderer, &sx, &sy);
+        SDL_SetRenderScale(m_renderer, sx / m_ss, sy / m_ss);
+        TTF_DrawRendererText(t, (float)(x * m_ss), (float)(y * m_ss));
+        SDL_SetRenderScale(m_renderer, sx, sy);
     }
 
     void Gfx::TextCentered(FontSize s, int cx, int y, SDL_Color c, const char *text) {
@@ -676,7 +624,7 @@ namespace sl::menu::gfx {
         auto vert = [&](const float p[3], float u, float vtex, Uint8 a) {
             SDL_Vertex out;
             Project3D(p, out.position.x, out.position.y);
-            out.color = SDL_Color{ tint.r, tint.g, tint.b, a };
+            out.color = SDL_FColor{ tint.r / 255.0f, tint.g / 255.0f, tint.b / 255.0f, a / 255.0f };
             const float vv = flip_v ? 1.0f - vtex : vtex;
             out.tex_coord = SDL_FPoint{ u0 + (u1 - u0) * u, v0 + (v1 - v0) * vv };
             m_geom.push_back(out);
@@ -726,8 +674,8 @@ namespace sl::menu::gfx {
 
     // Decoded to RGBA8888 rather than left in the file's own format (RGB24
     // for a JPEG): SDL keeps a format the GPU lacks behind a hidden converted
-    // copy, and the GPU card/3D paths sample what SDL_GL_BindTexture hands
-    // them - which for those textures came out blank.
+    // copy, and the GPU card/3D paths sample the texture SDL reports - which
+    // for those textures came out blank.
     SDL_Texture *Gfx::LoadImage(const char *path) {
         SDL_Surface *raw = IMG_Load(path);
         return raw ? ScaleToTexture(raw, raw->w, raw->h) : nullptr;
@@ -739,7 +687,7 @@ namespace sl::menu::gfx {
 
     SDL_Texture *Gfx::LoadImageScaled(const void *data, size_t len, int w, int h) {
         if (!data || !len) return nullptr;
-        return ScaleToTexture(IMG_Load_RW(SDL_RWFromConstMem(data, (int)len), 1), w, h);
+        return ScaleToTexture(IMG_Load_IO(SDL_IOFromConstMem(data, len), true), w, h);
     }
 
     SDL_Surface *Gfx::LoadSurfaceScaled(const char *path, int w, int h) {
@@ -750,15 +698,15 @@ namespace sl::menu::gfx {
     // surface cannot be allocated - the full-size image still beats nothing.
     SDL_Surface *Gfx::ScaleSurface(SDL_Surface *raw, int w, int h) {
         if (!raw) return nullptr;
-        SDL_Surface *src = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGBA8888, 0);
-        SDL_FreeSurface(raw);
+        SDL_Surface *src = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA8888);
+        SDL_DestroySurface(raw);
         if (!src || (src->w == w && src->h == h)) return src;
 
-        SDL_Surface *dst = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
-                                                          SDL_PIXELFORMAT_RGBA8888);
+        SDL_Surface *dst = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGBA8888);
         if (!dst) return src;
-        SDL_BlitScaled(src, nullptr, dst, nullptr);
-        SDL_FreeSurface(src);
+        // Linear, where SDL2's BlitScaled could only point-sample.
+        SDL_BlitSurfaceScaled(src, nullptr, dst, nullptr, SDL_SCALEMODE_LINEAR);
+        SDL_DestroySurface(src);
         return dst;
     }
 
@@ -766,7 +714,7 @@ namespace sl::menu::gfx {
         SDL_Surface *surf = ScaleSurface(raw, w, h);
         if (!surf) return nullptr;
         SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, surf);
-        SDL_FreeSurface(surf);
+        SDL_DestroySurface(surf);
         return tex;
     }
 
@@ -774,8 +722,8 @@ namespace sl::menu::gfx {
         SDL_Surface *raw = IMG_Load(path);
         if (!raw) return nullptr;
 
-        SDL_Surface *src = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGBA8888, 0);
-        SDL_FreeSurface(raw);
+        SDL_Surface *src = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA8888);
+        SDL_DestroySurface(raw);
         if (!src) return nullptr;
 
         // Scale-to-cover: the bigger of the two ratios is what makes both axes
@@ -798,19 +746,18 @@ namespace sl::menu::gfx {
         const int cy = (int)((float)(src->h - ch) * biasY);
         SDL_Rect crop { cx, cy, cw, ch };
 
-        SDL_Surface *dst = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
-                                                          SDL_PIXELFORMAT_RGBA8888);
+        SDL_Surface *dst = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGBA8888);
         if (!dst) {   // out of memory: the uncropped source still beats nothing
             SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, src);
-            SDL_FreeSurface(src);
+            SDL_DestroySurface(src);
             return tex;
         }
 
-        SDL_BlitScaled(src, &crop, dst, nullptr);
-        SDL_FreeSurface(src);
+        SDL_BlitSurfaceScaled(src, &crop, dst, nullptr, SDL_SCALEMODE_LINEAR);
+        SDL_DestroySurface(src);
 
         SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, dst);
-        SDL_FreeSurface(dst);
+        SDL_DestroySurface(dst);
         return tex;
     }
 
@@ -818,10 +765,11 @@ namespace sl::menu::gfx {
     // SDL_RenderGeometry, so the span between the two active edges is drawn as
     // a 1px rect per row. Only used for small shapes (the XMB selection wedge),
     // where a few dozen rows costs nothing.
+#ifndef SL_VULKAN
     // =========================================================================
     // Raw GL, alongside SDL's renderer
     //
-    // SDL owns the GL context; SDL_RenderFlush is the documented way to hand it
+    // SDL owns the GL context; SDL_FlushRenderer is the documented way to hand it
     // over for a moment. Nothing here is linked against libGLESv2 - every entry
     // point comes from SDL_GL_GetProcAddress, so this builds and runs wherever
     // SDL itself does, and simply switches itself off where it cannot.
@@ -862,6 +810,7 @@ namespace sl::menu::gfx {
         constexpr GLenum_ GL_ACTIVE_TEXTURE_      = 0x84E0;
         constexpr GLenum_ GL_TEXTURE0_            = 0x84C0;
         constexpr GLenum_ GL_TEXTURE_BINDING_2D_  = 0x8069;
+        constexpr GLenum_ GL_TEXTURE_2D_          = 0x0DE1;
 
         struct GlFns {
             GLuint_ (*CreateShader)(GLenum_);
@@ -893,6 +842,7 @@ namespace sl::menu::gfx {
             void    (*BlendFuncSeparate)(GLenum_, GLenum_, GLenum_, GLenum_);
             unsigned char (*IsEnabled)(GLenum_);
             void    (*ActiveTexture)(GLenum_);
+            void    (*BindTexture)(GLenum_, GLuint_);
         };
 
         GlFns g_gl{};
@@ -936,6 +886,7 @@ namespace sl::menu::gfx {
             ok &= Load(g_gl.BlendFuncSeparate, "glBlendFuncSeparate");
             ok &= Load(g_gl.IsEnabled, "glIsEnabled");
             ok &= Load(g_gl.ActiveTexture, "glActiveTexture");
+            ok &= Load(g_gl.BindTexture, "glBindTexture");
             if (!ok) g_gl.CreateShader = nullptr;
             return ok;
         }
@@ -971,7 +922,15 @@ namespace sl::menu::gfx {
         std::vector<std::pair<const char *, int>> g_prog_of;    // vs literal -> index
         int g_cur = -1;
 
-        struct Saved { GLint_ prog, buf, attr0, bs, bd, bsa, bda, unit; bool blend; } g_saved;
+        struct Saved { GLint_ prog, buf, attr0, bs, bd, bsa, bda, unit, tex; bool blend; } g_saved;
+
+        // The GL name SDL gave a texture, from whichever GL renderer made it.
+        GLuint_ GlName(SDL_Texture *tex) {
+            const SDL_PropertiesID p = SDL_GetTextureProperties(tex);
+            Sint64 n = SDL_GetNumberProperty(p, SDL_PROP_TEXTURE_OPENGLES2_TEXTURE_NUMBER, 0);
+            if (!n) n = SDL_GetNumberProperty(p, SDL_PROP_TEXTURE_OPENGL_TEXTURE_NUMBER, 0);
+            return (GLuint_)n;
+        }
 
         GLuint_ Compile(GLenum_ type, const char *prelude, const char *src) {
             GLuint_ sh = g_gl.CreateShader(type);
@@ -1010,6 +969,12 @@ namespace sl::menu::gfx {
         // Escape hatch: if the GPU path ever misbehaves on some firmware, this
         // file puts every effect back on the rect-drawn fallback.
         if (FILE *f = fopen("sdmc:/slaunch/config/no_gpu_fx", "r")) { fclose(f); return false; }
+        // Only GL renderers have a context to share; anything else (SDL_GPU)
+        // keeps every effect on its SDL-drawn fallback.
+        const char *rname = SDL_GetRendererName(m_renderer);
+        if (!rname || (strcmp(rname, "opengl") != 0 && strcmp(rname, "opengles2") != 0))
+            return false;
+        m_gles = strcmp(rname, "opengles2") == 0;
         if (!LoadGl()) return false;
 
         std::vector<float> v((size_t)kFxVerts * 4);
@@ -1023,7 +988,7 @@ namespace sl::menu::gfx {
         GLuint_ vbo = 0;
         g_gl.GenBuffers(1, &vbo);
         if (!vbo) return false;
-        SDL_RenderFlush(m_renderer);
+        SDL_FlushRenderer(m_renderer);
         GLint_ prev_buf = 0;
         g_gl.GetIntegerv(GL_ARRAY_BUFFER_BINDING_, &prev_buf);
         g_gl.BindBuffer(GL_ARRAY_BUFFER_, vbo);
@@ -1032,11 +997,6 @@ namespace sl::menu::gfx {
 
         m_fx_vbo    = vbo;
         m_fx_tex_ok = FxTextureSelfTest();
-        {
-            SDL_RendererInfo info{};
-            m_gles = SDL_GetRendererInfo(m_renderer, &info) == 0 && info.name &&
-                     strcmp(info.name, "opengles2") == 0;
-        }
         m_fx_tried  = 1;
         return true;
     }
@@ -1081,7 +1041,7 @@ namespace sl::menu::gfx {
 
         // Hand the context over: everything the renderer has queued must be on
         // the GPU before we touch GL state it is not expecting to change.
-        SDL_RenderFlush(m_renderer);
+        SDL_FlushRenderer(m_renderer);
 
         Saved &s = g_saved;
         g_gl.GetIntegerv(GL_CURRENT_PROGRAM_, &s.prog);
@@ -1092,10 +1052,12 @@ namespace sl::menu::gfx {
         g_gl.GetIntegerv(GL_BLEND_SRC_ALPHA_, &s.bsa);
         g_gl.GetIntegerv(GL_BLEND_DST_ALPHA_, &s.bda);
         s.blend = g_gl.IsEnabled(GL_BLEND_) != 0;
-        // Samplers read unit 0, and SDL_GL_BindTexture binds to whichever unit
-        // is active - which SDL does not promise is 0.
+        // Samplers read unit 0, which SDL does not promise is the active one.
+        // What is bound there goes back on the way out: SDL skips rebinding a
+        // texture it believes is still bound.
         g_gl.GetIntegerv(GL_ACTIVE_TEXTURE_, &s.unit);
         g_gl.ActiveTexture(GL_TEXTURE0_);
+        g_gl.GetIntegerv(GL_TEXTURE_BINDING_2D_, &s.tex);
 
         g_cur = prog;
         g_gl.UseProgram(g_progs[prog].prog);
@@ -1134,12 +1096,8 @@ namespace sl::menu::gfx {
         g_gl.DrawArrays(GL_TRIANGLES_, 0, std::min(count, kFxVerts / 6) * 6);
     }
 
-    // Bound through SDL, which keeps its own "what is bound" cache right; the
-    // scale is non-1 only where SDL padded the texture to a power of two.
-    // Whether SDL_GL_BindTexture really binds. sdl2-compat (SDL2 on SDL3, what
-    // desktop Linux now ships as "SDL2") returns success and binds nothing,
-    // which would draw every textured GPU quad in one flat colour - so it is
-    // checked once, with two textures, and the textured paths stand down.
+    // Whether SDL hands out the GL names of its textures, checked once with
+    // two textures; without them the textured GPU paths stand down.
     bool Gfx::FxTexturesWork() { return m_fx_tex_ok; }
     // Run once from ShaderFxInit, which always happens before any pass opens.
     bool Gfx::FxTextureSelfTest() {
@@ -1147,13 +1105,7 @@ namespace sl::menu::gfx {
                                                SDL_TEXTUREACCESS_STATIC, 1, 1);
         SDL_Texture *white = WhiteTexture();
         if (!other || !white) { if (other) SDL_DestroyTexture(other); return false; }
-        GLint_ a = 0, b = 0;
-        SDL_GL_BindTexture(white, nullptr, nullptr);
-        g_gl.GetIntegerv(GL_TEXTURE_BINDING_2D_, &a);
-        SDL_GL_UnbindTexture(white);
-        SDL_GL_BindTexture(other, nullptr, nullptr);
-        g_gl.GetIntegerv(GL_TEXTURE_BINDING_2D_, &b);
-        SDL_GL_UnbindTexture(other);
+        const GLuint_ a = GlName(white), b = GlName(other);
         SDL_DestroyTexture(other);
         return a != 0 && b != 0 && a != b;
     }
@@ -1161,21 +1113,22 @@ namespace sl::menu::gfx {
     void Gfx::FxTexture(SDL_Texture *tex) {
         if (g_cur < 0) return;
         if (!tex) tex = WhiteTexture();
-        static float sw = 1.0f, sh = 1.0f;       // of whatever is bound now
         if (tex != m_fx_tex) {
-            if (SDL_GL_BindTexture(tex, &sw, &sh) != 0) return;
+            const GLuint_ name = GlName(tex);
+            if (!name) return;
+            g_gl.BindTexture(GL_TEXTURE_2D_, name);
             m_fx_tex = tex;
         }
-        FxSet("uTexScale", sw, sh, 0.0f, 0.0f);  // per program, so always
+        // SDL3's GL renderers size textures exactly (no power-of-two padding)
+        FxSet("uTexScale", 1.0f, 1.0f, 0.0f, 0.0f);  // per program, so always
         // How the texture's bytes sit in GL. SDL's GLES2 renderer stores every
         // format but ABGR8888/BGR888 with red and blue swapped (a format it
         // does not support becomes ARGB8888 or RGB888 behind the scenes) and
         // fixes that in its own shaders - which ours are not. Formats without
         // alpha leave junk in that channel on either renderer.
-        Uint32 fmt = 0;
-        SDL_QueryTexture(tex, &fmt, nullptr, nullptr, nullptr);
+        const SDL_PixelFormat fmt = tex->format;
         const bool swap = m_gles && fmt != SDL_PIXELFORMAT_ABGR8888 &&
-                          fmt != SDL_PIXELFORMAT_BGR888;
+                          fmt != SDL_PIXELFORMAT_XBGR8888;
         FxSet("uSwz", swap ? 1.0f : 0.0f, SDL_ISPIXELFORMAT_ALPHA(fmt) ? 0.0f : 1.0f, 0.0f, 0.0f);
     }
 
@@ -1183,8 +1136,8 @@ namespace sl::menu::gfx {
 
     void Gfx::FxEnd() {
         if (g_cur < 0) return;
-        if (m_fx_tex) { SDL_GL_UnbindTexture(m_fx_tex); m_fx_tex = nullptr; }
         const Saved &s = g_saved;
+        if (m_fx_tex) { g_gl.BindTexture(GL_TEXTURE_2D_, (GLuint_)s.tex); m_fx_tex = nullptr; }
         g_gl.ActiveTexture((GLenum_)s.unit);
         if (!s.attr0) g_gl.DisableVertexAttribArray(0);
         g_gl.BindBuffer(GL_ARRAY_BUFFER_, (GLuint_)s.buf);
@@ -1194,6 +1147,287 @@ namespace sl::menu::gfx {
         g_cur = -1;
     }
 
+#else   // SL_VULKAN
+    // =========================================================================
+    // The same effects on SDL_GPU
+    //
+    // SDL's GPU renderer takes a custom fragment shader but never a vertex
+    // shader, and these effects build their geometry in the vertex shader. So
+    // a pass draws with SDL_GPU directly - its own command buffer, its own
+    // pipelines, the SPIR-V scripts/fx-spirv.py made from the GLSL above -
+    // into a transparent layer the size of the output, which FxEnd hands to
+    // SDL to lay over the frame. The shaders write premultiplied colour, so
+    // compositing the layer premultiplied gives exactly what drawing them in
+    // place would have.
+    //
+    // A pass is submitted when it ends, ahead of the frame SDL is still
+    // building - the GPU runs it first, and SDL's draw of the layer after.
+    // That is why every pass in a frame gets a layer of its own: a second
+    // pass re-using the first's layer would overwrite it before SDL's frame
+    // got to draw it.
+    // =========================================================================
+    namespace {
+        constexpr int kFxVerts = 4096;   // as the GL path: vertex k = (k/2, k%2, k/6, corner)
+
+        struct VkProg {
+            const fxspv::Program *src = nullptr;
+            SDL_GPUShader *vs = nullptr, *fs = nullptr;
+            SDL_GPUGraphicsPipeline *pipe[2] = {};   // triangle list, strip
+            std::vector<float> u;                    // n_uniforms vec4s
+        };
+        SDL_GPUDevice *g_dev = nullptr;
+        SDL_GPUBuffer *g_vbuf = nullptr;
+        SDL_GPUSampler *g_sampler = nullptr;
+        std::vector<VkProg> g_progs;
+        std::vector<std::pair<const char *, int>> g_prog_of;   // vs literal -> index
+        int g_cur = -1;
+
+        SDL_GPUCommandBuffer *g_cmd = nullptr;
+        SDL_GPURenderPass *g_pass = nullptr;
+        SDL_Texture *g_bound = nullptr;              // FxTexture's, for the next draw
+        std::vector<SDL_Texture *> g_layers;
+        size_t g_layer_next = 0;                     // this frame's next free layer
+
+        const SDL_BlendMode kPremultiplied = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+
+        uint32_t Fnv(const char *s, uint32_t h = 0x811c9dc5u) {
+            for (; *s; s++) h = (h ^ (unsigned char)*s) * 0x01000193u;
+            return h;
+        }
+        const fxspv::Program *Find(const char *vs, const char *fs) {
+            const uint32_t h = Fnv(fs, Fnv(vs ? vs : ""));
+            for (const auto &p : fxspv::kPrograms) if (p.hash == h) return &p;
+            return nullptr;
+        }
+        SDL_GPUTexture *GpuTexture(SDL_Texture *tex) {
+            return (SDL_GPUTexture *)SDL_GetPointerProperty(
+                SDL_GetTextureProperties(tex), SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER, nullptr);
+        }
+        SDL_GPUShader *Shader(const uint32_t *code, size_t size, SDL_GPUShaderStage stage, int samplers) {
+            SDL_GPUShaderCreateInfo ci{};
+            ci.code_size = size;
+            ci.code = (const Uint8 *)code;
+            ci.entrypoint = "main";
+            ci.format = SDL_GPU_SHADERFORMAT_SPIRV;
+            ci.stage = stage;
+            ci.num_samplers = (Uint32)samplers;
+            ci.num_uniform_buffers = 1;
+            return SDL_CreateGPUShader(g_dev, &ci);
+        }
+        SDL_GPUGraphicsPipeline *Pipeline(VkProg &p, bool strip) {
+            SDL_GPUGraphicsPipeline *&pipe = p.pipe[strip];
+            if (pipe) return pipe;
+            SDL_GPUVertexBufferDescription vb{};
+            vb.slot = 0;
+            vb.pitch = 16;
+            vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+            SDL_GPUVertexAttribute va{};
+            va.location = 0;
+            va.buffer_slot = 0;
+            va.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+            SDL_GPUColorTargetDescription ct{};
+            ct.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;   // the layers (RGBA32)
+            ct.blend_state.enable_blend = true;
+            ct.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+            ct.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+            ct.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+            ct.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+            ct.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+            ct.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+            SDL_GPUGraphicsPipelineCreateInfo ci{};
+            ci.vertex_shader = p.vs;
+            ci.fragment_shader = p.fs;
+            ci.vertex_input_state.vertex_buffer_descriptions = &vb;
+            ci.vertex_input_state.num_vertex_buffers = 1;
+            ci.vertex_input_state.vertex_attributes = &va;
+            ci.vertex_input_state.num_vertex_attributes = 1;
+            ci.primitive_type = strip ? SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            ci.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+            ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+            ci.target_info.color_target_descriptions = &ct;
+            ci.target_info.num_color_targets = 1;
+            pipe = SDL_CreateGPUGraphicsPipeline(g_dev, &ci);
+            if (!pipe) GfxLog("fx pipeline");
+            return pipe;
+        }
+        void Draw(bool strip, Uint32 verts) {
+            if (g_cur < 0 || !g_pass) return;
+            VkProg &p = g_progs[g_cur];
+            SDL_GPUGraphicsPipeline *pipe = Pipeline(p, strip);
+            if (!pipe) return;
+            SDL_BindGPUGraphicsPipeline(g_pass, pipe);
+            const SDL_GPUBufferBinding vb{ g_vbuf, 0 };
+            SDL_BindGPUVertexBuffers(g_pass, 0, &vb, 1);
+            if (p.src->n_samplers) {
+                SDL_GPUTextureSamplerBinding tb{};
+                tb.texture = g_bound ? GpuTexture(g_bound) : nullptr;
+                tb.sampler = g_sampler;
+                if (!tb.texture) return;
+                SDL_BindGPUFragmentSamplers(g_pass, 0, &tb, 1);
+            }
+            const Uint32 bytes = (Uint32)(p.u.size() * sizeof(float));
+            SDL_PushGPUVertexUniformData(g_cmd, 0, p.u.data(), bytes);
+            SDL_PushGPUFragmentUniformData(g_cmd, 0, p.u.data(), bytes);
+            SDL_DrawGPUPrimitives(g_pass, verts, 1, 0, 0);
+        }
+    }
+
+    bool Gfx::ShaderFxInit() {
+        if (m_fx_tried) return m_fx_tried > 0;
+        m_fx_tried = -1;
+        if (FILE *f = fopen("sdmc:/slaunch/config/no_gpu_fx", "r")) { fclose(f); return false; }
+        g_dev = SDL_GetGPURendererDevice(m_renderer);
+        if (!g_dev) return false;
+
+        std::vector<float> v((size_t)kFxVerts * 4);
+        static const int kCorner[6] = { 0, 1, 2, 2, 1, 3 };   // two triangles
+        for (int k = 0; k < kFxVerts; k++) {
+            v[k * 4 + 0] = (float)(k >> 1);
+            v[k * 4 + 1] = (float)(k & 1);
+            v[k * 4 + 2] = (float)(k / 6);
+            v[k * 4 + 3] = (float)kCorner[k % 6];
+        }
+        const Uint32 size = (Uint32)(v.size() * sizeof(float));
+        SDL_GPUBufferCreateInfo bi{};
+        bi.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        bi.size = size;
+        g_vbuf = SDL_CreateGPUBuffer(g_dev, &bi);
+        SDL_GPUTransferBufferCreateInfo ti{};
+        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        ti.size = size;
+        SDL_GPUTransferBuffer *tb = g_vbuf ? SDL_CreateGPUTransferBuffer(g_dev, &ti) : nullptr;
+        if (!tb) { GfxLog("fx vertex buffer"); return false; }
+        memcpy(SDL_MapGPUTransferBuffer(g_dev, tb, false), v.data(), size);
+        SDL_UnmapGPUTransferBuffer(g_dev, tb);
+        SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(g_dev);
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+        const SDL_GPUTransferBufferLocation from{ tb, 0 };
+        const SDL_GPUBufferRegion to{ g_vbuf, 0, size };
+        SDL_UploadToGPUBuffer(copy, &from, &to, false);
+        SDL_EndGPUCopyPass(copy);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(g_dev, tb);
+
+        SDL_GPUSamplerCreateInfo si{};
+        si.min_filter = si.mag_filter = SDL_GPU_FILTER_LINEAR;
+        si.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        si.address_mode_u = si.address_mode_v = si.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        g_sampler = SDL_CreateGPUSampler(g_dev, &si);
+        if (!g_sampler) return false;
+
+        m_fx_tex_ok = true;
+        m_fx_tried = 1;
+        return true;
+    }
+
+    int Gfx::FxProgram(const char *vs, const char *fs) {
+        if (!ShaderFxInit()) return -1;
+        for (auto &kv : g_prog_of) if (kv.first == vs) return kv.second;
+        int id = -1;   // a failure is cached too, so it is not retried per frame
+        const fxspv::Program *src = Find(vs, fs);
+        if (src && src->vs) {
+            VkProg p;
+            p.src = src;
+            p.vs = Shader(src->vs, src->vs_size, SDL_GPU_SHADERSTAGE_VERTEX, 0);
+            p.fs = Shader(src->fs, src->fs_size, SDL_GPU_SHADERSTAGE_FRAGMENT, src->n_samplers);
+            p.u.assign((size_t)std::max(1, src->n_uniforms) * 4, 0.0f);
+            if (p.vs && p.fs) { g_progs.push_back(std::move(p)); id = (int)g_progs.size() - 1; }
+            else GfxLog("fx shader");
+        }
+        g_prog_of.push_back({ vs, id });
+        return id;
+    }
+
+    bool Gfx::FxBegin(int prog) {
+        if (prog < 0 || prog >= (int)g_progs.size()) return false;
+        if (g_cur < 0) {
+            int ow = 0, oh = 0;
+            SDL_GetRenderOutputSize(m_renderer, &ow, &oh);
+            if (g_layer_next == g_layers.size()) {
+                SDL_Texture *l = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_RGBA32,
+                                                   SDL_TEXTUREACCESS_TARGET, ow, oh);
+                if (!l) return false;
+                SDL_SetTextureBlendMode(l, kPremultiplied);
+                g_layers.push_back(l);
+            }
+            SDL_Texture *layer = g_layers[g_layer_next];
+            g_cmd = SDL_AcquireGPUCommandBuffer(g_dev);
+            if (!g_cmd) return false;
+            SDL_GPUColorTargetInfo ct{};
+            ct.texture = GpuTexture(layer);
+            ct.clear_color = { 0.0f, 0.0f, 0.0f, 0.0f };
+            ct.load_op = SDL_GPU_LOADOP_CLEAR;
+            ct.store_op = SDL_GPU_STOREOP_STORE;
+            g_pass = ct.texture ? SDL_BeginGPURenderPass(g_cmd, &ct, 1, nullptr) : nullptr;
+            if (!g_pass) { SDL_CancelGPUCommandBuffer(g_cmd); g_cmd = nullptr; return false; }
+            g_layer_next++;
+        }
+        g_cur = prog;
+        g_bound = nullptr;
+        // y up, as on GL's window: SDL_GPU flips Vulkan's viewport (a negative
+        // height) so every backend's clip space points the same way.
+        FxSet("uFlip", 1.0f);
+        FxSet("uTime", (float)armGetSystemTick() / (float)armGetSystemTickFreq());
+        return true;
+    }
+
+    static float *FxSlot(const char *name) {
+        if (g_cur < 0) return nullptr;
+        VkProg &p = g_progs[g_cur];
+        for (int i = 0; i < p.src->n_uniforms; i++)
+            if (!strcmp(p.src->uniforms[i], name)) return &p.u[(size_t)i * 4];
+        return nullptr;
+    }
+    void Gfx::FxSet(const char *name, float a) {
+        if (float *u = FxSlot(name)) u[0] = a;
+    }
+    void Gfx::FxSet(const char *name, float a, float b, float c, float d) {
+        if (float *u = FxSlot(name)) { u[0] = a; u[1] = b; u[2] = c; u[3] = d; }
+    }
+    void Gfx::FxSet(const char *name, SDL_Color c) {
+        FxSet(name, c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f);
+    }
+    void Gfx::FxStrip(int columns) {
+        if (columns >= 2) Draw(true, (Uint32)std::min(columns, kFxVerts / 2) * 2);
+    }
+    void Gfx::FxQuads(int count) {
+        if (count >= 1) Draw(false, (Uint32)std::min(count, kFxVerts / 6) * 6);
+    }
+
+    bool Gfx::FxTexturesWork() { return m_fx_tex_ok; }
+    bool Gfx::FxTextureSelfTest() { return true; }
+
+    // SDL_GPU's formats carry their own channel order, so no swizzle; the
+    // formats without alpha still leave junk there.
+    void Gfx::FxTexture(SDL_Texture *tex) {
+        if (g_cur < 0) return;
+        g_bound = tex ? tex : WhiteTexture();
+        m_fx_tex = g_bound;
+        FxSet("uTexScale", 1.0f, 1.0f, 0.0f, 0.0f);
+        FxSet("uSwz", 0.0f, SDL_ISPIXELFORMAT_ALPHA(g_bound->format) ? 0.0f : 1.0f, 0.0f, 0.0f);
+    }
+
+    void Gfx::FxClose() { FxEnd(); }
+
+    void Gfx::FxEnd() {
+        if (g_cur < 0) return;
+        g_cur = -1;
+        g_bound = nullptr;
+        m_fx_tex = nullptr;
+        SDL_EndGPURenderPass(g_pass);
+        SDL_SubmitGPUCommandBuffer(g_cmd);
+        g_pass = nullptr;
+        g_cmd = nullptr;
+        SDL_RenderTexture(m_renderer, g_layers[g_layer_next - 1], nullptr, nullptr);
+    }
+
+    // Called by Present: the frame that drew this frame's layers is submitted,
+    // so the next one can have them back.
+    static void FxFrameDone() { g_layer_next = 0; }
+#endif  // SL_VULKAN
+
     // ---- GPU wallpaper blur ---------------------------------------------------
     // Halve the image `levels` times, then double it back up again to half
     // size, every step a bilinear RenderCopy. Each halving is an exact 2x2 box
@@ -1201,15 +1435,14 @@ namespace sl::menu::gfx {
     // width doubles per level - and all of it is texture sampling on the GPU.
     SDL_Texture *Gfx::Blurred(SDL_Texture *src, int radius) {
         FxClose();   // an open GPU pass must end before SDL draws again
-        int w = 0, h = 0;
-        if (!src || SDL_QueryTexture(src, nullptr, nullptr, &w, &h) != 0) return nullptr;
+        if (!src) return nullptr;
+        const int w = src->w, h = src->h;
         int levels = 1;
         while ((2 << levels) <= radius && levels < 6) levels++;
 
+        // (the chain's targets have no logical size of their own: SDL3 keeps
+        // that per target, so nothing needs switching off around them)
         SDL_Texture *prev_target = SDL_GetRenderTarget(m_renderer);
-        int lw = 0, lh = 0;
-        SDL_RenderGetLogicalSize(m_renderer, &lw, &lh);
-        if (lw || lh) SDL_RenderSetLogicalSize(m_renderer, 0, 0);
         SDL_BlendMode src_mode = SDL_BLENDMODE_BLEND;
         SDL_GetTextureBlendMode(src, &src_mode);
         SDL_SetTextureBlendMode(src, SDL_BLENDMODE_NONE);
@@ -1222,16 +1455,15 @@ namespace sl::menu::gfx {
             if (!t) break;
             SDL_SetTextureBlendMode(t, SDL_BLENDMODE_NONE);
             SDL_SetRenderTarget(m_renderer, t);
-            SDL_RenderCopy(m_renderer, chain.back(), nullptr, nullptr);
+            SDL_RenderTexture(m_renderer, chain.back(), nullptr, nullptr);
             chain.push_back(t);
         }
         for (int i = (int)chain.size() - 2; i >= 1; i--) {
             SDL_SetRenderTarget(m_renderer, chain[i]);
-            SDL_RenderCopy(m_renderer, chain[i + 1], nullptr, nullptr);
+            SDL_RenderTexture(m_renderer, chain[i + 1], nullptr, nullptr);
         }
 
         SDL_SetRenderTarget(m_renderer, prev_target);
-        if (lw || lh) SDL_RenderSetLogicalSize(m_renderer, lw, lh);
         SDL_SetTextureBlendMode(src, src_mode);
 
         for (size_t i = 2; i < chain.size(); i++) SDL_DestroyTexture(chain[i]);
@@ -1315,6 +1547,7 @@ void main() {
 )";
     }
 
+#ifndef SL_VULKAN
     static int g_card_prog = -2;
     bool Gfx::CardsOk() {
         if (g_card_prog == -2) g_card_prog = FxProgram(kCardVs, kCardFs);
@@ -1344,6 +1577,85 @@ void main() {
         }
         return true;
     }
+
+#else   // SL_VULKAN
+    // The card is a custom fragment shader in SDL's own draw stream: SDL's
+    // vertex shader passes the texture coordinate through untouched, so the
+    // quad carries its pixel position there and the shader (kCardFs, made
+    // SPIR-V by scripts/fx-spirv.py) works from that exactly as the GL one
+    // works from its own. Changing the uniforms between cards makes SDL
+    // flush the cards before, so each keeps its own.
+    static SDL_GPURenderState *g_card_state = nullptr;
+    static const fxspv::Program *g_card_src = nullptr;
+    static int g_card_tried = 0;
+    bool Gfx::CardsOk() {
+        if (g_card_tried) return g_card_tried > 0;
+        g_card_tried = -1;
+        if (!ShaderFxInit()) return false;
+        g_card_src = Find(kCardVs, kCardFs);
+        if (!g_card_src) return false;
+        SDL_GPUShader *fs = Shader(g_card_src->fs, g_card_src->fs_size,
+                                   SDL_GPU_SHADERSTAGE_FRAGMENT, g_card_src->n_samplers);
+        if (!fs) return false;
+        SDL_GPURenderStateCreateInfo ci{};
+        ci.fragment_shader = fs;
+        g_card_state = SDL_CreateGPURenderState(m_renderer, &ci);
+        if (!g_card_state) { GfxLog("card render state"); return false; }
+        g_card_tried = 1;
+        return true;
+    }
+    bool Gfx::Card(SDL_Texture *tex, float x, float y, float w, float h,
+                   const CardStyle &st, Uint8 alpha) {
+        if (w <= 0.0f || h <= 0.0f || !CardsOk()) return false;
+        FxClose();
+        std::vector<float> u((size_t)g_card_src->n_uniforms * 4, 0.0f);
+        auto set = [&](const char *name, float a, float b, float c, float d) {
+            for (int i = 0; i < g_card_src->n_uniforms; i++)
+                if (!strcmp(g_card_src->uniforms[i], name)) {
+                    float *v = &u[(size_t)i * 4];
+                    v[0] = a; v[1] = b; v[2] = c; v[3] = d;
+                }
+        };
+        auto col = [&](const char *name, SDL_Color c) {
+            set(name, c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f);
+        };
+        SDL_Texture *t = tex ? tex : WhiteTexture();
+        set("uRect", x, y, w, h);
+        col("uFill", st.fill);
+        col("uGlowCol", st.glow_col);
+        col("uTint", st.tint);
+        set("uOpt", tex ? 1.0f : 0.0f, st.glyph ? 1.0f : 0.0f, alpha / 255.0f, st.band);
+        set("uTexScale", 1.0f, 1.0f, 0.0f, 0.0f);
+        set("uSwz", 0.0f, SDL_ISPIXELFORMAT_ALPHA(t->format) ? 0.0f : 1.0f, 0.0f, 0.0f);
+
+        SDL_BlendMode prev = SDL_BLENDMODE_BLEND;
+        SDL_GetTextureBlendMode(t, &prev);
+        SDL_SetTextureBlendMode(t, kPremultiplied);
+        SDL_SetGPURenderState(m_renderer, g_card_state);
+        auto quad = [&](float qx, float qy, float qw, float qh) {
+            SDL_Vertex v[4];
+            const float xs[4] = { qx, qx + qw, qx + qw, qx }, ys[4] = { qy, qy, qy + qh, qy + qh };
+            for (int i = 0; i < 4; i++) {
+                v[i].position = { xs[i], ys[i] };
+                v[i].tex_coord = { xs[i], ys[i] };   // the pixel position, for vP
+                v[i].color = { 1.0f, 1.0f, 1.0f, 1.0f };
+            }
+            static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+            SDL_SetGPURenderStateFragmentUniforms(g_card_state, 0, u.data(), (Uint32)(u.size() * sizeof(float)));
+            SDL_RenderGeometry(m_renderer, t, v, 4, idx, 6);
+        };
+        set("uStyle", st.radius, st.shadow, st.glow, 0.0f);
+        const float m = st.shadow + (st.glow > 0.0f ? 30.0f : 2.0f);
+        quad(x - m, y - m, w + 2 * m, h + 2 * m);
+        if (st.reflect) {
+            set("uStyle", st.radius, 0.0f, 0.0f, 1.0f);
+            quad(x, y + h + 4.0f, w, h * 0.45f);
+        }
+        SDL_SetGPURenderState(m_renderer, nullptr);
+        SDL_SetTextureBlendMode(t, prev);
+        return true;
+    }
+#endif  // SL_VULKAN
 
     // ---- GPU 3D quads -------------------------------------------------------------
     // The same quad DrawQuad3D describes, handed to the GPU as geometry with a
@@ -1428,31 +1740,9 @@ void main() {
         FxClose();   // an open GPU pass must end before SDL draws again
         if (!r || n <= 0) return;
         SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a);
-        // The Switch portlib's SDL_RenderFillRects uses a NEON fast path for
-        // n >= 8 that requires 16-byte aligned rects and a count multiple of 4.
-        // Ensure the call is safe by copying to an aligned buffer when needed.
-        const uintptr_t addr = reinterpret_cast<uintptr_t>(r);
-        const bool aligned = (addr % 16 == 0);
-        const bool mult4   = (n % 4 == 0);
-        if (n >= 8 && (!aligned || !mult4)) {
-            // Small static buffer for the common case. Max expected batch is
-            // <1024 rects (LineAA ~720, grid ~322), so stack is sufficient.
-            constexpr int kStackMax = 1024;
-            if (n <= kStackMax) {
-                alignas(16) SDL_Rect stackBuf[kStackMax];
-                SDL_Rect *tmp = stackBuf;
-                memcpy(tmp, r, n * sizeof(SDL_Rect));
-                if (!mult4) {
-                    const int pad = 4 - (n % 4);
-                    for (int i = 0; i < pad; ++i) tmp[n + i] = tmp[n - 1];
-                    n += pad;
-                }
-                SDL_RenderFillRects(m_renderer, tmp, n);
-                return;
-            }
-            // Fallback for very large batches: just call original.
-        }
-        SDL_RenderFillRects(m_renderer, r, n);
+        m_frects.resize((size_t)n);
+        for (int i = 0; i < n; i++) m_frects[i] = F(r[i]);
+        SDL_RenderFillRects(m_renderer, m_frects.data(), n);
     }
 
     void Gfx::FillRectAdd(int x, int y, int w, int h, SDL_Color c) {
@@ -1460,7 +1750,7 @@ void main() {
         if (w <= 0 || h <= 0) return;
         SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_ADD);
         SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a);
-        SDL_Rect r { x, y, w, h };
+        const SDL_FRect r = F(x, y, w, h);
         SDL_RenderFillRect(m_renderer, &r);
         SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
     }
@@ -1523,7 +1813,7 @@ void main() {
 
             const int left  = lx < sx ? lx : sx;
             const int right = lx < sx ? sx : lx;
-            SDL_Rect r { left, y, right - left + 1, 1 };
+            const SDL_FRect r = F(left, y, right - left + 1, 1);
             SDL_RenderFillRect(m_renderer, &r);
         }
     }
@@ -1532,8 +1822,8 @@ void main() {
         SDL_Surface *raw = IMG_Load(path);
         if (!raw) return nullptr;
 
-        SDL_Surface *s = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGBA32, 0);
-        SDL_FreeSurface(raw);
+        SDL_Surface *s = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
+        SDL_DestroySurface(raw);
         if (!s) return nullptr;
 
         // A file that already varies its alpha is a real cut-out; leave it be.
@@ -1543,23 +1833,24 @@ void main() {
         const int n = s->w * s->h;
         Uint32 *px = (Uint32 *)s->pixels;
         if (SDL_MUSTLOCK(s)) SDL_LockSurface(s);
+        const SDL_PixelFormatDetails *fd = SDL_GetPixelFormatDetails(s->format);
         for (int i = 0; i < n; i++) {
             Uint8 r, g, b, a;
-            SDL_GetRGBA(px[i], s->format, &r, &g, &b, &a);
+            SDL_GetRGBA(px[i], fd, nullptr, &r, &g, &b, &a);
             if (a != 255) { has_alpha = true; break; }
         }
         if (!has_alpha) {
             for (int i = 0; i < n; i++) {
                 Uint8 r, g, b, a;
-                SDL_GetRGBA(px[i], s->format, &r, &g, &b, &a);
+                SDL_GetRGBA(px[i], fd, nullptr, &r, &g, &b, &a);
                 const Uint8 lum = (Uint8)((r * 77 + g * 151 + b * 28) >> 8);
-                px[i] = SDL_MapRGBA(s->format, 255, 255, 255, lum);
+                px[i] = SDL_MapRGBA(fd, nullptr, 255, 255, 255, lum);
             }
         }
         if (SDL_MUSTLOCK(s)) SDL_UnlockSurface(s);
 
         SDL_Texture *full = SDL_CreateTextureFromSurface(m_renderer, s);
-        SDL_FreeSurface(s);
+        SDL_DestroySurface(s);
         if (!full) return nullptr;
         SDL_SetTextureBlendMode(full, SDL_BLENDMODE_BLEND);
         if (w <= 0 || h <= 0) return full;
@@ -1573,7 +1864,7 @@ void main() {
         SDL_SetRenderTarget(m_renderer, dst);
         SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 0);
         SDL_RenderClear(m_renderer);
-        SDL_RenderCopy(m_renderer, full, nullptr, nullptr);
+        SDL_RenderTexture(m_renderer, full, nullptr, nullptr);
         SDL_SetRenderTarget(m_renderer, prev);
         SDL_DestroyTexture(full);
         return dst;
@@ -1591,9 +1882,9 @@ void main() {
     void Gfx::DrawImage(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha) {
         FxClose();   // an open GPU pass must end before SDL draws again
         if (!tex || w <= 0 || h <= 0) return;
-        SDL_Rect dst { x, y, w, h };
+        const SDL_FRect dst = F(x, y, w, h);
         SDL_SetTextureAlphaMod(tex, alpha);
-        SDL_RenderCopy(m_renderer, tex, nullptr, &dst);
+        SDL_RenderTexture(m_renderer, tex, nullptr, &dst);
         SDL_SetTextureAlphaMod(tex, 255); // don't leak the mod to other blits
     }
 
@@ -1601,7 +1892,7 @@ void main() {
                               SDL_Color c, Uint8 alpha) {
         FxClose();
         if (!tex || w <= 0 || h <= 0) return;
-        SDL_Rect dst { x, y, w, h };
+        const SDL_FRect dst = F(x, y, w, h);
         SDL_SetTextureColorMod(tex, c.r, c.g, c.b);
         // c's own alpha (as Text() uses it) times the caller's fade multiplier,
         // the same combination IconPlate already does for a theme colour and a
@@ -1609,7 +1900,7 @@ void main() {
         // exactly like Text(..., t.dim, ...), and a caller fading a whole panel
         // down can still pass its own alpha on top without fighting t.dim's.
         SDL_SetTextureAlphaMod(tex, (Uint8)((int)c.a * alpha / 255));
-        SDL_RenderCopy(m_renderer, tex, nullptr, &dst);
+        SDL_RenderTexture(m_renderer, tex, nullptr, &dst);
         SDL_SetTextureColorMod(tex, 255, 255, 255);
         SDL_SetTextureAlphaMod(tex, 255); // don't leak either mod to other blits
     }
@@ -1617,19 +1908,18 @@ void main() {
     void Gfx::DrawCover(SDL_Texture *tex, Uint8 alpha) {
         FxClose();   // an open GPU pass must end before SDL draws again
         if (!tex) return;
-        int tw = 0, th = 0;
-        SDL_QueryTexture(tex, nullptr, nullptr, &tw, &th);
+        const int tw = tex->w, th = tex->h;
         if (tw <= 0 || th <= 0) return;
 
         // Cover-fit: scale so the image fills the screen, cropping the overflow.
         float scale = (float)Width / tw;
         if ((float)th * scale < Height)
             scale = (float)Height / th;
-        int dw = (int)(tw * scale), dh = (int)(th * scale);
-        SDL_Rect dst { (Width - dw) / 2, (Height - dh) / 2, dw, dh };
+        const float dw = tw * scale, dh = th * scale;
+        const SDL_FRect dst { (Width - dw) / 2, (Height - dh) / 2, dw, dh };
 
         SDL_SetTextureAlphaMod(tex, alpha);
-        SDL_RenderCopy(m_renderer, tex, nullptr, &dst);
+        SDL_RenderTexture(m_renderer, tex, nullptr, &dst);
     }
 
 } // namespace sl::menu::gfx

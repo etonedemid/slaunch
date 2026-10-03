@@ -102,9 +102,18 @@ ssystem:
 	@echo "--- Building sSystem ---"
 	@$(MAKE) -C projects/sSystem
 
+# The menu ships as the Vulkan (NVK) build; VULKAN=0 gives the OpenGL one.
+# sMenu's Makefile writes the Vulkan build beside the GL one (sMenu-vk), so
+# it is moved into the slot the daemon serves.
+VULKAN ?= 1
 smenu:
 	@echo "--- Building sMenu ---"
-	@$(MAKE) -C projects/sMenu
+	@$(MAKE) -C projects/sMenu VULKAN=$(VULKAN)
+ifeq ($(VULKAN),1)
+	@mkdir -p SdOut/slaunch/bin/sMenu
+	@cp -f SdOut/slaunch/bin/sMenu-vk/main SdOut/slaunch/bin/sMenu-vk/main.npdm SdOut/slaunch/bin/sMenu/
+	@rm -rf SdOut/slaunch/bin/sMenu-vk
+endif
 
 # Last, always: it copies the finished SdOut/ into its own romfs.
 sinstaller: ssystem smenu hbloader assets

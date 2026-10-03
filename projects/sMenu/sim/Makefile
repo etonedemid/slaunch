@@ -78,7 +78,7 @@ INCLUDES  := -I$(SIM_DIR)include \
 # decode - there is no Tegra/NVDEC on a desktop). Same VideoPlayer source as
 # the Switch build; only the hwaccel that comes back from avcodec_open2()
 # differs. See THIRDPARTY.md.
-PKGS      := sdl2 SDL2_image SDL2_ttf SDL2_mixer libcurl \
+PKGS      := sdl3 sdl3-image sdl3-ttf sdl3-mixer libcurl \
              libavformat libavcodec libavutil
 PKGCFLAGS := $(shell pkg-config --cflags $(PKGS))
 PKGLIBS   := $(shell pkg-config --libs $(PKGS))
@@ -105,20 +105,11 @@ CXXFLAGS  := -std=gnu++20 -O1 -g $(WARN) $(INCLUDES) $(PKGCFLAGS) $(DEFINES) \
              -DSL_HAS_VIDEO=1 -MMD -MP
 CFLAGS    := -std=gnu11 -O2 -g -w -I$(ROOT_DIR)/libs/Lua
 LDFLAGS   := $(PKGLIBS) -lpthread -lm
-# Real SDL 2.28, when built into this prefix (see README, "GPU effects"). Arch
-# ships sdl2-compat on SDL3, whose SDL_GL_BindTexture binds nothing, so the
-# GPU texture paths (Flow's 3D boxes, cards) would fall back to their CPU
-# versions. The console runs real SDL 2.28.5; a runpath to the same version
-# here makes the simulator draw what the console draws.
-SIM_SDL2  := $(HOME)/.local/share/slaunch-sim-sdl2/lib
-ifneq ($(wildcard $(SIM_SDL2)/libSDL2-2.0.so.0),)
-LDFLAGS   += -Wl,--enable-new-dtags,-rpath,$(SIM_SDL2)
-endif
 
 # ---------------------------------------------------------------------------
 # Windows cross-build.
 #
-# SDL2 for MinGW is not in the Arch repositories, so scripts/get-win-deps.sh
+# SDL3 for MinGW is not in the Arch repositories, so scripts/get-win-deps.sh
 # stages the official prebuilt development packages into $(WIN_DEPS). Those are
 # headers, import libraries and DLLs; nothing is compiled from them.
 WIN_DEPS   ?= $(HOME)/.slaunch-windeps/prefix
@@ -129,7 +120,7 @@ WIN_TARGET := slaunch-sim.exe
 WIN_DIST   := dist-win
 
 # The same source list as the Linux build, Http.cpp included: libcurl for MinGW
-# is staged alongside SDL2, so the Windows build compiles the shipping
+# is staged alongside SDL3, so the Windows build compiles the shipping
 # networking code rather than a substitute for it.
 WIN_SRCS := $(SRCS)
 WIN_OBJS := $(patsubst %,$(WIN_BUILD)/%.o,$(notdir $(WIN_SRCS))) \
@@ -161,8 +152,8 @@ WIN_CFLAGS   := -std=gnu11 -O2 -w -I$(ROOT_DIR)/libs/Lua
 # --wrap=remove redirects the C remove() to __wrap_remove in src/win_path.cpp.
 # It is done here rather than with a macro because the name is far too common to
 # wrap in the preprocessor - see the note in include/sim_win_compat.h.
-WIN_LDFLAGS  := -L$(WIN_DEPS)/lib -lmingw32 -lSDL2main -lSDL2 \
-                -lSDL2_image -lSDL2_ttf -lSDL2_mixer -lcurl -lws2_32 \
+WIN_LDFLAGS  := -L$(WIN_DEPS)/lib -lmingw32 -lSDL3 \
+                -lSDL3_image -lSDL3_ttf -lSDL3_mixer -lcurl -lws2_32 \
                 -Wl,--wrap=remove \
                 -static-libgcc -static-libstdc++ -mconsole
 
@@ -195,10 +186,10 @@ $(WIN_DIST)/$(WIN_TARGET): $(WIN_OBJS)
 
 # Staged on first use. An order-only prerequisite, so it is fetched before any
 # object is compiled but never triggers a rebuild afterwards.
-WIN_DEPS_STAMP := $(WIN_DEPS)/include/SDL2/SDL.h
+WIN_DEPS_STAMP := $(WIN_DEPS)/include/SDL3/SDL.h
 
 $(WIN_DEPS_STAMP):
-	@echo "  DEPS staging SDL2 for MinGW into $(WIN_DEPS)"
+	@echo "  DEPS staging SDL3 for MinGW into $(WIN_DEPS)"
 	@sh $(SIM_DIR)scripts/get-win-deps.sh $(abspath $(WIN_DEPS)/..)
 
 $(WIN_BUILD)/%.cpp.o: %.cpp | $(WIN_DEPS_STAMP)

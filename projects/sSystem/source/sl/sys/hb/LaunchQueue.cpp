@@ -7,23 +7,12 @@
 #include <cstdlib>
 #include <cctype>
 
+// main.cpp: daemon.log, with a raw-fs fallback when stdio writes fail.
+void DaemonLog(const char *fmt, ...);
+
 namespace sl::sys::hb {
 
     namespace {
-
-        // Same log the rest of the daemon writes to; DaemonLog itself is
-        // private to main.cpp, and a request that was refused is exactly the
-        // kind of thing you go looking for in daemon.log afterwards.
-        void Log(const char *fmt, ...) {
-            mkdir("sdmc:/slaunch", 0777);
-            FILE *fp = fopen("sdmc:/slaunch/daemon.log", "a");
-            if (!fp) return;
-            va_list ap; va_start(ap, fmt);
-            vfprintf(fp, fmt, ap);
-            va_end(ap);
-            fputc('\n', fp);
-            fclose(fp);
-        }
 
         bool EndsWithNro(const char *p) {
             const size_t n = strlen(p);
@@ -96,7 +85,7 @@ namespace sl::sys::hb {
             if (remove(path) == 0) dropped++;
         }
         closedir(d);
-        if (dropped) Log("hb_queue: dropped %d stale request(s) from a previous boot", dropped);
+        if (dropped) DaemonLog("hb_queue: dropped %d stale request(s) from a previous boot", dropped);
     }
 
     bool LaunchQueue::Take(Request &out) {
@@ -131,17 +120,17 @@ namespace sl::sys::hb {
         remove(path);
 
         if (!parsed) {
-            Log("hb_queue: %s is not a request the daemon understands - dropped", pick);
+            DaemonLog("hb_queue: %s is not a request the daemon understands - dropped", pick);
             return false;
         }
         if (!PathLooksSane(req.nro)) {
-            Log("hb_queue: refused nro=%s (must be an existing sdmc:/...nro) - dropped",
+            DaemonLog("hb_queue: refused nro=%s (must be an existing sdmc:/...nro) - dropped",
                 req.nro);
             return false;
         }
 
         out = req;
-        Log("hb_queue: took %s mode=%s donor=0x%016llx nro=%s", pick,
+        DaemonLog("hb_queue: took %s mode=%s donor=0x%016llx nro=%s", pick,
             out.mode == LaunchMode::App ? "app" : "applet",
             (unsigned long long)out.donor, out.nro);
         return true;

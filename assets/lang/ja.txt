@@ -78,6 +78,11 @@ Update available=更新があります
 
 # --- theming + appearance ---
 Menu entries=メニュー項目
+Screen timeout=画面オフまでの時間
+Screen timeout (TV)=画面オフまでの時間（TV）
+Never=しない
+min=分
+h=時間
 found=件
 Back=戻る
 About=このソフトについて

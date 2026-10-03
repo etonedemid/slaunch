@@ -16,18 +16,10 @@ namespace sl::sys::la {
     // Stop sMenu (graceful exit with 15s timeout, then force)
     void   StopMenu();
 
-    // Is sMenu's holder state still alive?
     bool   IsMenuAlive();
 
-    // Push data into sMenu's input storage
-    Result PushToMenu(const void *data, size_t size);
-
-    // Pop data from sMenu's output storage
-    Result PopFromMenu(void *out, size_t size);
-
-    // Raw storage push/pop for the SMI protocol
+    // Push an SMI event storage into sMenu's input queue
     Result PushStorage(AppletStorage &st);
-    Result PopStorage(AppletStorage &st);
 
     // Open a system library applet (album, web, mii editor, ...) and block
     // until it closes. Each applet needs a specific common-args `la_version`

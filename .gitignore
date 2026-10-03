@@ -2,6 +2,8 @@ SdOut/
 build/
 projects/sSystem/build/
 projects/sMenu/build/
+projects/sMenu/build-vk/
+switch-hbas-repo/
 projects/sInstaller/build/
 *.map
 *.lst

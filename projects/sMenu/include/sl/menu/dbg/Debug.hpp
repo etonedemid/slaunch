@@ -16,6 +16,11 @@
 
 namespace sl::menu::dbg {
 
+    // Sampling profiler for the main thread (Profile.cpp): call from the main
+    // thread; does nothing unless sdmc:/slaunch/config/profile exists.
+    void StartProfiler();
+
+
     // Counts the menu keeps that the kernel cannot report.
     struct Counters {
         int app_icons  = 0;   // cached game icon textures

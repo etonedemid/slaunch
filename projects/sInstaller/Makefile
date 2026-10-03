@@ -18,12 +18,17 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sLaunch Installer
 APP_AUTHOR  := sLaunch
-APP_VERSION := 1.4.1
+APP_VERSION := 1.5.0
 APP_ICON    := ../../assets/icon.jpg
 
 PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
-SDL_CFLAGS := $(shell $(PKGCONF) --cflags sdl2 SDL2_ttf SDL2_image)
-SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image)
+# SDL3: the same prefix sMenu builds against (see its Makefile).
+SDL3_PREFIX ?= $(HOME)/sdl3-switch/stage
+SDL3_PKGCONF := PKG_CONFIG_PATH= PKG_CONFIG_SYSROOT_DIR= \
+    PKG_CONFIG_LIBDIR=$(SDL3_PREFIX)/lib/pkgconfig:$(DEVKITPRO)/portlibs/switch/lib/pkgconfig \
+    pkg-config --static
+SDL_CFLAGS := $(shell $(SDL3_PKGCONF) --cflags sdl3 sdl3-ttf sdl3-image)
+SDL_LIBS   := $(shell $(SDL3_PKGCONF) --libs sdl3-ttf sdl3-image sdl3) -lnx
 # libcurl (+ mbedtls/zlib) for the online update check/download.
 CURL_CFLAGS := $(shell $(PKGCONF) --cflags libcurl)
 CURL_LIBS   := $(shell $(PKGCONF) --libs libcurl)

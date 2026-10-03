@@ -3,7 +3,7 @@
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -165,7 +165,7 @@ namespace sl::menu::ui {
         // off top and bottom. Only the right edge needs holding back.
         const SDL_Rect deckRowClip{0, 0, gfx::Gfx::Width - kDeckRowRight, gfx::Gfx::Height};
         m_gfx->FxClose();   // SDL is used directly below
-        SDL_RenderSetClipRect(m_gfx->Renderer(), &deckRowClip);
+        SDL_SetRenderClipRect(m_gfx->Renderer(), &deckRowClip);
         for (int i = 0; i < rn; i++) {
             const int w = (i == 0) ? kDeckHeroW : kDeckTileW;
             const int x = DeckSlotX(i) - (int)m_deck_scroll;
@@ -242,7 +242,7 @@ namespace sl::menu::ui {
             }
         }
         m_gfx->FxClose();   // SDL is used directly below
-        SDL_RenderSetClipRect(m_gfx->Renderer(), nullptr);
+        SDL_SetRenderClipRect(m_gfx->Renderer(), nullptr);
 
         // ---- name and play line, for whatever is selected --------------------
         if (rn > 0 && m_cursor < (int)m_items.size()) {
@@ -320,11 +320,11 @@ namespace sl::menu::ui {
                 }
                 SDL_Rect clip { x + 10, kDeckCardY + 8, kDeckCardW - 20, kDeckCardH - 16 };
                 m_gfx->FxClose();   // SDL is used directly below
-                if (ren) SDL_RenderSetClipRect(ren, &clip);
+                if (ren) SDL_SetRenderClipRect(ren, &clip);
                 wd->Render(m_gfx, t, x + 12, kDeckCardY + 10, kDeckCardW - 24,
                            kDeckCardH - 20);
                 m_gfx->FxClose();   // SDL is used directly below
-                if (ren) SDL_RenderSetClipRect(ren, nullptr);
+                if (ren) SDL_SetRenderClipRect(ren, nullptr);
                 slot++;
             }
             if (slot == 0)
@@ -624,7 +624,7 @@ namespace sl::menu::ui {
         SDL_Rect clip { 0, kDeckLibTop - 6, gfx::Gfx::Width,
                         kDeckLibBot - kDeckLibTop + 12 };
         m_gfx->FxClose();   // SDL is used directly below
-        if (ren) SDL_RenderSetClipRect(ren, &clip);
+        if (ren) SDL_SetRenderClipRect(ren, &clip);
 
         for (int i = 0; i < n; i++) {
             const int r = i / kDeckLibCols, c = i % kDeckLibCols;
@@ -653,7 +653,7 @@ namespace sl::menu::ui {
                 m_gfx->Text(FontSize::Small, x + 8, y + 6, t.accent, "*");
         }
         m_gfx->FxClose();   // SDL is used directly below
-        if (ren) SDL_RenderSetClipRect(ren, nullptr);
+        if (ren) SDL_SetRenderClipRect(ren, nullptr);
 
         DrawHint({ {{"dpad"}, "Move"}, {{"a"}, "Launch"}, {{"l","r"}, "Tab"}, {{"b"}, "Back"} });
     }

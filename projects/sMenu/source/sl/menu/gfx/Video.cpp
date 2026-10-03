@@ -7,7 +7,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 }
-#include <SDL2/SDL_mixer.h>
+#include <SDL3_mixer/SDL_mixer.h>
+#include <sl/menu/audio/Music.hpp>
 #include <cstring>
 #include <cmath>
 #include <deque>
@@ -105,12 +106,13 @@ namespace sl::menu::gfx {
 
         m_duration = (m_fmt->duration > 0) ? (double)m_fmt->duration / AV_TIME_BASE : 0.0;
 
-        // Sound, when asked for: only if the mixer is open as stereo s16 (what
-        // Music::Init opens) and the file has a stream FFmpeg can decode. A
-        // build without the AAC decoder just plays the picture.
-        int mix_rate = 0, mix_ch = 0; Uint16 mix_fmt = 0;
-        if (audio && Mix_QuerySpec(&mix_rate, &mix_fmt, &mix_ch) && mix_ch == 2 &&
-            mix_fmt == AUDIO_S16SYS) {
+        // Sound, when asked for: only if the mixer is open in stereo and the
+        // file has a stream FFmpeg can decode. A build without the AAC
+        // decoder just plays the picture.
+        MIX_Mixer *mixer = audio::Mixer();
+        SDL_AudioSpec mix{};
+        if (audio && mixer && MIX_GetMixerFormat(mixer, &mix) && mix.channels == 2) {
+            const int mix_rate = mix.freq;
             m_astream_idx = av_find_best_stream(m_fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
             const AVCodec *ac = (m_astream_idx >= 0)
                 ? avcodec_find_decoder(m_fmt->streams[m_astream_idx]->codecpar->codec_id) : nullptr;
@@ -120,7 +122,7 @@ namespace sl::menu::gfx {
                 m_mix_rate = mix_rate;
                 m_ring.assign((size_t)mix_rate * 2 * 2, 0);   // two seconds, stereo
                 m_ring_r = m_ring_n = 0;
-                Mix_SetPostMix(&VideoPlayer::MixTrampoline, this);
+                MIX_SetPostMixCallback(mixer, &VideoPlayer::MixTrampoline, this);
                 m_mix_hooked = true;
             } else {
                 if (m_adec) avcodec_free_context(&m_adec);
@@ -171,9 +173,9 @@ namespace sl::menu::gfx {
             m_thread_running = false;
         }
         if (m_mix_hooked) {
-            // Mix_SetPostMix takes the audio lock, so once it returns the
-            // callback is not running and will not run again.
-            Mix_SetPostMix(nullptr, nullptr);
+            // Setting the callback takes the mixer's lock, so once it returns
+            // the callback is not running and will not run again.
+            if (MIX_Mixer *mixer = audio::Mixer()) MIX_SetPostMixCallback(mixer, nullptr, nullptr);
             m_mix_hooked = false;
         }
         if (m_adec) { avcodec_free_context(&m_adec); m_adec = nullptr; }
@@ -320,22 +322,21 @@ namespace sl::menu::gfx {
         }
     }
 
-    void VideoPlayer::MixTrampoline(void *self, Uint8 *stream, int len) {
-        static_cast<VideoPlayer *>(self)->Mix(stream, len);
+    void SDLCALL VideoPlayer::MixTrampoline(void *self, MIX_Mixer *, const SDL_AudioSpec *,
+                                            float *pcm, int samples) {
+        static_cast<VideoPlayer *>(self)->Mix(pcm, samples);
     }
-    // Mixer thread: add the clip's sound on top of whatever else is playing.
-    void VideoPlayer::Mix(Uint8 *stream, int len) {
+    // Mixer thread: add the clip's sound on top of whatever else is playing
+    // (stereo float; the mixer clamps the sum on its way out).
+    void VideoPlayer::Mix(float *dst, int samples) {
         if (m_paused.load() || m_ring.empty()) return;
-        int16_t *dst = (int16_t *)stream;
-        const size_t want = (size_t)len / 4, cap = m_ring.size() / 2;
+        const size_t want = (size_t)samples / 2, cap = m_ring.size() / 2;
         std::lock_guard<std::mutex> lk(m_ring_mx);
         const size_t got = std::min(want, m_ring_n);
         for (size_t k = 0; k < got; k++) {
             const size_t r = ((m_ring_r + k) % cap) * 2;
-            for (int c = 0; c < 2; c++) {
-                const int v = dst[k * 2 + c] + m_ring[r + c];
-                dst[k * 2 + c] = (int16_t)std::min(32767, std::max(-32768, v));
-            }
+            for (int c = 0; c < 2; c++)
+                dst[k * 2 + c] += m_ring[r + c] * (1.0f / 32768.0f);
         }
         m_ring_r = (m_ring_r + got) % cap;
         m_ring_n -= got;

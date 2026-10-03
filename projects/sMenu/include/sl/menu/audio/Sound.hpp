@@ -1,15 +1,17 @@
 #pragma once
 #include <switch.h>
 
-// Short UI sound effects (nav clicks, welcome chime). Played on SDL_mixer's
-// channel mixer, which is separate from Mix_Music - so SFX layer over the
-// background music. Requires the mixer to already be open (Music::Init does
-// Mix_OpenAudio); Init is a no-op if audio never came up.
+// Short UI sound effects (nav clicks, welcome chime), on tracks of their own
+// on the mixer Music::Init opens - so SFX layer over the background music.
+// Init is a no-op if audio never came up.
 //
 // Assets live under sdmc:/slaunch/sounds. Each effect is looked up under a few
 // candidate names in turn, so either an .mp3 or a .wav works and you can drop in
 // whichever you have. A missing file is not an error: that effect simply stays
 // silent, which is how a build ships before its audio does.
+
+struct MIX_Audio;
+struct MIX_Track;
 
 namespace sl::menu::audio {
 
@@ -26,15 +28,20 @@ namespace sl::menu::audio {
 
     class Sound {
     public:
-        void Init(bool audio_ok);   // load chunks; pass Music::Init()'s result
-        void Exit();                // free chunks (before the mixer is closed)
+        void Init(bool audio_ok);   // load effects; pass Music::Init()'s result
+        void Exit();                // free them (before the mixer is closed)
         void Play(Sfx s);
         void SetVolume(int vol);    // 0..100
 
     private:
         bool  m_ok = false;
         int   m_volume = 70;
-        void *m_chunks[(int)Sfx::Count] = {};  // Mix_Chunk*
+        MIX_Audio *m_sfx[(int)Sfx::Count] = {};
+        // A few voices so nav clicks can overlap; the oldest is cut short
+        // when all are busy.
+        static constexpr int kVoices = 6;
+        MIX_Track *m_voice[kVoices] = {};
+        int        m_next = 0;
     };
 
 } // namespace sl::menu::audio

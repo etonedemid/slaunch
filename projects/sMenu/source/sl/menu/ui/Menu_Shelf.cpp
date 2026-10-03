@@ -3,7 +3,7 @@
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -175,6 +175,101 @@ namespace sl::menu::ui {
         m_gfx->Text(FontSize::Normal, 44, 82, t.fg,  SortLabel());
 
         if (tall && m_scroll_pos == (float)m_cursor) FetchArtFor(m_items[m_cursor]);
+        DrawFetchStatus();
+        DrawStatusHint({ {{"a"}, "Launch"}, {{"x"}, "Options"} });
+    }
+
+    // Shelf, PS4 style (the default): the PS4 home screen's content row. The
+    // selected tile stands big at the left with a "Start" band under it and
+    // its name beside it; everything after it runs to the right as small
+    // square tiles, and what was passed slides out to the left.
+    void Menu::DrawMainShelfPs() {
+        const Theme &t = m_theme.Current();
+        m_icons.SetScale(0);
+        DrawSelectionBackdrop();
+        DrawTopBar(nullptr);
+
+        if (m_items.empty()) { DrawMainEmpty(); return; }
+
+        if (!ScrollBusy())   // a finger or a throw owns the scroll instead
+            m_scroll_pos += (m_cursor - m_scroll_pos) * 0.25f;
+        if (std::abs(m_cursor - m_scroll_pos) < 0.005f) m_scroll_pos = (float)m_cursor;
+
+        const int total = (int)m_items.size();
+        const int W = gfx::Gfx::Width;
+        const int first = std::max(0, (int)std::floor(m_scroll_pos) - 1);
+
+        for (int idx = first; idx < total; idx++) {
+            float fx, fs;
+            PsPlace((float)idx - m_scroll_pos, fx, fs);
+            const int x = (int)lroundf(fx), sz = (int)lroundf(fs), y = kPsTop;
+            if (x > W) break;
+            const float d = (float)idx - m_scroll_pos;
+            const Uint8 A = (Uint8)(255 * std::clamp(1.0f + d, 0.0f, 1.0f));   // passed ones fade out
+            if (A == 0 || x + sz < 0) continue;
+            const MenuItem &it = m_items[idx];
+
+            const bool game = it.kind == ItemKind::Game, hb = it.kind == ItemKind::Homebrew;
+            SDL_Texture *art = game ? m_icons.Get(it.app_id) : hb ? m_hb_icons.Get(it.hb_icon) : nullptr;
+            if (art) {
+                m_gfx->DrawImage(art, x, y, sz, sz, A);
+            } else {
+                m_gfx->FillRect(x, y, sz, sz, IconPlate(t, A));
+                if (SDL_Texture *g = SystemIcon(it.kind)) {
+                    const int gs = sz / 2;
+                    m_gfx->DrawImageTinted(g, x + (sz - gs) / 2, y + (sz - gs) / 2, gs, gs, IconTint(t, A));
+                } else {
+                    char initial[2] = { it.name.empty() ? '?' : (char)toupper((unsigned char)it.name[0]), 0 };
+                    m_gfx->TextCentered(FontSize::Title, x + sz / 2, y + sz / 2 - 26, WithAlpha(t.dim, A), initial);
+                }
+            }
+
+            // The selected tile's "Start" band and white frame grow in as it
+            // becomes the big one.
+            const float big = std::clamp(1.0f - std::abs(d), 0.0f, 1.0f);
+            if (big > 0.01f) {
+                const Uint8 bA = (Uint8)(A * big);
+                const int band = (int)(kPsBand * big);
+                m_gfx->FillRect(x, y + sz, sz, band, WithAlpha(t.bg_bottom, (Uint8)(bA * 0.85f)));
+                if (big > 0.6f) {
+                    const char *start = (it.app_id && it.app_id == m_suspended) ? T("Resume") : T("Start");
+                    m_gfx->TextCentered(FontSize::Normal, x + sz / 2,
+                                        y + sz + (band - m_gfx->LineHeight(FontSize::Normal)) / 2,
+                                        WithAlpha(t.fg, bA), start);
+                }
+                const SDL_Color f = WithAlpha(t.title, (Uint8)(bA * SelectionGlow()));
+                const int fx0 = x - 4, fy0 = y - 4, fw = sz + 8, fh = sz + band + 8;
+                m_gfx->FillRect(fx0, fy0, fw, 3, f);
+                m_gfx->FillRect(fx0, fy0 + fh - 3, fw, 3, f);
+                m_gfx->FillRect(fx0, fy0, 3, fh, f);
+                m_gfx->FillRect(fx0 + fw - 3, fy0, 3, fh, f);
+            }
+        }
+
+        // The name beside the selected tile, level with its lower half.
+        const MenuItem &sel = m_items[m_cursor];
+        const int tx = kPsAnchorX + kPsBig + 24;
+        const int ty = kPsTop + kPsSmall + 70;
+        m_gfx->Text(FontSize::Large, tx, ty, t.title,
+                    Ellipsize(sel.name, W - tx - 60, FontSize::Large).c_str());
+        std::string sub = sel.is_gamecard ? T("Game card") : "";
+        if (sel.app_id == m_suspended && m_suspended != 0) {
+            sub = T("Running");
+        } else if (const play::PlayInfo *pi = Play(sel.app_id)) {
+            if (pi->seconds > 0)
+                sub += (sub.empty() ? "" : "   ") + play::FormatPlaytime(pi->seconds) + "   " +
+                       play::FormatLastPlayed(pi->last_played);
+        }
+        if (!sub.empty())
+            m_gfx->Text(FontSize::Small, tx, ty + m_gfx->LineHeight(FontSize::Large) + 2, t.dim, sub.c_str());
+
+        if (m_show_counter) {
+            char cnt[32];
+            snprintf(cnt, sizeof(cnt), "%d / %d", m_cursor + 1, total);
+            const int cw = m_gfx->TextWidth(FontSize::Small, cnt);
+            m_gfx->Text(FontSize::Small, W - 44 - cw, kPsTop + kPsBig + kPsBand + 20, t.dim, cnt);
+        }
+
         DrawFetchStatus();
         DrawStatusHint({ {{"a"}, "Launch"}, {{"x"}, "Options"} });
     }

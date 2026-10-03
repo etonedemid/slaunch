@@ -4,7 +4,7 @@
 // qlaunch) to do so over the SMI protocol.
 
 #include <switch.h>
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
@@ -18,6 +18,7 @@
 
 #include <sl/smi/Protocol.hpp>
 #include <sl/os/Applications.hpp>
+#include <sl/menu/dbg/Debug.hpp>
 #include <sl/menu/smi/Commands.hpp>
 #include <sl/menu/smi/MessageHandler.hpp>
 #include <sl/menu/gfx/Gfx.hpp>
@@ -521,6 +522,11 @@ int main() {
         }
         status.selected_user = uid;
         menu::cfg::SetUser(uid);
+        // Games are launched as whoever the daemon believes is selected. It
+        // only ever learned that at boot, so a console whose boot-time pick
+        // came back empty launched every game with no user - the game then
+        // cannot mount its save and aborts (2002-1002, issue #6).
+        if (accountUidIsValid(&uid)) menu::smi::SetUser(uid);
         // One-shot: an install from before per-account settings hands its
         // config to whoever boots the menu first. No-op afterwards.
         menu::cfg::MigrateLegacy();
@@ -569,8 +575,14 @@ int main() {
         return 0; // sSystem will relaunch us
     }
     BootLog("applet: gfx.Init OK, entering loop");
+    menu::dbg::StartProfiler();
 
-    SDL_Joystick *joy = SDL_JoystickOpen(0);
+    // SDL3 opens by instance ID, not by index: the first pad SDL knows of.
+    SDL_Joystick *joy = nullptr;
+    if (SDL_JoystickID *ids = SDL_GetJoysticks(nullptr)) {
+        if (ids[0]) joy = SDL_OpenJoystick(ids[0]);
+        SDL_free(ids);
+    }
 
     // Re-arm the touchscreen after SDL_Init (which reconfigures HID for its own
     // pad handling and can leave the touch screen unconfigured for our reads).
@@ -676,15 +688,15 @@ int main() {
         static bool mouse_down = false; static int mouse_x = 0, mouse_y = 0;
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) { g_Running = false; continue; }
-            if (ev.type == SDL_JOYBUTTONDOWN) {
+            if (ev.type == SDL_EVENT_QUIT) { g_Running = false; continue; }
+            if (ev.type == SDL_EVENT_JOYSTICK_BUTTON_DOWN) {
                 Btn b = TranslateButton(ev.jbutton.button);
                 // L + R + Minus toggles the developer overlay. Checked on the
                 // Minus press with L and R polled as held state, so the combo
                 // cannot be hit by mashing and Minus keeps its normal meaning
                 // on its own.
                 if (b == Btn::Minus && joy &&
-                    SDL_JoystickGetButton(joy, JOY_L) && SDL_JoystickGetButton(joy, JOY_R)) {
+                    SDL_GetJoystickButton(joy, JOY_L) && SDL_GetJoystickButton(joy, JOY_R)) {
                     ui.ToggleDebugOverlay();
                     continue;
                 }
@@ -693,11 +705,11 @@ int main() {
                     continue;
                 u64 launch_id = 0;
                 run(ui.OnButton(b, launch_id), launch_id);
-            } else if (ev.type == SDL_MOUSEBUTTONDOWN) {
+            } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                 mouse_down = true;  mouse_x = ev.button.x; mouse_y = ev.button.y;
-            } else if (ev.type == SDL_MOUSEBUTTONUP) {
+            } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 mouse_down = false;
-            } else if (ev.type == SDL_MOUSEMOTION) {
+            } else if (ev.type == SDL_EVENT_MOUSE_MOTION) {
                 mouse_x = ev.motion.x; mouse_y = ev.motion.y;
             }
         }
@@ -745,21 +757,21 @@ int main() {
         // Poll the current directional state from dpad + hat + left stick.
         int dir_v = 0, dir_h = 0;
         if (joy) {
-            Uint8  hat = SDL_JoystickGetHat(joy, 0);
-            Sint16 ay  = SDL_JoystickGetAxis(joy, 1);
-            Sint16 ax  = SDL_JoystickGetAxis(joy, 0);
-            bool up    = (hat & SDL_HAT_UP)    || ay < -Deadzone || SDL_JoystickGetButton(joy, JOY_DUP);
-            bool down  = (hat & SDL_HAT_DOWN)  || ay >  Deadzone || SDL_JoystickGetButton(joy, JOY_DDOWN);
-            bool left  = (hat & SDL_HAT_LEFT)  || ax < -Deadzone || SDL_JoystickGetButton(joy, JOY_DLEFT);
-            bool right = (hat & SDL_HAT_RIGHT) || ax >  Deadzone || SDL_JoystickGetButton(joy, JOY_DRIGHT);
+            Uint8  hat = SDL_GetJoystickHat(joy, 0);
+            Sint16 ay  = SDL_GetJoystickAxis(joy, 1);
+            Sint16 ax  = SDL_GetJoystickAxis(joy, 0);
+            bool up    = (hat & SDL_HAT_UP)    || ay < -Deadzone || SDL_GetJoystickButton(joy, JOY_DUP);
+            bool down  = (hat & SDL_HAT_DOWN)  || ay >  Deadzone || SDL_GetJoystickButton(joy, JOY_DDOWN);
+            bool left  = (hat & SDL_HAT_LEFT)  || ax < -Deadzone || SDL_GetJoystickButton(joy, JOY_DLEFT);
+            bool right = (hat & SDL_HAT_RIGHT) || ax >  Deadzone || SDL_GetJoystickButton(joy, JOY_DRIGHT);
             dir_v = up ? -1 : down ? 1 : 0;
             dir_h = left ? -1 : right ? 1 : 0;
 
             // Right stick, passed through as a continuous value rather than as
             // button events: coverflow uses it to look around and to spin the
             // selected box, both of which want to be analogue.
-            const Sint16 rx = SDL_JoystickGetAxis(joy, 2);
-            const Sint16 ry = SDL_JoystickGetAxis(joy, 3);
+            const Sint16 rx = SDL_GetJoystickAxis(joy, 2);
+            const Sint16 ry = SDL_GetJoystickAxis(joy, 3);
             auto norm = [](Sint16 v) {
                 if (v > -Deadzone && v < Deadzone) return 0.0f;
                 const float f = (float)v / 32767.0f;
@@ -826,7 +838,7 @@ int main() {
     if (usb_connected) appletSetAutoSleepDisabled(false);
     } // ui destroyed here, before gfx.Exit(), so its textures free cleanly
 
-    if (joy) SDL_JoystickClose(joy);
+    if (joy) SDL_CloseJoystick(joy);
     gfx.Exit();
     return 0;
 }

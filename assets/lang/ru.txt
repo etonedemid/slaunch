@@ -76,6 +76,11 @@ Update available=Есть обновление
 
 # --- theming + appearance ---
 Menu entries=Пункты меню
+Screen timeout=Отключение экрана
+Screen timeout (TV)=Отключение экрана (ТВ)
+Never=Никогда
+min=мин
+h=ч
 found=найдено
 Back=Назад
 About=О программе
@@ -465,3 +470,5 @@ App crash detected! :(=Обнаружен сбой приложения! :(
 (%d crashes since you last saw this menu)=(сбоев с последнего открытия меню: %d)
 Program=Программа
 OK=ОК
+Could not do that=Не удалось
+Not enough space in system memory to create this game's save data. Free some up (delete unused data or move games to the SD card) and try again.=Недостаточно места в системной памяти, чтобы создать сохранение этой игры. Освободите место (удалите ненужные данные или перенесите игры на SD-карту) и попробуйте снова.

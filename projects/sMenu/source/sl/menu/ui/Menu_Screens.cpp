@@ -4,7 +4,7 @@
 #include <sl/menu/net/Http.hpp>
 #include <sl/menu/net/ContentFilter.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -16,6 +16,8 @@
 #include "Menu_Internal.hpp"
 
 namespace sl::menu::ui {
+
+    static void StepSleepPlan(bool tv, int dir);   // below, with the Theming rows
 
     Menu::Action Menu::OnButtonKeyboard(Btn b) {
         auto commit = [&]() {
@@ -233,9 +235,8 @@ namespace sl::menu::ui {
             }
             if (q.empty()) break;
 
-            // Check if this game should be filtered due to adult content
             if (net::ContentFilter::ShouldFilterGameByName(m->m_pick_name)) {
-                end = PickState::Failed;  // Treat filtered as failed lookup
+                end = PickState::Failed;
                 break;
             }
 
@@ -987,6 +988,10 @@ namespace sl::menu::ui {
             m_shelf_vertical = !m_shelf_vertical;
             SaveSettings();
         };
+        auto toggleShelfStyle = [&]() { m_shelf_ps = !m_shelf_ps; SaveSettings(); };
+        if (m_theming_cursor == TH_ShelfStyle &&
+            (b == Btn::Left || b == Btn::Right || b == Btn::A))
+            toggleShelfStyle();
         auto toggleWrap    = [&]() { m_wrap_nav     = !m_wrap_nav;     SaveSettings(); };
         auto toggleHints   = [&]() { m_show_hints   = !m_show_hints;   SaveSettings(); };
         auto toggleCounter = [&]() { m_show_counter = !m_show_counter; SaveSettings(); };
@@ -1081,6 +1086,9 @@ namespace sl::menu::ui {
             toggleHints();
         if (m_theming_cursor == TH_Counter && (b == Btn::Left || b == Btn::Right))
             toggleCounter();
+        if ((m_theming_cursor == TH_Sleep || m_theming_cursor == TH_SleepTv) &&
+            (b == Btn::Left || b == Btn::Right || b == Btn::A))
+            StepSleepPlan(m_theming_cursor == TH_SleepTv, b == Btn::Left ? -1 : +1);
         if (m_theming_cursor == TH_Language && (b == Btn::Left || b == Btn::Right))
             cycleLanguage(b == Btn::Right ? +1 : -1);
         if (b == Btn::A) {
@@ -1854,6 +1862,31 @@ namespace sl::menu::ui {
     // to the coverflow, so in every other layout it is absent rather than
     // sitting there inert - which means the cursor moves over a filtered list,
     // the same way the theme editor handles its ribbon rows.
+    // Auto-sleep is the console's own setting, normally changed in stock
+    // qlaunch's settings - which sLaunch replaces, so this is the only place
+    // left to change it. The plan index runs 0..5 with 5 = never, the same
+    // for both. am only reads it at boot unless told to reapply (15.0.0+).
+    static void StepSleepPlan(bool tv, int dir) {
+        SetSysSleepSettings s = {};
+        if (R_FAILED(setsysGetSleepSettings(&s))) return;
+        s32 &plan = tv ? s.console_sleep_plan : s.handheld_sleep_plan;
+        plan = (plan + dir + 6) % 6;
+        if (R_SUCCEEDED(setsysSetSleepSettings(&s)) && hosversionAtLeast(15, 0, 0))
+            appletLoadAndApplyIdlePolicySettings();
+    }
+    static std::string SleepPlanText(bool tv) {
+        SetSysSleepSettings s = {};
+        if (R_FAILED(setsysGetSleepSettings(&s))) return "?";
+        static const int handheld_min[] = { 1, 3, 5, 10, 30 };
+        static const int tv_hours[]     = { 1, 2, 3, 6, 12 };
+        const int plan = tv ? s.console_sleep_plan : s.handheld_sleep_plan;
+        if (plan < 0 || plan > 4) return T("Never");
+        char c[32];
+        snprintf(c, sizeof(c), "%d %s", tv ? tv_hours[plan] : handheld_min[plan],
+                 tv ? T("h") : T("min"));
+        return c;
+    }
+
     std::vector<int> Menu::ThemingRows() const {
         std::vector<int> v;
         v.reserve(TH_Count);
@@ -1872,7 +1905,8 @@ namespace sl::menu::ui {
             // XMB gives the shortcuts a column each whatever this says, so
             // there the row would be a switch wired to nothing.
             if (i == TH_Shortcuts && (m_ui_mode == UiMode::XMB || !m_retroarch)) continue;
-            if (i == TH_ShelfVert && m_ui_mode != UiMode::Shelf) continue;
+            if (i == TH_ShelfVert && (m_ui_mode != UiMode::Shelf || m_shelf_ps)) continue;
+            if (i == TH_ShelfStyle && m_ui_mode != UiMode::Shelf) continue;
             // The wall shape is only meaningful where there is a wall.
             if ((i == TH_TileCols || i == TH_TileRows) && m_ui_mode != UiMode::Grid) continue;
             v.push_back(i);
@@ -1904,7 +1938,7 @@ namespace sl::menu::ui {
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("Anti-aliasing"), T("Vertical covers"),
+            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Vertical covers"),
             T("Columns"), T("Rows"),
             T("Box art region"), T("SteamGridDB"), T("SteamGridDB key"), T("Flow layout"),
             T("Wrap around"), T("Button hints"), T("Position counter"),
@@ -1912,12 +1946,13 @@ namespace sl::menu::ui {
             T("Fonts"), T("Language"),
             T("Music"), T("Widgets"),
             T("Menu entries"),
+            T("Screen timeout"), T("Screen timeout (TV)"),
             T("Welcome screen"), T("Check for updates"),
             T("About"), T("Back")
         };
         std::vector<std::string> values(labels.size());
         values[TH_UiMode]      = modes[(int)m_ui_mode];
-        if (m_ui_mode == UiMode::XMB) values[TH_UiMode] += std::string("  (") + T("recommended") + ")";
+        if (m_ui_mode == UiMode::Shelf) values[TH_UiMode] += std::string("  (") + T("recommended") + ")";
         values[TH_TextPos]     = aligns[(int)m_align];
         values[TH_ListIcons]   = m_list_icons ? T("On") : T("Off");
         values[TH_IconPack]    = (m_icon_pack_idx > 0 &&
@@ -1925,6 +1960,7 @@ namespace sl::menu::ui {
                                ? m_icon_packs[m_icon_pack_idx - 1] : T("Built-in");
         values[TH_Antialias]   = m_antialias ? T("On") : T("Off");
         values[TH_ShelfVert]   = m_shelf_vertical ? T("On") : T("Off");
+        values[TH_ShelfStyle]  = m_shelf_ps ? "PS4" : "Xbox 360";
         {
             char c[16];
             snprintf(c, sizeof(c), "%d", TileCols());
@@ -1943,6 +1979,8 @@ namespace sl::menu::ui {
         values[TH_Language]    = kLangs[m_lang_idx].name
                                ? kLangs[m_lang_idx].name : T("Automatic");
         values[TH_Music]       = m_music.Enabled() ? T("On") : T("Off");
+        values[TH_Sleep]       = SleepPlanText(false);
+        values[TH_SleepTv]     = SleepPlanText(true);
         values[TH_Welcome]     = m_welcome_enabled ? T("On") : T("Off");
         values[TH_Updates]     = m_check_updates ? T("On") : T("Off");
         values[TH_About]       = m_upd_available ? T("Update available") : std::string("v") + SL_VERSION;
@@ -2672,11 +2710,10 @@ namespace sl::menu::ui {
             if (y < 60 || y > H - 60) continue;
             const Uint8 a   = (Uint8)std::max(60.0f, 255.0f - std::abs(d) * 42.0f);
 
-            // Show the capture's own file name, which is its timestamp.
+            // The file name is the capture's timestamp; shown as a date, as
+            // the viewer does, not as the raw 16 digits and encrypted id.
             const std::string &p = m_album[i];
-            const size_t slash   = p.find_last_of('/');
-            std::string  name    = (slash == std::string::npos) ? p : p.substr(slash + 1);
-            if (name.size() > 4) name.resize(name.size() - 4);   // drop ".jpg"/".mp4"
+            const std::string name = CaptureDate(p);
 
             const FontSize fs = sel ? FontSize::Normal : FontSize::Small;
             const int      lh = m_gfx->LineHeight(fs);

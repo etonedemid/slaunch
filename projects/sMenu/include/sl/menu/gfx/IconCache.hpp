@@ -1,6 +1,6 @@
 #pragma once
 #include <switch.h>
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include <sl/menu/gfx/Gfx.hpp>
 #include <unordered_map>
 #include <vector>

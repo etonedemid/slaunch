@@ -9,10 +9,17 @@
 // playback resumes where it left off after launching a game and returning - the
 // menu applet is torn down on launch, so we save on Exit and restore on Init.
 //
-// SDL_mixer 2.0.4 has Mix_SetMusicPosition (seek) but no Mix_GetMusicPosition, so
-// the elapsed position is tracked here by accumulating frame time while playing.
+// Played through SDL3_mixer, which reports the real playback position.
+
+struct MIX_Mixer;
+struct MIX_Track;
+struct MIX_Audio;
 
 namespace sl::menu::audio {
+
+    // The one mixer (made by Music::Init); null when audio never came up.
+    // Sound effects and video sound play on it too.
+    MIX_Mixer *Mixer();
 
     class Music {
     public:
@@ -33,8 +40,8 @@ namespace sl::menu::audio {
         Repeat RepeatMode() const { return m_repeat; }
 
         double Position() const { return m_pos; }   // seconds into the current track
-        // Length of track i in seconds, read from the file's own headers
-        // (SDL_mixer 2.0.4 cannot tell us) and cached. 0 when unknown.
+        // Length of track i in seconds, read from the file's own headers (so
+        // the playlist needs no decoder per track) and cached. 0 when unknown.
         double Duration(int i);
         void   Seek(double seconds);                // within the current track
 
@@ -73,7 +80,7 @@ namespace sl::menu::audio {
         std::atomic<bool> m_loading{false};
         double m_load_pos = 0.0;
 
-        bool   m_ok       = false;   // Mix_OpenAudio succeeded
+        bool   m_ok       = false;   // the mixer is open
         bool   m_enabled  = true;
         int    m_volume   = 55;      // 0..100
         bool   m_shuffle  = false;
@@ -82,8 +89,8 @@ namespace sl::menu::audio {
         std::vector<double>      m_dur;      // Duration cache, -1 = not read yet
         int    m_index    = 0;
         double m_pos      = 0.0;     // seconds into the current track
-        u64    m_last_tick = 0;      // for the Update() dt
-        void  *m_music    = nullptr; // Mix_Music*
+        MIX_Track *m_track = nullptr;
+        MIX_Audio *m_music = nullptr; // the current track, decoded as it plays
     };
 
 } // namespace sl::menu::audio

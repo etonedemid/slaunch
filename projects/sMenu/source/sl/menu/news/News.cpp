@@ -411,7 +411,6 @@ namespace sl::menu::news {
                              (unsigned)out.size());
                     if (net::Download(url.c_str(), dst, 20)) it.img = dst;
                 }
-                // Filter adult content before adding to output
                 if (!net::ContentFilter::ShouldFilterNewsArticle(it.title, it.summary, it.kind)) {
                     out.push_back(std::move(it));
                 }
@@ -522,7 +521,6 @@ namespace sl::menu::news {
                 if (d != std::string::npos && d < lim)
                     it.date = DateUnix(body.substr(d + 7, 20));
             }
-            // Filter adult content before adding to output
             if (!it.title.empty() && !net::ContentFilter::ShouldFilterSteamNews(it.title, it.summary)) {
                 out.push_back(std::move(it));
             }

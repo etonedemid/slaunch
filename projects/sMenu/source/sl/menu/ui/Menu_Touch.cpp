@@ -3,7 +3,7 @@
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -290,7 +290,7 @@ namespace sl::menu::ui {
                         m_cursor = (int)lroundf(m_scroll_pos);
                         break;
                     case UiMode::Shelf:     // horizontal cover row
-                        m_scroll_pos = clamped(dragged(dx, ShelfPitch()), last);
+                        m_scroll_pos = clamped(dragged(dx, m_shelf_ps ? kPsSmall + kPsGap : ShelfPitch()), last);
                         m_cursor = (int)lroundf(m_scroll_pos);
                         break;
                     case UiMode::Flow: {    // 3D coverflow
@@ -515,6 +515,17 @@ namespace sl::menu::ui {
             const int idx = (int)lroundf(m_scroll_pos +
                                          (float)(x - gfx::Gfx::Width / 2) / (float)kLinePitch);
             return (idx >= 0 && idx <= last) ? idx : -1;
+        }
+        if (m_ui_mode == UiMode::Shelf && m_shelf_ps) {   // PS4 row (see DrawMainShelfPs)
+            const int total = last + 1;
+            for (int i = std::max(0, (int)m_scroll_pos - 1); i < total; i++) {
+                float px, sz;
+                PsPlace((float)i - m_scroll_pos, px, sz);
+                if (px > gfx::Gfx::Width) break;
+                if (x >= px && x < px + sz && y >= kPsTop && y < kPsTop + sz + (i == m_cursor ? kPsBand : 0))
+                    return i;
+            }
+            return -1;
         }
         if (m_ui_mode == UiMode::Shelf) {   // left-anchored uniform row (see DrawMainShelf)
             const int idx = (int)lroundf(m_scroll_pos + (float)(x - kShelfAnchorX) / ShelfPitch());

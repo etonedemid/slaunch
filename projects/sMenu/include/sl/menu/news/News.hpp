@@ -71,7 +71,7 @@ namespace sl::menu::news {
 
         private:
             static void Trampoline(void *self);
-            void Work();                       // worker body
+            void Work();
             void FetchNintendo();
             void FetchSteam();
 

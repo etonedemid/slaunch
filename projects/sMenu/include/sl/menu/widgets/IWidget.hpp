@@ -21,7 +21,6 @@
 #include <sl/menu/ui/Theme.hpp>
 #include <sl/menu/net/Http.hpp>
 
-// Include sol2 for Lua bindings
 #include <sol/sol.hpp>
 
 namespace sl::menu::widgets {
@@ -445,9 +444,9 @@ namespace sl::menu::widgets {
             std::unique_lock<std::mutex> lock(m_luaLock, std::try_to_lock);
             if (!lock.owns_lock()) {
                 if (m_cacheTex && m_lastH > 0) {
-                    SDL_Rect src{ 0, 0, m_cacheW, m_lastH };
-                    SDL_Rect dst{ x, y, m_cacheW, m_lastH };
-                    SDL_RenderCopy(ren, m_cacheTex, &src, &dst);
+                    const SDL_FRect src{ 0, 0, (float)m_cacheW, (float)m_lastH };
+                    const SDL_FRect dst{ (float)x, (float)y, (float)m_cacheW, (float)m_lastH };
+                    SDL_RenderTexture(ren, m_cacheTex, &src, &dst);
                     return y + m_lastH;
                 }
                 return y;   // nothing cached yet (first frames)
@@ -487,9 +486,9 @@ namespace sl::menu::widgets {
                 m_lastH = h;
 
                 if (h > 0) {
-                    SDL_Rect src{ 0, 0, w, h };
-                    SDL_Rect dst{ x, y, w, h };
-                    SDL_RenderCopy(ren, m_cacheTex, &src, &dst);
+                    const SDL_FRect src{ 0, 0, (float)w, (float)h };
+                    const SDL_FRect dst{ (float)x, (float)y, (float)w, (float)h };
+                    SDL_RenderTexture(ren, m_cacheTex, &src, &dst);
                 }
                 newY = y + h;
             } else if (m_luaRender.valid()) {

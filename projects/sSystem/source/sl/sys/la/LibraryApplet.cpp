@@ -1,4 +1,5 @@
 #include <sl/sys/la/LibraryApplet.hpp>
+#include <sl/sys/pwr/Power.hpp>
 #include <cstring>
 
 namespace sl::sys::la {
@@ -17,16 +18,20 @@ namespace sl::sys::la {
         libappletArgsCreate(&la_args, 0);
         libappletArgsSetPlayStartupSound(&la_args, false);
         rc = libappletArgsPush(&la_args, &g_MenuHolder);
-        if (rc != 0) return rc;
 
         // Status must be pushed as input data before the applet starts.
-        if (status && status_size > 0) {
+        if (rc == 0 && status && status_size > 0)
             rc = libappletPushInData(&g_MenuHolder, status, status_size);
-            if (rc != 0) return rc;
-        }
+        if (rc == 0)
+            rc = appletHolderStart(&g_MenuHolder);
 
-        rc = appletHolderStart(&g_MenuHolder);
-        if (rc != 0) return rc;
+        // A holder left open here would leak on every retry of the caller and
+        // keep am's applet slot occupied.
+        if (rc != 0) {
+            appletHolderClose(&g_MenuHolder);
+            memset(&g_MenuHolder, 0, sizeof(g_MenuHolder));
+            return rc;
+        }
 
         g_MenuRunning = true;
         return 0;
@@ -45,20 +50,8 @@ namespace sl::sys::la {
         return !appletHolderCheckFinished(&g_MenuHolder);
     }
 
-    Result PushToMenu(const void *data, size_t size) {
-        return libappletPushInData(&g_MenuHolder, data, size);
-    }
-
-    Result PopFromMenu(void *out, size_t size) {
-        return libappletPopOutData(&g_MenuHolder, out, size, nullptr);
-    }
-
     Result PushStorage(AppletStorage &st) {
         return appletHolderPushInData(&g_MenuHolder, &st);
-    }
-
-    Result PopStorage(AppletStorage &st) {
-        return appletHolderPopOutData(&g_MenuHolder, &st);
     }
 
     Result OpenSystemApplet(AppletId id, s32 la_version,
@@ -100,6 +93,11 @@ namespace sl::sys::la {
                     appletHolderRequestExitOrTerminate(&holder, 5'000'000'000ULL);
                 } else if (msg == 22 /*power*/ || msg == 29 /*auto power down*/) {
                     appletStartSleepSequence(true);
+                } else if (msg == 33 /*SD card removed*/) {
+                    // Consumed here, so the main loop never sees it: do what it
+                    // would, since everything we serve lives on that card.
+                    appletHolderRequestExitOrTerminate(&holder, 3'000'000'000ULL);
+                    pwr::Reboot();
                 }
             }
             svcSleepThread(16'666'666ULL); // ~60fps polling

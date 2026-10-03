@@ -85,6 +85,11 @@ Update available=有可用更新
 
 # --- theming + appearance ---
 Menu entries=菜单项目
+Screen timeout=屏幕超时
+Screen timeout (TV)=屏幕超时（电视）
+Never=从不
+min=分钟
+h=小时
 found=个
 Back=返回
 About=关于

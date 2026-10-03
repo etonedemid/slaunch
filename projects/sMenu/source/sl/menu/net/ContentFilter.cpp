@@ -10,21 +10,18 @@ namespace sl::menu::net {
     namespace {
         constexpr const char *kConfigPath = "sdmc:/slaunch/config/content_filter.txt";
 
-        // Convert string to lowercase for comparison.
         std::string ToLower(const std::string &s) {
             std::string result = s;
             for (auto &c : result) c = std::tolower((unsigned char)c);
             return result;
         }
 
-        // Check if a string contains a substring (case-insensitive).
         bool ContainsCI(const std::string &haystack, const std::string &needle) {
             const std::string lower_hay = ToLower(haystack);
             const std::string lower_nee = ToLower(needle);
             return lower_hay.find(lower_nee) != std::string::npos;
         }
 
-        // Adult content keywords and phrases to filter.
         bool IsAdultKeyword(const std::string &word) {
             static const char *adult_keywords[] = {
                 "sexual", "adult", "porn", "xxx", "nude", "naked", "explicit",
@@ -38,7 +35,6 @@ namespace sl::menu::net {
             return false;
         }
 
-        // Extremely violent/gory keywords.
         bool IsExtremeViolenceKeyword(const std::string &word) {
             static const char *violence_keywords[] = {
                 "extremely violent", "graphic violence", "gore", "mutilation",
@@ -51,19 +47,13 @@ namespace sl::menu::net {
             return false;
         }
 
-        // Check if string contains adult keywords.
         bool HasAdultKeywords(const std::string &text) {
             return IsAdultKeyword(text) || IsExtremeViolenceKeyword(text);
         }
 
-        // Simulated list of known adult titles (can be expanded).
         bool IsKnownAdultTitle(const std::string &title) {
-            // This is just a sample; in production, this could be a larger database.
-            // We're conservative here - only obvious adult titles.
             static const char *adult_titles[] = {
-                // Known adult visual novels and explicit games
-                "~~This is intentionally empty for now~~"  // Placeholder
-                // Add more as needed
+                "~~This is intentionally empty for now~~"
             };
             const std::string lower = ToLower(title);
             for (const char *title_kw : adult_titles) {
@@ -72,8 +62,6 @@ namespace sl::menu::net {
             return false;
         }
 
-        // Extract a JSON string value. Simple parser for limited use.
-        // Expects format: "key":"value" or "key": "value"
         std::string ExtractJsonString(const std::string &json, const char *key) {
             const std::string pat = std::string("\"") + key + "\"";
             size_t pos = json.find(pat);
@@ -127,28 +115,21 @@ namespace sl::menu::net {
     bool ContentFilter::ShouldFilterByEsrb(const std::string &esrb_rating) {
         if (!IsEnabled()) return false;
         const std::string lower = ToLower(esrb_rating);
-        // Filter "Adults Only (AO)" and "Mature (M)" as per common parental controls
         if (lower.find("adults only") != std::string::npos) return true;
         if (lower.find("ao") != std::string::npos && lower.find("18+") != std::string::npos) return true;
-        // Optional: also filter Mature (M) if stricter filtering desired
-        // if (lower.find("mature") != std::string::npos) return true;
         return false;
     }
 
     bool ContentFilter::ShouldFilterByPegi(const std::string &pegi_rating) {
         if (!IsEnabled()) return false;
         const std::string lower = ToLower(pegi_rating);
-        // Filter PEGI 16 and PEGI 18 as adult content
         if (lower.find("pegi 18") != std::string::npos) return true;
-        // PEGI 16 is more borderline - can be enabled if stricter filtering wanted
-        // if (lower.find("pegi 16") != std::string::npos) return true;
         return false;
     }
 
     bool ContentFilter::ShouldFilterByUsk(const std::string &usk_rating) {
         if (!IsEnabled()) return false;
         const std::string lower = ToLower(usk_rating);
-        // Filter USK 18 as adult content
         if (lower.find("18") != std::string::npos) return true;
         return false;
     }
@@ -181,7 +162,6 @@ namespace sl::menu::net {
     bool ContentFilter::ShouldFilterBySteamTags(const std::string &json_body) {
         if (!IsEnabled()) return false;
 
-        // Steam returns tags in the JSON response. Look for explicit content tags.
         static const char *steam_adult_tags[] = {
             "sexual_content",
             "nudity",
@@ -195,7 +175,6 @@ namespace sl::menu::net {
             if (lower.find(tag) != std::string::npos) return true;
         }
 
-        // Also check for general adult keywords in the entire response
         if (HasAdultKeywords(json_body)) return true;
 
         return false;
@@ -206,11 +185,9 @@ namespace sl::menu::net {
                                                  const std::string &category) {
         if (!IsEnabled()) return false;
 
-        // Check title and summary for adult content
         if (HasAdultKeywords(title)) return true;
         if (HasAdultKeywords(summary)) return true;
 
-        // Some categories might indicate adult content
         const std::string lower_cat = ToLower(category);
         if (lower_cat.find("adult") != std::string::npos) return true;
         if (lower_cat.find("mature") != std::string::npos) return true;
@@ -222,7 +199,6 @@ namespace sl::menu::net {
                                               const std::string &content) {
         if (!IsEnabled()) return false;
 
-        // Check Steam news title and content for adult material
         if (HasAdultKeywords(title)) return true;
         if (HasAdultKeywords(content)) return true;
 
@@ -233,18 +209,14 @@ namespace sl::menu::net {
                                                  const std::string &source) {
         if (!IsEnabled()) return false;
 
-        // For SteamGridDB and Steam responses, check various metadata fields
         if (ContainsCI(source, "steamgriddb")) {
-            // Look for tags or content metadata in SteamGridDB response
             if (ContainsCI(json_body, "adult")) return true;
             if (ContainsCI(json_body, "nsfw")) return true;
             if (ContainsCI(json_body, "explicit")) return true;
         } else if (ContainsCI(source, "steam")) {
-            // Check Steam store API response for mature content tags
             if (ShouldFilterBySteamTags(json_body)) return true;
         }
 
-        // Generic check for adult keywords in any response body
         if (HasAdultKeywords(json_body)) return true;
 
         return false;

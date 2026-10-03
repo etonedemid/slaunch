@@ -388,3 +388,12 @@ namespace sl::menu::usb {
         }
     }
 }
+
+// Sleep plan: kept in memory so the settings rows can be stepped through.
+static SetSysSleepSettings g_sleep = { 0, 2, 0 };   // 5 min handheld, 1 h TV
+extern "C" Result setsysGetSleepSettings(SetSysSleepSettings *out) { *out = g_sleep; return 0; }
+extern "C" Result setsysSetSleepSettings(const SetSysSleepSettings *s) { g_sleep = *s; return 0; }
+extern "C" Result appletLoadAndApplyIdlePolicySettings(void) { return 0; }
+extern "C" bool hosversionAtLeast(u8 major, u8 minor, u8 micro) {
+    return hosversionGet() >= (u32)((major << 16) | (minor << 8) | micro);
+}

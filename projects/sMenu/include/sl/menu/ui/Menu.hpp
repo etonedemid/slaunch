@@ -182,7 +182,6 @@ namespace sl::menu::ui {
         // doesn't care what screen is currently up. Does nothing otherwise.
         Action OnHomeButton(u64 &out_app_id);
 
-        // Draw the current frame.
         void Render();
 
         void SetSuspendedApp(u64 app_id);
@@ -306,7 +305,7 @@ namespace sl::menu::ui {
         bool                     m_payloads_scanned = false;
         std::string              m_payload_path;    // set on Action::PowerPayload
         Action      m_power_confirm = Action::None; // what ConfirmPower will run
-        std::string m_dialog_title;                 // dialog heading
+        std::string m_dialog_title;
         std::string m_dialog_note;                  // optional line under it
 
         // ---- play statistics (pdm) -----------------------------------------
@@ -602,6 +601,7 @@ namespace sl::menu::ui {
         void DrawMainGrid();        // page of icon tiles
         void DrawMainCover();       // fullscreen single-cover pager
         void DrawMainShelf();       // Xbox-360-style uniform cover row
+        void DrawMainShelfPs();     // PS4-style flat tile row (Shelf's default)
         void DrawMainXmb();          // PSP/PS3 cross-media bar
         void DrawMainFlow();         // WiiFlow-style 3D coverflow
         int  FlowItemAt(int px, int py) const;  // box under a touch, or -1
@@ -928,6 +928,8 @@ namespace sl::menu::ui {
         void DrawTheming();
         std::vector<int> ThemingRows() const;   // visible Theming rows
         bool SgdbKeyPresent();                  // loads the key on first ask
+        // SteamGridDB will actually be asked: switched on and given a key.
+        bool SgdbActive() { return m_sgdb_enabled && SgdbKeyPresent(); }
         void DrawThemes();
         void DrawEditor();
         void DrawColorPicker();
@@ -1075,6 +1077,9 @@ namespace sl::menu::ui {
         // Shelf draws portrait 2:3 tiles instead of square ones, using the
         // fetched box art when a game has it. Shares the cover cache with Flow.
         bool      m_shelf_vertical = false;
+        // Shelf's look: the PS4 home screen's flat tile row (default) or the
+        // Xbox 360's 3D library.
+        bool      m_shelf_ps = true;
         // Whether moving past either end of the list loops round to the other.
         // On by default, which is how every layout has always behaved.
         bool      m_wrap_nav = true;
@@ -1103,7 +1108,7 @@ namespace sl::menu::ui {
         int  ShelfTileH() const { return m_shelf_vertical ? 228 : 208; }
         int  ShelfPitch() const { return ShelfTileW() + kShelfGapPx; }
         static constexpr int kShelfGapPx = 20;
-        UiMode    m_ui_mode = UiMode::XMB;    // main-screen layout (default)
+        UiMode    m_ui_mode = UiMode::Shelf;  // main-screen layout (default)
         // Language override; "auto" follows the console. Applied through
         // LocaleInit, which rebuilds the string table in place.
         char      m_lang[8] = "auto";

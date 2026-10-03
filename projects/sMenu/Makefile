@@ -18,15 +18,36 @@ INCLUDES := include ../../libs/sCommon/include \
 COMMON_SRC := ../../libs/sCommon/source/sl/os/Applications.cpp
 
 
-# SDL2 (+ ttf/image) compile & link flags from the switch portlibs pkg-config.
+# SDL3 (+ ttf/image/mixer). Not a devkitPro portlib yet: built from
+# github.com/etonedemid/SDL (switch-sdl3-nvk) and the SDL3 satellite releases
+# into a prefix - ~/sdl3-switch/stage by default, see its build-libs.sh.
+# SDL3_image decodes JPEGs with stb_image, never libjpeg (whose error path
+# crashed the menu under SDL2_image 2.0).
+SDL3_PREFIX ?= $(HOME)/sdl3-switch/stage
 PKGCONF  := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
-SDL_CFLAGS := $(shell $(PKGCONF) --cflags sdl2 SDL2_ttf SDL2_image SDL2_mixer)
-SDL_LIBS   := $(shell $(PKGCONF) --libs sdl2 SDL2_ttf SDL2_image SDL2_mixer)
-# SDL2_image before 2.8 decodes JPEGs with libjpeg, whose error path crashes
-# on the console: one corrupt image takes the menu down. 2.8 uses stb_image.
-# devkitPro still ships 2.0.4; newer packages are in packaging/devkitpro.
-ifneq ($(shell $(PKGCONF) --atleast-version=2.8.0 SDL2_image && echo ok),ok)
-$(warning SDL2_image is older than 2.8 - see packaging/devkitpro/README.md)
+
+# VULKAN=1: draw through SDL_GPU on Vulkan, with Mesa's NVK driver
+# (github.com/etonedemid/mesa-switch) instead of OpenGL. Its SDL is the same
+# fork built with -DSDL_VULKAN=ON (SDL3_NVK_PREFIX; the satellite libraries
+# still come from SDL3_PREFIX), and Mesa 26's libraries must be found ahead
+# of devkitPro's Mesa 20. A separate build: objects in build-vk, the applet
+# in slaunch/bin/sMenu-vk - copy its main over sMenu's to run it.
+VULKAN ?= 0
+ifeq ($(VULKAN),1)
+SDL3_NVK_PREFIX ?= $(HOME)/sdl3-switch/stage-nvk
+MESA_VK         ?= $(HOME)/mesa-switch/stage-vk
+SDL3_PC_DIRS    := $(SDL3_NVK_PREFIX)/lib/pkgconfig:$(SDL3_PREFIX)/lib/pkgconfig
+else
+SDL3_PC_DIRS    := $(SDL3_PREFIX)/lib/pkgconfig
+endif
+# (the portlibs wrapper above resets the search path, so not through it)
+SDL3_PKGCONF := PKG_CONFIG_PATH= PKG_CONFIG_SYSROOT_DIR= \
+    PKG_CONFIG_LIBDIR=$(SDL3_PC_DIRS):$(DEVKITPRO)/portlibs/switch/lib/pkgconfig \
+    pkg-config --static
+SDL_CFLAGS := $(shell $(SDL3_PKGCONF) --cflags sdl3 sdl3-ttf sdl3-image sdl3-mixer)
+SDL_LIBS   := $(shell $(SDL3_PKGCONF) --libs sdl3-ttf sdl3-image sdl3-mixer sdl3)
+ifeq ($(SDL_LIBS),)
+$(error SDL3 not found in $(SDL3_PREFIX) - set SDL3_PREFIX)
 endif
 
 # libcurl (+ mbedtls/zlib) for the network widgets (weather, chat).
@@ -49,13 +70,17 @@ FFMPEG_LIBS   := -lavformat -lavcodec -lavutil
 # the SD card, which sSystem serves into an applet slot via ECS.
 SDOUT  := ../../SdOut
 OUTDIR := $(SDOUT)/slaunch/bin/sMenu
+ifeq ($(VULKAN),1)
+BUILD  := build-vk
+OUTDIR := $(SDOUT)/slaunch/bin/sMenu-vk
+endif
 
 #---------------------------------------------------------------------------------
 include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 1.4.1
+APP_VERSION := 1.5.0
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
@@ -88,9 +113,12 @@ COMPAT_FLAGS = -Dsol_lua_newstate_args=$(NEWSTATE_ARGS)
 # test for them with #ifdef - this flag is the compile-time signal instead.
 # The sim's native build (stock host FFmpeg, software decode only) must NOT
 # define this.
-CFLAGS    = -g -Wall -O2 -ffunction-sections -fvisibility=default $(ARCH) \
+CFLAGS    = -g -Wall -O2 -ffunction-sections -fvisibility=default -fno-omit-frame-pointer $(ARCH) \
             $(INCLUDE) $(SDL_CFLAGS) $(CURL_CFLAGS) $(FFMPEG_CFLAGS) $(LUA_DEFINES) \
             -DSL_VERSION=\"$(APP_VERSION)\" -DSL_HAS_VIDEO=1 -DSL_HAS_NVTEGRA=1
+ifeq ($(VULKAN),1)
+CFLAGS   += -DSL_VULKAN=1 -I$(CURDIR)/$(BUILD)
+endif
 
 CXXFLAGS = $(CFLAGS) -std=gnu++20 -fno-rtti -fno-exceptions \
            $(SOL_FLAGS) $(COMPAT_FLAGS)
@@ -105,11 +133,17 @@ ASFLAGS  := -g $(ARCH)
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
             -Wl,-Map,$(TARGET).map \
             -Wl,--unresolved-symbols=ignore-in-shared-libs
+ifeq ($(VULKAN),1)
+# Searched first: the NVK SDL ahead of the GL one in SDL3_PREFIX (which the
+# satellite libraries' flags also name), and Mesa 26 (NVK, EGL) ahead of
+# the portlibs' Mesa 20.
+LDFLAGS  += -L$(SDL3_NVK_PREFIX)/lib -L$(MESA_VK)/lib
+endif
 
 # Network libs first (curl -> mbedtls -> z), then FFmpeg (avformat -> avcodec
-# -> avutil), then SDL (whose flags end with -lnx) so libnx resolves
-# everything last.
-LIBS     := $(CURL_LIBS) $(FFMPEG_LIBS) $(SDL_LIBS)
+# -> avutil), then SDL, then libnx once more: SDL3's flags end with Mesa's
+# libdrm_nouveau, which calls into libnx, so libnx resolves everything last.
+LIBS     := $(CURL_LIBS) $(FFMPEG_LIBS) $(SDL_LIBS) -lnx
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX) $(FFMPEG_PREFIX)
 
@@ -186,6 +220,15 @@ $(BUILD)/haze/%.o: ../../libs/haze/source/%.cpp | $(BUILD)
 $(BUILD)/sCommon/%.o: ../../libs/sCommon/source/sl/os/%.cpp | $(BUILD)
 	@mkdir -p $(dir $@)
 	@$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+# The effects' SPIR-V, made from the GLSL literals in these sources (see the
+# script). Gfx.o is the only user.
+ifeq ($(VULKAN),1)
+FX_SOURCES := source/sl/menu/gfx/Gfx.cpp source/sl/menu/ui/Menu_Internal.hpp source/sl/menu/ui/Menu.cpp
+$(BUILD)/fx_spirv.h: scripts/fx-spirv.py $(FX_SOURCES) | $(BUILD)
+	@python3 scripts/fx-spirv.py $@ $(FX_SOURCES)
+$(BUILD)/source/sl/menu/gfx/Gfx.o: $(BUILD)/fx_spirv.h
+endif
 
 $(BUILD)/%.o: %.cpp | $(BUILD)
 	@mkdir -p $(dir $@)

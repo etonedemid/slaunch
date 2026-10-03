@@ -160,6 +160,16 @@ Result psmGetChargerType(PsmChargerType *out);
 // System settings
 Result setGetSystemLanguage(u64 *out);
 
+typedef struct {
+    u32 flags;
+    s32 handheld_sleep_plan;
+    s32 console_sleep_plan;
+} SetSysSleepSettings;
+Result setsysGetSleepSettings(SetSysSleepSettings *out);
+Result setsysSetSleepSettings(const SetSysSleepSettings *s);
+Result appletLoadAndApplyIdlePolicySettings(void);
+bool   hosversionAtLeast(u8 major, u8 minor, u8 micro);
+
 // ---------------------------------------------------------------------------
 // Shared font (pl). Real font bytes, loaded from disk - see switch_stub.cpp for
 // the search order. Text rendering is the whole point of the simulator, so this

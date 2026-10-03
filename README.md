@@ -65,7 +65,7 @@ folder and translate the right-hand side of each `=`. The console's system
 language picks the file, trying the regional form first and then the two-letter
 one. Missing strings, and missing files, fall back to English.
 
-Shipped: `ru`, `ja`, `de`, `es`, `zh` (Simplified).
+Shipped: `ru`, `ja`, `de`, `es`, `fr`, `zh` (Simplified).
 
 Non-Latin scripts need a font with those glyphs. sLaunch selects the console's
 own shared font from the system language, so Japanese, Korean and Chinese render
@@ -90,6 +90,14 @@ hardware block (see `THIRDPARTY.md` for where that decoder comes from).
   Blur toggle greys out in the theme editor while a video wallpaper is active
   (the Dim and Snow overlays still work, since those do not need to inspect
   the frame contents).
+
+### Screen timeout
+
+**Theming > Screen timeout** and **Screen timeout (TV)** set the console's own
+auto-sleep - the setting stock HOME Menu keeps in System Settings, which sLaunch
+replaces: 1, 3, 5, 10 or 30 minutes (or never) handheld, 1, 2, 3, 6 or 12 hours
+(or never) docked. It is a console setting, shared by every account, and it
+applies in games too.
 
 ### Widgets
 
@@ -145,8 +153,7 @@ sdmc:/slaunch/config/content_filter.txt    containing: enabled=1
 the covers and news the menu fetches are checked for adult and extreme-violence
 content before anything is downloaded or shown - by keyword, by ESRB/PEGI/USK
 rating and by Steam store tags. It filters what sLaunch pulls off the internet;
-it is not a parental control over what is installed on the console. See
-[docs/CONTENT_FILTER.md](docs/CONTENT_FILTER.md).
+it is not a parental control over what is installed on the console.
 
 ## Building
 

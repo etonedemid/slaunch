@@ -76,6 +76,11 @@ Update available=Update verfügbar
 
 # --- theming + appearance ---
 Menu entries=Menüeinträge
+Screen timeout=Bildschirm-Timeout
+Screen timeout (TV)=Bildschirm-Timeout (TV)
+Never=Nie
+min=Min.
+h=Std.
 found=gefunden
 Back=Zurück
 About=Über

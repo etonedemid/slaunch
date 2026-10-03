@@ -1,7 +1,7 @@
 #include <switch.h>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_ttf.h>
-#include <SDL2/SDL_image.h>
+#include <SDL3/SDL.h>
+#include <SDL3_ttf/SDL_ttf.h>
+#include <SDL3_image/SDL_image.h>
 #include <curl/curl.h>
 #include <minizip/unzip.h>
 #include <dirent.h>
@@ -27,18 +27,18 @@ static const Col kBlack{0, 0, 0}, kBg{5, 5, 8}, kBg2{10, 10, 14},
 
 static void FillRect(int x, int y, int w, int h, Col c, Uint8 a = 255) {
     SDL_SetRenderDrawColor(g_ren, c.r, c.g, c.b, a);
-    SDL_Rect r{x, y, w, h};
+    const SDL_FRect r{(float)x, (float)y, (float)w, (float)h};
     SDL_RenderFillRect(g_ren, &r);
 }
 
 static void Text(TTF_Font *f, int x, int y, Col c, const char *s, bool center = false) {
     if (!f || !s || !s[0]) return;
-    SDL_Surface *surf = TTF_RenderUTF8_Blended(f, s, SDL_Color{c.r, c.g, c.b, 255});
+    SDL_Surface *surf = TTF_RenderText_Blended(f, s, 0, SDL_Color{c.r, c.g, c.b, 255});
     if (!surf) return;
     SDL_Texture *tex = SDL_CreateTextureFromSurface(g_ren, surf);
-    SDL_Rect dst{center ? x - surf->w / 2 : x, y, surf->w, surf->h};
-    SDL_FreeSurface(surf);
-    if (tex) { SDL_RenderCopy(g_ren, tex, nullptr, &dst); SDL_DestroyTexture(tex); }
+    const SDL_FRect dst{(float)(center ? x - surf->w / 2 : x), (float)y, (float)surf->w, (float)surf->h};
+    SDL_DestroySurface(surf);
+    if (tex) { SDL_RenderTexture(g_ren, tex, nullptr, &dst); SDL_DestroyTexture(tex); }
 }
 
 // ---- recursive copy / delete ---------------------------------------------
@@ -551,8 +551,8 @@ static void DrawTileRow(const Tile *tiles, int count, int cursor) {
             // A stretch to the full 200 would land on fractional pixels and turn
             // the thin strokes ragged.
             const int art = 128, pad = (kTileSize - art) / 2;
-            SDL_Rect dst{ x + pad, kTileTop + pad, art, art };
-            SDL_RenderCopy(g_ren, tiles[i].icon, nullptr, &dst);
+            const SDL_FRect dst{ (float)(x + pad), (float)(kTileTop + pad), (float)art, (float)art };
+            SDL_RenderTexture(g_ren, tiles[i].icon, nullptr, &dst);
         } else {
             FillRect(x, kTileTop, kTileSize, kTileSize, kBg2);
         }
@@ -604,8 +604,8 @@ static void DrawConfirmDialog(const char *title, const char *subtitle,
 // keeps communicating "this is still working."
 static void DrawIcon(SDL_Texture *t, int cx, int cy, int w, int h) {
     if (!t) return;
-    SDL_Rect r{ cx - w / 2, cy - h / 2, w, h };
-    SDL_RenderCopy(g_ren, t, nullptr, &r);
+    const SDL_FRect r{ cx - w / 2.0f, cy - h / 2.0f, (float)w, (float)h };
+    SDL_RenderTexture(g_ren, t, nullptr, &r);
 }
 
 // The sLaunch mark slides down from above and settles onto an SD card, holds,
@@ -676,19 +676,18 @@ int main() {
     // the old (nearest, blocky) mode. The tile icons are 512px vector art
     // scaled down to fit; without this they'd alias instead of downsampling
     // cleanly.
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-    SDL_Init(SDL_INIT_VIDEO);
-    SDL_Window *win = SDL_CreateWindow("sInstaller", 0, 0, W, H, 0);
-    g_ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Init(SDL_INIT_VIDEO);   // (textures sample linearly by default in SDL3)
+    SDL_Window *win = SDL_CreateWindow("sInstaller", W, H, 0);
+    g_ren = SDL_CreateRenderer(win, nullptr);
+    SDL_SetRenderVSync(g_ren, 1);
     SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
     TTF_Init();
-    IMG_Init(IMG_INIT_PNG);
 
     PlFontData fd;
     if (R_SUCCEEDED(plGetSharedFontByType(&fd, PlSharedFontType_Standard))) {
-        g_fL = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 1, 46);
-        g_fM = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 1, 28);
-        g_fS = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 1, 22);
+        g_fL = TTF_OpenFontIO(SDL_IOFromConstMem(fd.address, fd.size), true, 46);
+        g_fM = TTF_OpenFontIO(SDL_IOFromConstMem(fd.address, fd.size), true, 28);
+        g_fS = TTF_OpenFontIO(SDL_IOFromConstMem(fd.address, fd.size), true, 22);
     }
 
     // Action icons for the tile row (and the title mark below). They are white
@@ -748,7 +747,6 @@ int main() {
     std::string latestTag, zipUrl;   // filled by the update check
     const char *updErr = "";         // failure detail for the Failed screen
 
-    // Dialog state
     int dialogCursor = 1; // 0 = Yes, 1 = No (default to No for safety)
     bool ok = false;
 
@@ -1047,7 +1045,6 @@ cleanup:
     if (g_fL) TTF_CloseFont(g_fL);
     if (g_fM) TTF_CloseFont(g_fM);
     if (g_fS) TTF_CloseFont(g_fS);
-    IMG_Quit();
     TTF_Quit();
     SDL_DestroyRenderer(g_ren);
     SDL_DestroyWindow(win);

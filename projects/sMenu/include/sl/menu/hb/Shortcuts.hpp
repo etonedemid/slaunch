@@ -32,7 +32,7 @@ namespace sl::menu::hb {
     struct Shortcut {
         std::string nro;        // the .nro to run (an emulator core, usually)
         std::string argv;       // full argv line for hbloader, already quoted
-        std::string name;       // display name
+        std::string name;
         std::string category;   // XMB column; empty = the plain Homebrew column
         std::string icon_path;  // box art on the card, or empty
         u64         icon_key = 0;  // hash of the shortcut, for the texture cache

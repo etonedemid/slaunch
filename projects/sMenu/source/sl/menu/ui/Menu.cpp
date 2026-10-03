@@ -3,7 +3,7 @@
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/net/Http.hpp>
 #include <sl/smi/Protocol.hpp>
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -259,14 +259,18 @@ namespace sl::menu::ui {
             threadWaitForExit(&m_shot_thread);
             threadClose(&m_shot_thread);
             m_shot_running = false;
-            if (m_shot_surf_a) { SDL_FreeSurface(m_shot_surf_a); m_shot_surf_a = nullptr; }
-            if (m_shot_surf_b) { SDL_FreeSurface(m_shot_surf_b); m_shot_surf_b = nullptr; }
+            if (m_shot_surf_a) { SDL_DestroySurface(m_shot_surf_a); m_shot_surf_a = nullptr; }
+            if (m_shot_surf_b) { SDL_DestroySurface(m_shot_surf_b); m_shot_surf_b = nullptr; }
         }
         if (m_deferred_started && !m_deferred_joined) {
             threadWaitForExit(&m_deferred_thread);
             threadClose(&m_deferred_thread);
             m_deferred_joined = true;
         }
+        // Videos first: a clip with sound is hooked into the mixer, and its
+        // unhook needs the mixer Music::Exit() destroys.
+        m_video_player.Close();
+        m_album_video.Close();
         // Free SFX chunks before Music::Exit() closes the mixer, then stop the
         // network thread.
         m_sfx.Exit();
@@ -279,8 +283,6 @@ namespace sl::menu::ui {
         DeckFreeArt();      // news card art, decoded on the render thread
         if (m_wallpaper)   { m_gfx->FreeImage(m_wallpaper);   m_wallpaper = nullptr; }
         if (m_wallpaper_blur) { m_gfx->FreeImage(m_wallpaper_blur); m_wallpaper_blur = nullptr; }
-        m_video_player.Close();
-        m_album_video.Close();   // album clip playback (if any) outlives the renderer
         FreeAlbumTexture();   // a capture is resident whenever the viewer is open
         if (m_flow_wrap) { m_gfx->FreeImage(m_flow_wrap); m_flow_wrap = nullptr; }
         FreeWidgetTileTextures();
@@ -763,6 +765,8 @@ namespace sl::menu::ui {
                 m_list_icons = (v != 0);
             else if (sscanf(line, "shelf_vertical=%d", &v) == 1)
                 m_shelf_vertical = (v != 0);
+            else if (sscanf(line, "shelf_ps=%d", &v) == 1)
+                m_shelf_ps = (v != 0);
             else if (sscanf(line, "wrap_nav=%d", &v) == 1)
                 m_wrap_nav = (v != 0);
             else if (sscanf(line, "show_hints=%d", &v) == 1)
@@ -815,6 +819,7 @@ namespace sl::menu::ui {
         fprintf(fp, "tile_rows=%d\n", m_tile_rows);
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
         fprintf(fp, "shelf_vertical=%d\n", m_shelf_vertical ? 1 : 0);
+        fprintf(fp, "shelf_ps=%d\n", m_shelf_ps ? 1 : 0);
         fprintf(fp, "wrap_nav=%d\n", m_wrap_nav ? 1 : 0);
         fprintf(fp, "show_hints=%d\n", m_show_hints ? 1 : 0);
         fprintf(fp, "show_counter=%d\n", m_show_counter ? 1 : 0);
@@ -891,6 +896,10 @@ namespace sl::menu::ui {
 
         cfg::SetUser(m_user);
         cfg::NoteNickname(m_nickname);
+        // The daemon launches games as this user; without this a switched
+        // account still played on the previous one's saves.
+        sl::smi::SendMenuCommand(sl::smi::SystemMessage::SetSelectedUser,
+                                 sl::smi::PayloadSetUser{ m_user });
 
         m_theme.Load();
         m_theme_cursor = m_theme.CurrentIndex();
@@ -1643,10 +1652,17 @@ namespace sl::menu::ui {
     void Menu::ShowPowerError() {
         FILE *fp = fopen(sl::smi::PowerErrorPath, "r");
         if (!fp) return;
-        char line[160] = {};
+        char line[400] = {};
         if (fgets(line, sizeof(line), fp)) {
             line[strcspn(line, "\r\n")] = '\0';
-            if (line[0]) SetStatus(line);
+            // A one-OK notice: a status line fades before a long reason
+            // (no space for a game's save data) can be read.
+            if (line[0]) {
+                m_dialog_title  = T("Could not do that");
+                m_dialog_note   = T(line);
+                m_dialog_cursor = 0;
+                m_dialog        = Dialog::CrashReport;
+            }
         }
         fclose(fp);
         remove(sl::smi::PowerErrorPath);
@@ -2597,7 +2613,7 @@ namespace sl::menu::ui {
             case UiMode::Line:    DrawMainLine();    break;
             case UiMode::Grid:    DrawMainGrid();    break;
             case UiMode::Cover:   DrawMainCover();   break;
-            case UiMode::Shelf:   DrawMainShelf();   break;
+            case UiMode::Shelf:   if (m_shelf_ps) DrawMainShelfPs(); else DrawMainShelf(); break;
             case UiMode::XMB:     DrawMainXmb();     break;
             case UiMode::Flow:    DrawMainFlow();    break;
             case UiMode::Deck:    DrawMainDeck();    break;
