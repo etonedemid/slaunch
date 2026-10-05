@@ -18,7 +18,7 @@ namespace sl::sys::pwr {
         RebootFailed,   // the payload was accepted but bpc would not reboot
     };
 
-    void Sleep();
+    Result Sleep();
 
     // Both of these only return if the request failed.
     void Reboot();

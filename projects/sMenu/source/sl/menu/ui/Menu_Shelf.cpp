@@ -182,7 +182,7 @@ namespace sl::menu::ui {
     // Shelf, PS4 style (the default): the PS4 home screen's content row. The
     // selected tile stands big at the left with a "Start" band under it and
     // its name beside it; everything after it runs to the right as small
-    // square tiles, and what was passed slides out to the left.
+    // square tiles, and what was passed stays small to its left.
     void Menu::DrawMainShelfPs() {
         const Theme &t = m_theme.Current();
         m_icons.SetScale(0);
@@ -197,7 +197,9 @@ namespace sl::menu::ui {
 
         const int total = (int)m_items.size();
         const int W = gfx::Gfx::Width;
-        const int first = std::max(0, (int)std::floor(m_scroll_pos) - 1);
+        // Passed tiles sit small to the left of the selected one; two fit
+        // before the screen edge.
+        const int first = std::max(0, (int)std::floor(m_scroll_pos) - 3);
 
         for (int idx = first; idx < total; idx++) {
             float fx, fs;
@@ -205,7 +207,7 @@ namespace sl::menu::ui {
             const int x = (int)lroundf(fx), sz = (int)lroundf(fs), y = kPsTop;
             if (x > W) break;
             const float d = (float)idx - m_scroll_pos;
-            const Uint8 A = (Uint8)(255 * std::clamp(1.0f + d, 0.0f, 1.0f));   // passed ones fade out
+            const Uint8 A = 255;   // passed ones stay, small, to the left
             if (A == 0 || x + sz < 0) continue;
             const MenuItem &it = m_items[idx];
 

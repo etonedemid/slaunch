@@ -24,6 +24,7 @@ namespace sl::menu::audio {
             { "sdmc:/slaunch/sounds/confirm.wav",    "sdmc:/slaunch/sounds/confirm.mp3",    nullptr },
             { "sdmc:/slaunch/sounds/click.wav",      "sdmc:/slaunch/sounds/click.mp3",      nullptr },
             { "sdmc:/slaunch/sounds/back.wav",       "sdmc:/slaunch/sounds/back.mp3",       nullptr },
+            { "sdmc:/slaunch/sounds/move.wav",       "sdmc:/slaunch/sounds/move.mp3",       nullptr },
         };
     }
 
@@ -39,12 +40,14 @@ namespace sl::menu::audio {
             // Still null: that effect has no file and stays silent.
         }
         for (auto &v : m_voice) v = MIX_CreateTrack(mixer);
+        m_move_voice = MIX_CreateTrack(mixer);
         m_ok = true;
         SetVolume(m_volume);
     }
 
     void Sound::Exit() {
         for (auto &v : m_voice) { if (v) MIX_DestroyTrack(v); v = nullptr; }
+        if (m_move_voice) { MIX_DestroyTrack(m_move_voice); m_move_voice = nullptr; }
         for (auto &a : m_sfx) { if (a) MIX_DestroyAudio(a); a = nullptr; }
         m_ok = false;
     }
@@ -54,7 +57,8 @@ namespace sl::menu::audio {
         const int i = (int)s;
         if (i < 0 || i >= (int)Sfx::Count || !m_sfx[i]) return;
         MIX_Track *t = nullptr;
-        for (MIX_Track *v : m_voice)
+        if (s == Sfx::Move) t = m_move_voice;
+        else for (MIX_Track *v : m_voice)
             if (v && !MIX_TrackPlaying(v)) { t = v; break; }
         if (!t) { t = m_voice[m_next]; m_next = (m_next + 1) % kVoices; }
         if (!t) return;
@@ -67,6 +71,7 @@ namespace sl::menu::audio {
         if (!m_ok) return;
         for (MIX_Track *v : m_voice)
             if (v) MIX_SetTrackGain(v, m_volume / 100.0f);
+        if (m_move_voice) MIX_SetTrackGain(m_move_voice, m_volume / 100.0f);
     }
 
 } // namespace sl::menu::audio

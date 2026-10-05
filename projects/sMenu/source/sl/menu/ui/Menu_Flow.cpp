@@ -463,7 +463,7 @@ namespace sl::menu::ui {
                 m->m_wrap_ok = have_wrap;
                 if (cover_made) { m->m_cover_ok = true; need_cover = false; end = CoverState::Got; }
             }
-            if (have_wrap) need_shots = false;
+            if (have_wrap && !m->m_cover_force_shots) need_shots = false;
         }
         // SteamGridDB only when the user turned it on and gave it a key;
         // otherwise only the keyless Steam screenshots remain to look for.
@@ -686,13 +686,19 @@ namespace sl::menu::ui {
                                      : (end == CoverState::Failed ? FetchStage::Failed : FetchStage::NotFound)));
         m->m_cover_done.store(true, std::memory_order_release);
     }
-    void Menu::StartCoverFetch(u64 app_id, const std::string &name) {
+    void Menu::StartCoverFetch(u64 app_id, const std::string &name, bool for_backdrop) {
         if (m_cover_running || app_id == 0 || name.empty()) return;
 
         // No key is no longer the end of it: GameTDB and Steam need none.
         SgdbKeyPresent();                  // loads the key, if there is one
-        if (m_cover_tried.count(app_id))  return;
-        m_cover_tried[app_id] = true;
+        if (for_backdrop) {
+            if (m_bd_fetch_tried.count(app_id)) return;
+            m_bd_fetch_tried.insert(app_id);
+        } else {
+            if (m_cover_tried.count(app_id))  return;
+            m_cover_tried[app_id] = true;
+        }
+        m_cover_force_shots = for_backdrop;
 
         // Looked for recently and nothing was there. Retried after a week, or
         // at once if SteamGridDB was switched on or off since.
@@ -727,7 +733,14 @@ namespace sl::menu::ui {
         m_cover_running = false;
         m_fetch_end_tick = armGetSystemTick();   // the outcome shows for a moment
 
-        // Screenshots arrived: drop the recorded "none" so they decode.
+        // Screenshots arrived: drop the recorded "none" so they decode, and
+        // let the background pick them up if this game is still selected.
+        // New screenshots or key art: the background picks them up at once
+        // if this game is still selected.
+        if (m_shots_ok || m_hero_ok) {
+            m_bd_noshot.erase(m_cover_id);
+            m_bd_key.clear();
+        }
         if (m_shots_ok) {
             auto g = m_shots.find(m_cover_id);
             if (g != m_shots.end()) {

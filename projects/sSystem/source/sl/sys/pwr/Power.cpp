@@ -72,8 +72,8 @@ namespace sl::sys::pwr {
 
     }
 
-    void Sleep() {
-        appletStartSleepSequence(true);
+    Result Sleep() {
+        return appletStartSleepSequence(true);
     }
 
     void Reboot() {

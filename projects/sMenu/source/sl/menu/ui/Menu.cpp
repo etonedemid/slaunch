@@ -255,6 +255,12 @@ namespace sl::menu::ui {
         StopArt();   // holds surfaces too, and must not outlive the renderer
         // The hero decoder holds surfaces of its own, and outliving the renderer
         // would leak them at best.
+        if (m_bdj_running) {
+            threadWaitForExit(&m_bdj_thread);
+            threadClose(&m_bdj_thread);
+            m_bdj_running = false;
+            if (m_bdj_surf) { SDL_DestroySurface(m_bdj_surf); m_bdj_surf = nullptr; }
+        }
         if (m_shot_running) {
             threadWaitForExit(&m_shot_thread);
             threadClose(&m_shot_thread);
@@ -767,6 +773,8 @@ namespace sl::menu::ui {
                 m_shelf_vertical = (v != 0);
             else if (sscanf(line, "shelf_ps=%d", &v) == 1)
                 m_shelf_ps = (v != 0);
+            else if (sscanf(line, "backdrop=%d", &v) == 1 && v >= 0 && v <= 2)
+                m_backdrop = (Backdrop)v;
             else if (sscanf(line, "wrap_nav=%d", &v) == 1)
                 m_wrap_nav = (v != 0);
             else if (sscanf(line, "show_hints=%d", &v) == 1)
@@ -820,6 +828,7 @@ namespace sl::menu::ui {
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
         fprintf(fp, "shelf_vertical=%d\n", m_shelf_vertical ? 1 : 0);
         fprintf(fp, "shelf_ps=%d\n", m_shelf_ps ? 1 : 0);
+        fprintf(fp, "backdrop=%d\n", (int)m_backdrop);
         fprintf(fp, "wrap_nav=%d\n", m_wrap_nav ? 1 : 0);
         fprintf(fp, "show_hints=%d\n", m_show_hints ? 1 : 0);
         fprintf(fp, "show_counter=%d\n", m_show_counter ? 1 : 0);
@@ -982,6 +991,26 @@ namespace sl::menu::ui {
         // the confirmation cue rather than the ordinary click.
         m_sfx_confirm = false;
 
+        // Every screen keeps its own cursor, so "the cursor moved" is any of
+        // them changing on a direction press while the screen stays the same.
+        auto where = [&]() {
+            const int c[] = { m_cursor, m_theming_cursor, m_options_cursor, m_dialog_cursor,
+                m_net_cursor, m_power_cursor, m_payload_cursor, m_sys_cursor, m_album_cursor,
+                m_flow_menu_cursor, m_pick_cursor, m_deck_menu_cursor, m_deck_lib_cursor,
+                m_flowset_cursor, m_hb_cursor, m_theme_cursor, m_edit_cursor, m_fm_cursor,
+                m_fm_menu_cursor, m_music_cursor, m_widget_cursor, m_widgetopt_cursor,
+                m_font_cursor, m_xmb_col, m_xmb_item, m_kb_row, m_kb_col, m_deck_row,
+                m_deck_tab, m_deck_card, m_about_scroll, (int)m_screen, (int)m_options_open,
+                (int)m_dialog };
+            uint64_t h = 1469598103934665603ULL;
+            for (int v : c) h = (h ^ (uint32_t)v) * 1099511628211ULL;
+            return h;
+        };
+        const uint64_t before = where();
+        const Screen screen_before = m_screen;
+        const bool options_before = m_options_open;
+        const Dialog dialog_before = m_dialog;
+
         Action a = Action::None;
         if (m_options_open)               a = OnButtonOptions(b, out_app_id);
         else if (m_dialog != Dialog::None) a = OnButtonDialog(b, out_app_id);
@@ -1015,6 +1044,10 @@ namespace sl::menu::ui {
         }
 
         PlayButtonSfx(b, a);
+        const bool dir = b == Btn::Up || b == Btn::Down || b == Btn::Left || b == Btn::Right;
+        if (dir && a == Action::None && m_screen == screen_before &&
+            m_options_open == options_before && m_dialog == dialog_before && where() != before)
+            m_sfx.Play(audio::Sfx::Move);
         return a;
     }
 

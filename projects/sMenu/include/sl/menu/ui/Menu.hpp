@@ -18,6 +18,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <initializer_list>
 #include <atomic>
 #include <mutex>
@@ -727,7 +728,12 @@ namespace sl::menu::ui {
         // covers/<titleid>.jpg and are picked up by FlowCover on the next frame.
         // The key is read from config/steamgriddb.txt and never ships with the
         // menu; with no key the whole feature stays dormant.
-        void   StartCoverFetch(u64 app_id, const std::string &name);
+        // for_backdrop: wanted for the screenshot background, so screenshots
+        // are fetched even when a box scan already exists, and tried once per
+        // session on its own account rather than Flow's.
+        void   StartCoverFetch(u64 app_id, const std::string &name, bool for_backdrop = false);
+        std::unordered_set<u64> m_bd_fetch_tried;
+        bool   m_cover_force_shots = false;
         void   PollCoverFetch();
         static void CoverFetchTrampoline(void *self);
         // What the fetcher is doing, so it is visible rather than silent. The
@@ -910,6 +916,16 @@ namespace sl::menu::ui {
         SDL_Texture *m_bd_cur = nullptr, *m_bd_old = nullptr;
         u64          m_bd_tick = 0, m_bd_moved = 0;
         bool         m_bd_pending = false;
+        // Screenshot backgrounds: one decode at a time off the main thread
+        // (a 1080p JPEG stalls a frame), and titles without one remembered.
+        Thread            m_bdj_thread {};
+        std::atomic<bool> m_bdj_done { false };
+        bool              m_bdj_running = false;
+        u64               m_bdj_id = 0;
+        char              m_bdj_path[96] = {};
+        SDL_Surface      *m_bdj_surf = nullptr;
+        std::unordered_set<u64> m_bd_noshot;
+        static void BackdropDecodeTrampoline(void *self);
         // Packed-layout queries, all answered from BuildTiles so scrolling,
         // touch and navigation can never disagree with what was drawn.
         // Item index under a touch point (or -1), for touch-to-select/launch.
@@ -1080,6 +1096,10 @@ namespace sl::menu::ui {
         // Shelf's look: the PS4 home screen's flat tile row (default) or the
         // Xbox 360's 3D library.
         bool      m_shelf_ps = true;
+        // What fills the background behind Line, Cover and Shelf: nothing, the
+        // selected game's icon blurred, or one of its screenshots (PS4 style).
+        enum class Backdrop { Off, Icon, Screenshot };
+        Backdrop  m_backdrop = Backdrop::Screenshot;
         // Whether moving past either end of the list loops round to the other.
         // On by default, which is how every layout has always behaved.
         bool      m_wrap_nav = true;

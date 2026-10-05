@@ -23,6 +23,7 @@ namespace sl::menu::audio {
         Confirm,    // weighty yes: launching something, saving a theme
         Click,      // ordinary yes: opening a submenu, toggling a setting
         Back,       // leaving a screen
+        Move,       // the cursor moved
         Count
     };
 
@@ -41,6 +42,9 @@ namespace sl::menu::audio {
         // when all are busy.
         static constexpr int kVoices = 6;
         MIX_Track *m_voice[kVoices] = {};
+        // Cursor moves get their own voice and restart it: holding the D-pad
+        // would otherwise stack a copy per step on the shared ones.
+        MIX_Track *m_move_voice = nullptr;
         int        m_next = 0;
     };
 

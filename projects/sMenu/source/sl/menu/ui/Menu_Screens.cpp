@@ -989,6 +989,12 @@ namespace sl::menu::ui {
             SaveSettings();
         };
         auto toggleShelfStyle = [&]() { m_shelf_ps = !m_shelf_ps; SaveSettings(); };
+        if (m_theming_cursor == TH_Backdrop &&
+            (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_backdrop = (Backdrop)(((int)m_backdrop + (b == Btn::Left ? 2 : 1)) % 3);
+            m_bd_key.clear();   // redraw the background in the new mode
+            SaveSettings();
+        }
         if (m_theming_cursor == TH_ShelfStyle &&
             (b == Btn::Left || b == Btn::Right || b == Btn::A))
             toggleShelfStyle();
@@ -1907,6 +1913,8 @@ namespace sl::menu::ui {
             if (i == TH_Shortcuts && (m_ui_mode == UiMode::XMB || !m_retroarch)) continue;
             if (i == TH_ShelfVert && (m_ui_mode != UiMode::Shelf || m_shelf_ps)) continue;
             if (i == TH_ShelfStyle && m_ui_mode != UiMode::Shelf) continue;
+            if (i == TH_Backdrop && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::Line &&
+                m_ui_mode != UiMode::Cover) continue;
             // The wall shape is only meaningful where there is a wall.
             if ((i == TH_TileCols || i == TH_TileRows) && m_ui_mode != UiMode::Grid) continue;
             v.push_back(i);
@@ -1938,7 +1946,7 @@ namespace sl::menu::ui {
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Vertical covers"),
+            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Vertical covers"), T("Background art"),
             T("Columns"), T("Rows"),
             T("Box art region"), T("SteamGridDB"), T("SteamGridDB key"), T("Flow layout"),
             T("Wrap around"), T("Button hints"), T("Position counter"),
@@ -1961,6 +1969,8 @@ namespace sl::menu::ui {
         values[TH_Antialias]   = m_antialias ? T("On") : T("Off");
         values[TH_ShelfVert]   = m_shelf_vertical ? T("On") : T("Off");
         values[TH_ShelfStyle]  = m_shelf_ps ? "PS4" : "Xbox 360";
+        values[TH_Backdrop]    = m_backdrop == Backdrop::Off ? T("Off")
+                               : m_backdrop == Backdrop::Icon ? T("Game icon") : T("Screenshot");
         {
             char c[16];
             snprintf(c, sizeof(c), "%d", TileCols());

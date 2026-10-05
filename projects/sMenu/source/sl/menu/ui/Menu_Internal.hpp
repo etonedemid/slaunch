@@ -26,7 +26,7 @@ namespace sl::menu::ui {
     // has; a stale hand-counted number there silently makes the last row
     // untappable.
     enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_ShelfVert, TH_TileCols, TH_TileRows,
+           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_ShelfVert, TH_Backdrop, TH_TileCols, TH_TileRows,
            TH_TdbRegion, TH_Sgdb, TH_SgdbKey, TH_FlowSet, TH_Wrap,
            TH_Hints, TH_Counter, TH_RetroArch, TH_Shortcuts, TH_Fonts,
            TH_Language, TH_Music,
@@ -665,6 +665,11 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v1.5.2" },
+            { false, "Game art behind the shelf like the PS4: screenshots and key art (Theming > Background art)" },
+            { false, "PS4 Shelf keeps the games you passed visible on the left" },
+            { false, "Soft sound when the cursor moves (replace sounds/move.wav to change it)" },
+            { false, "Fixed games that pick their own players asking for the user again and again" },
             { true,  "v1.5.0" },
             { false, "New Shelf style like the PS4 home screen - Shelf is now the default layout" },
             { false, "Runs on SDL3 and Vulkan: smoother 60 fps scrolling and effects" },

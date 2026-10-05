@@ -81,7 +81,12 @@ namespace sl::sys::app {
     }
 
     // The first creation that failed, or 0.
-    static Result EnsureSaves(u64 app_id, AccountUid user) {
+    // `wants_user`: the NACP's StartupUserAccount is set. A game that has it
+    // at None picks its players itself; handing it a preselected user anyway
+    // opens that account for it, and picking the same one in the game's own
+    // selector then loops. Unknown (no NACP) keeps the old behaviour.
+    static Result EnsureSaves(u64 app_id, AccountUid user, bool &wants_user) {
+        wants_user = true;
         auto ctl = std::make_unique<NsApplicationControlData>();
         u64 got = 0;
         const Result rc = nsGetApplicationControlData(NsApplicationControlSource_Storage, app_id,
@@ -90,15 +95,16 @@ namespace sl::sys::app {
                   user.uid[0], user.uid[1], rc);
         if (R_FAILED(rc)) return 0;   // no NACP: launch as before
         const NacpStruct &n = ctl->nacp;
-        DaemonLog("save: nacp account=0x%lx device=0x%lx temp=0x%lx cache=0x%lx bcat=0x%lx",
-                  n.user_account_save_data_size, n.device_save_data_size,
+        wants_user = n.startup_user_account != 0;
+        DaemonLog("save: nacp user=%d account=0x%lx device=0x%lx temp=0x%lx cache=0x%lx bcat=0x%lx",
+                  n.startup_user_account, n.user_account_save_data_size, n.device_save_data_size,
                   n.temporary_storage_size, n.cache_storage_size,
                   n.bcat_delivery_cache_storage_size);
         const u64 owner = n.save_data_owner_id;
         // Every save is still tried after one fails; the first failure decides.
         Result first = 0;
         auto keep = [&](Result r) { if (R_FAILED(r) && !first) first = r; };
-        if (accountUidIsValid(&user))
+        if (wants_user && accountUidIsValid(&user))
             keep(EnsureSave(app_id, owner, user, FsSaveDataType_Account, FsSaveDataSpaceId_User,
                        n.user_account_save_data_size, n.user_account_save_data_journal_size));
         keep(EnsureSave(app_id, owner, {}, FsSaveDataType_Device, FsSaveDataSpaceId_User,
@@ -119,13 +125,14 @@ namespace sl::sys::app {
         nsTouchApplication(app_id);
         // Launching anyway would only start a game that aborts on its save
         // mount; the caller tells the user why instead.
-        if (const Result src = EnsureSaves(app_id, user); IsNoSpace(src))
+        bool wants_user = true;
+        if (const Result src = EnsureSaves(app_id, user, wants_user); IsNoSpace(src))
             return src;
 
         Result rc = appletCreateApplication(&g_AppHolder, app_id);
         if (rc != 0) return rc;
 
-        rc = PushUserParam(user);
+        rc = wants_user ? PushUserParam(user) : 0;
         if (rc == 0) {
             // Release foreground so the app can acquire it
             appletUnlockForeground();

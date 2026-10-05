@@ -642,8 +642,17 @@ static void PumpAppletMessages() {
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
         switch (msg) {
             case Msg_DetectShortPressingHomeButton:  HandleHomeButton(); break;
+            // Logged so a sleep that ends in a black screen (an omm fatal
+            // after a refused power transition) shows whether we started it.
             case Msg_DetectShortPressingPowerButton:
-            case Msg_AutoPowerDown:                  pwr::Sleep();       break;
+            case Msg_AutoPowerDown:
+                DaemonLog("power: %s -> sleep (menu=%d app=%d)",
+                          msg == Msg_AutoPowerDown ? "auto power down" : "power button",
+                          (int)la::IsMenuAlive(), (int)app::g_AppRunning);
+                if (const Result rc = pwr::Sleep(); R_FAILED(rc))
+                    DaemonLog("power: sleep request refused rc=0x%x", rc);
+                break;
+            case Msg_FinishedSleepSequence:          DaemonLog("power: woke up"); break;
             case Msg_SdCardRemoved:                  HandleSdCardRemoved(); break;
             default: break;
         }

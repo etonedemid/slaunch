@@ -202,6 +202,18 @@ namespace sl::menu::ui {
     // whole layout. Built once the selection has rested for a moment (so a
     // fast scroll does not blur every icon it passes) and cross-faded in over
     // the previous one. System entries have no artwork, and fade it out.
+    // Off the main thread: decode, scale and crop to the screen's shape. The
+    // renderer is only touched back on the main thread, in DrawSelectionBackdrop.
+    void Menu::BackdropDecodeTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        m->m_bdj_surf = DecodeCoverSurfaceCropped(m->m_bdj_path, 960, 540, 0.5f);
+        m->m_bdj_done.store(true, std::memory_order_release);
+    }
+
+    // The background behind Line, Cover and Shelf: the selected game's
+    // screenshot (PS4 style), its icon blurred, or nothing, per the Background
+    // art setting. A screenshot that is not on the card yet is fetched and
+    // decoded in the background; the blurred icon stands in meanwhile.
     void Menu::DrawSelectionBackdrop() {
         if (m_items.empty()) return;
         const MenuItem &it = m_items[std::min(m_cursor, (int)m_items.size() - 1)];
@@ -212,22 +224,91 @@ namespace sl::menu::ui {
             m_bd_moved = now;
             m_bd_pending = true;
         }
-        if (m_bd_pending && (now - m_bd_moved) * 1000 / hz >= 180) {
-            const bool artful = it.kind == ItemKind::Game || it.kind == ItemKind::Homebrew;
-            SDL_Texture *src = !artful ? nullptr
-                             : it.kind == ItemKind::Game ? m_icons.Get(it.app_id)
-                                                         : m_hb_icons.Get(it.hb_icon);
-            if (!src && it.kind == ItemKind::Game) src = FlowCover(it);   // box art will do
-            if (src || !artful) {
-                if (m_bd_old) m_gfx->FreeImage(m_bd_old);
-                m_bd_old = m_bd_cur;
-                m_bd_cur = src ? m_gfx->Blurred(src, 32) : nullptr;
-                m_bd_tick = now;
-                m_bd_pending = false;
+        auto show = [&](SDL_Texture *tex) {
+            if (m_bd_old) m_gfx->FreeImage(m_bd_old);
+            m_bd_old = m_bd_cur;
+            m_bd_cur = tex;
+            m_bd_tick = now;
+            m_bd_pending = false;
+        };
+
+        // A screenshot decode finished: show it if its game is still selected.
+        if (m_bdj_running && m_bdj_done.load(std::memory_order_acquire)) {
+            threadWaitForExit(&m_bdj_thread);
+            threadClose(&m_bdj_thread);
+            m_bdj_running = false;
+            if (!m_bdj_surf) m_bd_noshot.insert(m_bdj_id);
+            else {
+                if (m_bdj_id == it.app_id && it.kind == ItemKind::Game) {
+                    // RGB565 has no alpha, so the texture would come out with
+                    // blending off and ignore the dimming and crossfade.
+                    SDL_Texture *tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_bdj_surf);
+                    if (tex) SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+                    show(tex);
+                }
+                SDL_DestroySurface(m_bdj_surf);
+                m_bdj_surf = nullptr;
             }
         }
+
+        bool shot = false;   // the current background is a screenshot
+        if (m_bd_pending) {   // at once: no settle delay, the crossfade covers the change
+            const bool game = it.kind == ItemKind::Game && it.app_id != 0;
+            bool wait = false;
+            if (m_backdrop == Backdrop::Screenshot && game && !m_bd_noshot.count(it.app_id)) {
+                // A screenshot first; the wide key art (hero) is the PS4's own
+                // kind of background and far more titles have one.
+                struct stat st {};
+                bool found = false;
+                for (const char *suffix : { "_s0.jpg", "_hero.jpg" }) {
+                    snprintf(m_bdj_path, sizeof(m_bdj_path), "sdmc:/slaunch/covers/%016llX%s",
+                             (unsigned long long)it.app_id, suffix);
+                    if (stat(m_bdj_path, &st) == 0) { found = true; break; }
+                }
+                if (found) {
+                    wait = true;   // decoding; the old background stays until it lands
+                    if (!m_bdj_running) {
+                        m_bdj_id = it.app_id;
+                        m_bdj_done.store(false, std::memory_order_release);
+                        if (R_SUCCEEDED(threadCreate(&m_bdj_thread, &Menu::BackdropDecodeTrampoline,
+                                                     this, nullptr, 0x20000, 0x3B, -2))) {
+                            threadStart(&m_bdj_thread);
+                            m_bdj_running = true;
+                        } else {
+                            m_bd_noshot.insert(it.app_id);
+                            wait = false;
+                        }
+                    }
+                } else {
+                    m_bd_noshot.insert(it.app_id);   // the icon for now; a fetch may bring one
+                    StartCoverFetch(it.app_id, it.name, true);
+                }
+            }
+            if (!wait) {
+                if (m_backdrop == Backdrop::Off) {
+                    show(nullptr);
+                } else {
+                    const bool artful = game || it.kind == ItemKind::Homebrew;
+                    SDL_Texture *src = !artful ? nullptr
+                                     : game ? m_icons.Get(it.app_id) : m_hb_icons.Get(it.hb_icon);
+                    if (!src && game) src = FlowCover(it);   // box art will do
+                    if (src || !artful) show(src ? m_gfx->Blurred(src, 32) : nullptr);
+                }
+            }
+        }
+        // The downloader does one title at a time; a request made while it was
+        // busy with another is retried here once it is free.
+        if (m_backdrop == Backdrop::Screenshot && it.kind == ItemKind::Game && it.app_id &&
+            !m_bd_pending && m_bd_noshot.count(it.app_id) && !m_bd_fetch_tried.count(it.app_id) &&
+            !m_cover_running && (now - m_bd_moved) * 1000 / hz >= 600)
+            StartCoverFetch(it.app_id, it.name, true);
+
+        shot = m_backdrop == Backdrop::Screenshot && it.kind == ItemKind::Game &&
+               !m_bd_noshot.count(it.app_id) && m_bd_cur != nullptr;
         const float f = std::min(1.0f, (float)((now - m_bd_tick) * 1000 / hz) / 350.0f);
-        const float strength = 120.0f;
+        // A screenshot is sharp, so it sits further back than a blurred icon
+        // to keep the tiles and text in front of it readable.
+        const float strength = shot ? 90.0f : 120.0f;
         if (m_bd_old && f < 1.0f) m_gfx->DrawCover(m_bd_old, (Uint8)(strength * (1.0f - f)));
         if (m_bd_cur)             m_gfx->DrawCover(m_bd_cur, (Uint8)(strength * f));
         if (f >= 1.0f && m_bd_old) { m_gfx->FreeImage(m_bd_old); m_bd_old = nullptr; }

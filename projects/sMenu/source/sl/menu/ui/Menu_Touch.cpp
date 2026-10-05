@@ -518,7 +518,7 @@ namespace sl::menu::ui {
         }
         if (m_ui_mode == UiMode::Shelf && m_shelf_ps) {   // PS4 row (see DrawMainShelfPs)
             const int total = last + 1;
-            for (int i = std::max(0, (int)m_scroll_pos - 1); i < total; i++) {
+            for (int i = std::max(0, (int)m_scroll_pos - 3); i < total; i++) {
                 float px, sz;
                 PsPlace((float)i - m_scroll_pos, px, sz);
                 if (px > gfx::Gfx::Width) break;
