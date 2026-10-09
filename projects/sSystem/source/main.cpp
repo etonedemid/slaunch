@@ -978,6 +978,7 @@ namespace ams {
         ::LaunchMenu();
 
         // qlaunch must never terminate.
+        u32 hb_poll = 0;
         while (true) {
             // Drain commands the menu queued (readable even just after it
             // exits, so the final launch/open request is not missed).
@@ -1001,6 +1002,15 @@ namespace ams {
                     DaemonLog("app: relaunching sMenu after app exit");
                     ::LaunchMenu();
                 }
+            }
+
+            // A request dropped while the menu sits idle (switch-debug's "launch",
+            // scripts): close the menu and run it. Checked about once a second.
+            if (++hb_poll % 60 == 0 && g_Pending == Pending::None && !app::g_AppRunning &&
+                la::IsMenuAlive() && ChainQueuedHomebrew()) {
+                DaemonLog("hb_queue: launching %s from the menu", g_PendingHbPath);
+                la::StopMenu();
+                RunPendingActions();
             }
 
             // The menu applet closed -> carry out whatever it asked for.
