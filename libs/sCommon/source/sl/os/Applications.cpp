@@ -51,15 +51,19 @@ namespace sl::os {
     }
 
     std::string GetAppName(const NacpStruct &nacp) {
+        // The title array moved into a union in libnx master (titles can be
+        // stored compressed since 21.0.0). The daemon builds against libnx
+        // master, the menu against the packaged libnx (SL_LIBNX_MASTER).
+#ifdef SL_LIBNX_MASTER
+        const NacpLanguageEntry *lang = nacp.lang_data.lang;
+#else
+        const NacpLanguageEntry *lang = nacp.lang;
+#endif
         // Priority order: English, then any non-empty entry
-        auto pick = [](const NacpStruct &n) -> const NacpLanguageEntry* {
-            // English (AmericanEnglish = index 0)
-            if (n.lang[0].name[0] != '\0') return &n.lang[0];
-            for (int i = 1; i < 16; i++)
-                if (n.lang[i].name[0] != '\0') return &n.lang[i];
-            return nullptr;
-        };
-        const auto *e = pick(nacp);
+        const NacpLanguageEntry *e = nullptr;
+        if (lang[0].name[0] != '\0') e = &lang[0];   // English (AmericanEnglish = index 0)
+        for (int i = 1; !e && i < 16; i++)
+            if (lang[i].name[0] != '\0') e = &lang[i];
         if (!e) return "Unknown";
         char name[129] = {};
         strncpy(name, e->name, 128);

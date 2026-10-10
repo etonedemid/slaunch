@@ -665,6 +665,8 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v1.5.3" },
+            { false, "Works on system update 23.0.1 (built for Atmosphere 1.12.0)" },
             { true,  "v1.5.2" },
             { false, "Game art behind the shelf like the PS4: screenshots and key art (Theming > Background art)" },
             { false, "PS4 Shelf keeps the games you passed visible on the left" },

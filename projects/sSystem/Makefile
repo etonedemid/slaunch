@@ -19,13 +19,18 @@ OUTDIR   := $(SDOUT)/atmosphere/contents/0100000000001000/exefs
 
 #---------------------------------------------------------------------------------
 # devkitPro toolchain
+# libstratosphere from Atmosphere 1.12.0 (the release with 23.0.0 support) needs
+# libnx newer than the packaged 4.12.0 (pgl calls added for 23.0.0), so the
+# daemon builds against a libnx master install. Built with the old pair, the
+# daemon did not bring 23.0.x consoles up. Override with LIBNX=... if needed.
+LIBNX ?= $(HOME)/Desktop/Projects/switch/libnx-master-install/opt/devkitpro/libnx
 include $(DEVKITPRO)/libnx/switch_rules
 
 #---------------------------------------------------------------------------------
 # App metadata
 APP_TITLE   := sSystem
 APP_AUTHOR  := sLaunch
-APP_VERSION := 1.5.2
+APP_VERSION := 1.5.3
 
 #---------------------------------------------------------------------------------
 # Compiler flags
@@ -35,7 +40,7 @@ ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 # the flags Atmosphere itself is built with (see libraries/config/*.mk).
 ATMOSPHERE_DEFINES := -DATMOSPHERE -DATMOSPHERE_ARCH_ARM64 -DATMOSPHERE_ARCH_ARM_V8A \
                      -DATMOSPHERE_BOARD_NINTENDO_NX -DATMOSPHERE_OS_HORIZON -D__SWITCH__ \
-                     -DATMOSPHERE_IS_STRATOSPHERE -D_GNU_SOURCE
+                     -DATMOSPHERE_IS_STRATOSPHERE -D_GNU_SOURCE -DSL_LIBNX_MASTER
 
 CFLAGS    = -g -Wall -O2 -ffunction-sections -fdata-sections -fno-strict-aliasing -fwrapv \
             -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector \
