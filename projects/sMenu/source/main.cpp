@@ -857,6 +857,7 @@ int main() {
         if (!first_frame_logged) {
             first_frame_logged = true;
             BootLog("applet: first frame drawn");
+            sl::smi::SendMenuCommand(sl::smi::SystemMessage::MenuReady);
             if (ui.UsbTransfer())    // USB file transfer, for as long as the menu is up
                 menu::usb::MtpStart();
         }

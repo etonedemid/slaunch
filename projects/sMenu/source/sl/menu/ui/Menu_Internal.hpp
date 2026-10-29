@@ -682,6 +682,7 @@ namespace sl::menu::ui {
             { false, "HOME from a game waits for the console to hand over the screen before the menu opens, which fixes the freezes on HOME" },
             { false, "Sleep, Restart and Power off from the HOME button's hold menu work" },
             { false, "After waking from sleep, the game gets the screen back properly" },
+            { false, "If the menu does not come up after a game closes, the console starts it again instead of staying on a black screen" },
             { false, "Fixed v1.5.8 starting a second sleep while the console was already going to sleep" },
             { false, "Add homebrew to the main menu from the X menu, or from any .nro in the file browser (X > Add to menu)" },
             { false, "Image wallpapers load faster: the first launch saves a ready-to-draw copy" },

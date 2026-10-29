@@ -66,6 +66,12 @@ static u64  g_MenuLaunchTick = 0;
 // A menu that exits this fast without ever talking to us did not come up.
 static constexpr u64 MenuFastExitMs = 3000;
 static int  g_MenuFastExits  = 0;
+// A menu that is still silent this long after launch never started (seen after
+// a game exited following an auto-sleep: am took the applet, sMenu never ran,
+// and the daemon waited on it forever). Normal first frame is under 1 s, the
+// slowest cold boot seen about 3 s.
+static constexpr u64 MenuReadyTimeoutMs = 10000;
+static int  g_MenuSilentRelaunches = 0;
 
 static void LaunchMenu();   // defined below
 static void SleepWithMenu();
@@ -711,6 +717,7 @@ static void DrainSMIQueue() {
 
         if (hdr.magic == Magic) {
             g_MenuTalked = true;   // whatever is in the slot really is sMenu
+            g_MenuSilentRelaunches = 0;
             DispatchCommand(static_cast<SystemMessage>(hdr.val), &payload);
         }
     }
@@ -1216,6 +1223,9 @@ namespace ams {
                     RunPendingActions();
                 } else {
                     DaemonLog("app: relaunching sMenu after app exit");
+                    // Take the screen back first, as on HOME: after a wake that
+                    // resumed the game, am may not hand it to us on its own.
+                    appletRequestToGetForeground();
                     ::LaunchMenu();
                 }
             }
@@ -1227,6 +1237,19 @@ namespace ams {
                 DaemonLog("hb_queue: launching %s from the menu", g_PendingHbPath);
                 la::StopMenu();
                 RunPendingActions();
+            }
+
+            // The menu was started but never drew a frame: replace it. Capped so
+            // a menu older than the MenuReady ping does not restart forever.
+            if (la::IsMenuAlive() && !g_MenuTalked && g_MenuSilentRelaunches < 2 &&
+                (armGetSystemTick() - g_MenuLaunchTick) * 1000 / armGetSystemTickFreq()
+                    >= MenuReadyTimeoutMs) {
+                g_MenuSilentRelaunches++;
+                DaemonLog("menu: no word %llums after launch - relaunching (%d)",
+                          (unsigned long long)MenuReadyTimeoutMs, g_MenuSilentRelaunches);
+                la::StopMenu();
+                appletRequestToGetForeground();
+                ::LaunchMenu();
             }
 
             // The menu applet closed -> carry out whatever it asked for.

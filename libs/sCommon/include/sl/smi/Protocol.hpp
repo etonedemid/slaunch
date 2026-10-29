@@ -41,6 +41,7 @@ namespace sl::smi {
         PowerReboot,
         PowerShutdown,
         RebootToPayload,       // chainload a payload (hekate, ...) on reboot
+        MenuReady,             // first frame is up; the daemon's startup watchdog stands down
     };
 
     // Events: sSystem -> sMenu (async)
