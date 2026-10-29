@@ -37,7 +37,7 @@ static AccountUid g_SelectedUser = {};
 enum class Pending {
     None, LaunchApp, ResumeApp, OpenAlbum, OpenUserPage, OpenNetConnect,
     OpenMiiEdit, OpenWebBrowser, OpenControllers, OpenHomebrewMenu,
-    OpenHomebrew, LaunchHomebrewApp, OpenSystemSettings,
+    OpenHomebrew, LaunchHomebrewApp, OpenSystemSettings, RestartMenu,
     Reboot, Shutdown, RebootPayload,
 };
 static Pending g_Pending      = Pending::None;
@@ -216,6 +216,47 @@ static bool ChainQueuedHomebrew() {
     return true;
 }
 
+// Restart only sMenu while leaving sSystem and any suspended application alive.
+// This is shared by the normal sMenu RestartMenu command and the external
+// recovery request used when sMenu itself is frozen and cannot send SMI.
+static void RestartMenuNow(const char *source) {
+    g_Pending = Pending::None;
+
+    // If the holder has already disappeared, restore system foreground before
+    // creating a new library applet. Without this handoff a valid new holder can
+    // remain black because the compositor still has stale foreground state.
+    if (!la::g_MenuRunning) {
+        const Result focus_rc = app::FocusSystem();
+        DaemonLog("menu: %s restart - no holder, FocusSystem rc=0x%x", source, focus_rc);
+        ::LaunchMenu();
+        return;
+    }
+
+    DaemonLog("menu: %s restart - stopping and relaunching sMenu", source);
+    la::StopMenu();
+    ::LaunchMenu();
+}
+
+// Poll the documented one-shot recovery request. The file is removed before
+// acting so a daemon restart or failed relaunch cannot turn one request into a
+// restart loop. A foreground game is intentionally left alone.
+static void PollExternalMenuRestart() {
+    struct stat st;
+    if (stat(MenuRestartRequestPath, &st) != 0) return;
+
+    if (remove(MenuRestartRequestPath) != 0) {
+        DaemonLog("menu: external restart request could not be consumed (errno %d)", errno);
+        return;
+    }
+
+    if (!la::g_MenuRunning && app::g_AppRunning && app::g_AppHasFocus) {
+        DaemonLog("menu: external restart ignored while application is foreground");
+        return;
+    }
+
+    RestartMenuNow("external");
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch one SystemMessage from sMenu
 static void DispatchCommand(SystemMessage msg, const void *payload) {
@@ -292,6 +333,8 @@ static void DispatchCommand(SystemMessage msg, const void *payload) {
             break;
         }
         case SystemMessage::RestartMenu:
+            g_Pending = Pending::RestartMenu;
+            break;
         case SystemMessage::TerminateMenu:
         default:
             break;
@@ -423,6 +466,9 @@ static void RunPendingAction() {
     EnsureSdMounted();
 
     switch (p) {
+        case Pending::RestartMenu:
+            RestartMenuNow("menu");
+            break;
         case Pending::LaunchApp: {
             EnsureUser();
             // Picked for this launch only; the menu keeps its own user.
@@ -1068,11 +1114,13 @@ namespace ams {
         // Before the menu, so a request left behind by a crash or a power cut
         // cannot be picked up as this boot's first action.
         hb::LaunchQueue::Reset();
+        remove(MenuRestartRequestPath);
 
         ::LaunchMenu();
 
         // qlaunch must never terminate.
         u32 hb_poll = 0;
+        u32 recovery_poll = 0;
         while (true) {
             // Drain commands the menu queued (readable even just after it
             // exits, so the final launch/open request is not missed).
@@ -1081,6 +1129,11 @@ namespace ams {
 
             // HOME / power-button / sleep messages from Horizon.
             PumpAppletMessages();
+
+            // External recovery request from an overlay or other SD-side tool.
+            // Once per second is responsive enough without stat() on every frame.
+            if (++recovery_poll % 60 == 0)
+                PollExternalMenuRestart();
 
             // A running game exited on its own -> back to the menu. Only check
             // when the menu is NOT up: while the menu is open over a suspended

@@ -89,6 +89,11 @@ namespace sl::smi {
     // it as a status message and deletes the file.
     constexpr const char *PowerErrorPath = "sdmc:/slaunch/config/power_err.txt";
 
+    // One-shot external recovery request. Tools outside sMenu (for example an
+    // overlay) can create this file when sMenu is unresponsive. sSystem consumes
+    // it and restarts only the menu applet; the console and suspended game stay up.
+    constexpr const char *MenuRestartRequestPath = "sdmc:/slaunch/config/restart_menu.request";
+
     // Passed from sSystem -> sMenu at startup via input storage
     struct SystemStatus {
         AccountUid selected_user;

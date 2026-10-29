@@ -71,6 +71,10 @@ romfs_stage:
 	@mkdir -p $(ROMFS)/payload
 	@cp -r $(SDOUT)/atmosphere $(ROMFS)/payload/ 2>/dev/null || true
 	@cp -r $(SDOUT)/slaunch    $(ROMFS)/payload/ 2>/dev/null || true
+	@# Optional UltraHand package shipped by sLaunch. Keep it under switch/.packages
+	@# so the installer copies it to the same location UltraHand already scans.
+	@mkdir -p $(ROMFS)/payload/switch
+	@cp -r $(SDOUT)/switch/.packages $(ROMFS)/payload/switch/ 2>/dev/null || true
 	@cp ../../icon.png $(ROMFS)/icon.png 2>/dev/null || true
 	@# Boot splash, already in Atmosphere's package3 layout (see InstallSplash).
 	@cp -f ../../assets/splash.bin $(ROMFS)/splash.bin 2>/dev/null || true

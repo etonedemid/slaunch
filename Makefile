@@ -97,6 +97,10 @@ assets: hbloader
 	@# but that is written at runtime and never staged from here.
 	@mkdir -p SdOut/slaunch/covers
 	@cp -f assets/covers/*.png SdOut/slaunch/covers/ 2>/dev/null || true
+	@# UltraHand convenience package for the external sMenu recovery hook.
+	@# UltraHand is optional; this file is inert when UltraHand is not installed.
+	@mkdir -p "SdOut/switch/.packages/sLaunch Control"
+	@cp -f assets/ultrahand/slaunch-control/package.ini "SdOut/switch/.packages/sLaunch Control/package.ini"
 
 ssystem:
 	@echo "--- Building sSystem ---"
