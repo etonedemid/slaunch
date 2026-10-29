@@ -57,6 +57,9 @@ namespace sl::menu::gfx {
 
         // Images
         SDL_Texture *LoadImage(const char *path);   // nullptr on failure
+        // A full-screen still wallpaper, from a pre-scaled copy in the card's
+        // cache when there is one (see the .cpp).
+        SDL_Texture *LoadWallpaper(const char *path);
         // Load a system-entry icon (a white shape on a solid field). Icons that
         // carry no real alpha channel would blit their field as an opaque black
         // square, welding the background into the artwork; this turns their
@@ -263,6 +266,8 @@ namespace sl::menu::gfx {
         bool Quad3DGpu(SDL_Texture *tex, const float c[4][3], SDL_Color tint,
                        Uint8 alpha_top, Uint8 alpha_bottom, bool flip_v, const float uv[4]);
         SDL_Surface *ScaleSurface(SDL_Surface *raw, int w, int h);     // frees raw
+        SDL_Surface *CoverSurface(SDL_Surface *raw, int w, int h, float biasY);   // frees raw
+        static constexpr const char *kWallCacheDir = "sdmc:/slaunch/cache/wallpaper";
         void SetLogical();   // 1280x720 layout on the current target, if scaled
         struct Perf {
             Uint64 frame_start = 0, window_start = 0;

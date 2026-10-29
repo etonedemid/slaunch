@@ -1708,6 +1708,9 @@ namespace sl::menu::ui {
         if (it.kind == ItemKind::Game && m_suspended != 0 && it.app_id == m_suspended)
             m_options.push_back({ T("Close game"), OptCloseGame });
         m_options.push_back({ std::string(T("Sort: ")) + SortLabel(), OptSort });
+        // Pinning lives in the homebrew list (X there); this is the way to it
+        // from wherever the cursor is.
+        m_options.push_back({ T("Add homebrew"), OptAddHomebrew });
         m_options.push_back({ T("Cancel"), OptDismiss });
     }
     const char *Menu::SortLabel() const {
@@ -1780,6 +1783,10 @@ namespace sl::menu::ui {
                 SetStatus(m_hb_donor ? "Homebrew donor set (browser Y: run as app)"
                                      : "Homebrew donor cleared");
                 m_options_open = false;
+                return Action::None;
+            case OptAddHomebrew:
+                m_options_open = false;
+                OpenHomebrewBrowser();
                 return Action::None;
             case OptSort:
                 m_sort = (SortMode)(((int)m_sort + 1) % (int)SortMode::Count);
@@ -2147,7 +2154,7 @@ namespace sl::menu::ui {
     // only a stepping stone and is freed again; if render targets are not
     // available the sharp image is returned instead, which beats no wallpaper.
     SDL_Texture *Menu::BlurImage(const char *path) {
-        SDL_Texture *sharp = path ? m_gfx->LoadImage(path) : nullptr;
+        SDL_Texture *sharp = path ? m_gfx->LoadWallpaper(path) : nullptr;
         if (!sharp) return nullptr;
         const int radius = std::clamp(m_theme.Current().wallpaper_blur_radius, 2, 32);
         SDL_Texture *soft = m_gfx->Blurred(sharp, radius);
@@ -2217,7 +2224,7 @@ namespace sl::menu::ui {
                     // comes from the file on its own path, so nothing needs it.
                     const bool need_sharp = !t.wallpaper_blur;
                     m_wallpaper_path = t.wallpaper;
-                    if (need_sharp) m_wallpaper = m_gfx->LoadImage(t.wallpaper);
+                    if (need_sharp) m_wallpaper = m_gfx->LoadWallpaper(t.wallpaper);
                     reloadBlur();
                 }
             }

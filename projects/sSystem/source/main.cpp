@@ -378,21 +378,13 @@ static void EnsureUser() {
 // qlaunch-only applet messages that libnx's AppletMessage_ enum omits (only the
 // system applet receives them). Values from Horizon `am` / uLaunch.
 enum SystemAppletMessage : u32 {
+    Msg_ChangeIntoForeground           = 1,
+    Msg_ChangeIntoBackground           = 2,
     Msg_DetectShortPressingHomeButton  = 20,
-    Msg_DetectShortPressingPowerButton = 22,
-    Msg_RequestToPrepareSleep          = 25,   // the HOME long-press menu's "Sleep"
     Msg_FinishedSleepSequence          = 26,
-    Msg_SleepRequiredByHighTemperature = 27,
-    Msg_SleepRequiredByLowBattery      = 28,
-    Msg_AutoPowerDown                  = 29,
     Msg_SdCardRemoved                  = 33,
 };
-
-static bool IsSleepMessage(u32 msg) {
-    return msg == Msg_DetectShortPressingPowerButton || msg == Msg_AutoPowerDown ||
-           msg == Msg_RequestToPrepareSleep || msg == Msg_SleepRequiredByHighTemperature ||
-           msg == Msg_SleepRequiredByLowBattery;
-}
+using la::IsSleepMessage;   // power button, idle, heat, battery, TV standby
 
 // Theming > "Start as user": an account to boot straight into, skipping the
 // player select. Written by the menu as two hex words; absent = Off. Ignored
@@ -436,6 +428,12 @@ static bool PickUser(AccountUid &out) {
             } else if (msg == Msg_FinishedSleepSequence) {
                 DaemonLog("power: woke up");
             }
+        }
+        while (la::PopGeneralChannel(msg)) {
+            DaemonLog("general channel: msg %u during player select", msg);
+            if (msg == la::Gc_Sleep) pwr::Sleep();
+            else if (msg == la::Gc_Shutdown) pwr::Shutdown();
+            else if (msg == la::Gc_Reboot)   pwr::Reboot();
         }
         svcSleepThread(16'666'666ULL);
     }
@@ -736,7 +734,37 @@ static void HandleSdCardRemoved() {
 //  - in a game        -> suspend it (keep it running) and show the menu
 //  - in the menu with
 //    a suspended game -> close the menu and resume the game
+// HOME from a game is a two-step handover. appletRequestToGetForeground only
+// queues the switch; am confirms it with ChangeIntoForeground. Starting the
+// menu applet before that confirmation races qlaunch's own foreground
+// transition - the freezes on HOME where even the power button stops working
+// (issues #14, #15). SwitchU, the most stable of the qlaunch replacements,
+// waits for the confirmation; this does the same.
+static bool g_HomePending     = false;
+static u64  g_HomePendingTick = 0;
+
+// Give vi a moment after the game loses the screen before the menu creates its
+// layer (SwitchU's tested value with a game suspended underneath).
+static constexpr u64 kHomeSettleNs = 300'000'000ULL;
+// Fallback when the confirmation never comes, so HOME cannot be lost for good.
+static constexpr u64 kHomeConfirmTimeoutMs = 1500;
+
+static void FinishHome(const char *why) {
+    if (!g_HomePending) return;
+    g_HomePending = false;
+    const u64 hz = armGetSystemTickFreq();
+    DaemonLog("home: foreground %s after %llums", why,
+              (unsigned long long)((armGetSystemTick() - g_HomePendingTick) * 1000 / hz));
+    svcSleepThread(kHomeSettleNs);
+    if (!la::IsMenuAlive())
+        LaunchMenu();
+}
+
 static void HandleHomeButton() {
+    if (g_HomePending) {
+        DaemonLog("home: ignored (handover already under way)");
+        return;
+    }
     if (app::g_AppRunning && app::g_AppHasFocus) {
         // Ignore HOME while the app is still coming up: suspending mid-launch
         // races the foreground handshake and faults am (crash). The user can
@@ -745,17 +773,15 @@ static void HandleHomeButton() {
             DaemonLog("home: ignored (app still launching)");
             return;
         }
-        // In a game: suspend (do NOT terminate) and bring the menu up over it.
-        const u64 t0 = armGetSystemTick();
-        app::FocusSystem();
-        const u64 t1 = armGetSystemTick();
-        if (!la::IsMenuAlive())
-            LaunchMenu();
-        const u64 t2 = armGetSystemTick();
-        const u64 hz = armGetSystemTickFreq();
-        DaemonLog("home: FocusSystem=%llums LaunchMenu=%llums",
-                  (unsigned long long)((t1 - t0) * 1000 / hz),
-                  (unsigned long long)((t2 - t1) * 1000 / hz));
+        // In a game: suspend (do NOT terminate) and bring the menu up over it,
+        // once am confirms the screen is ours (FinishHome).
+        if (const Result rc = app::FocusSystem(); R_FAILED(rc)) {
+            app::g_AppHasFocus = true;      // the game kept the screen
+            DaemonLog("home: RequestToGetForeground failed rc=0x%x", rc);
+            return;
+        }
+        g_HomePending     = true;
+        g_HomePendingTick = armGetSystemTick();
     } else if (la::IsMenuAlive() && app::g_AppRunning) {
         // In the menu with a game suspended: resume the game - unless the
         // menu had already asked for something else on its way out.
@@ -764,6 +790,14 @@ static void HandleHomeButton() {
         if (g_Pending != Pending::None) RunPendingActions();
         else                            app::Resume();
     }
+}
+
+// Called every loop: a HOME handover that am never confirmed still ends in the
+// menu, as it did before the handshake existed.
+static void CheckPendingHome() {
+    if (g_HomePending && (armGetSystemTick() - g_HomePendingTick) * 1000 / armGetSystemTickFreq()
+                             >= kHomeConfirmTimeoutMs)
+        FinishHome("not confirmed, going ahead");
 }
 
 // Sleep with the menu told first, so it stops presenting before vi and
@@ -781,31 +815,65 @@ static void SleepWithMenu() {
     }
 }
 
+// Back from sleep. A game that had the screen keeps its accessor across sleep
+// but has to be given the foreground again, as qlaunch does; otherwise the
+// next HOME finds it in a state am does not expect (issue #9). Anything else
+// means the screen is ours again.
+static void HandleWake() {
+    DaemonLog("power: woke up (menu=%d app=%d focus=%d)", (int)la::IsMenuAlive(),
+              (int)app::g_AppRunning, (int)app::g_AppHasFocus);
+    if (app::g_AppRunning && app::g_AppHasFocus && !la::IsMenuAlive()) {
+        if (const Result rc = app::Resume(); R_FAILED(rc)) {
+            DaemonLog("power: wake resume failed rc=0x%x", rc);
+            app::FocusSystem();
+        }
+    } else {
+        appletRequestToGetForeground();
+    }
+    if (la::IsMenuAlive()) PushMenuEvent(MenuMessage::SleepFinished);
+}
+
 // Process system-level applet messages (HOME, power/sleep, ...). Called from the
 // main loop whenever the menu is up or a game is running.
 static void PumpAppletMessages() {
     u32 msg = 0;
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
-        switch (msg) {
-            case Msg_DetectShortPressingHomeButton:  HandleHomeButton(); break;
+        if (IsSleepMessage(msg)) {
             // Logged so a sleep that ends in a black screen (an omm fatal
             // after a refused power transition) shows whether we started it.
-            case Msg_DetectShortPressingPowerButton:
-            case Msg_AutoPowerDown:
-            case Msg_RequestToPrepareSleep:
-            case Msg_SleepRequiredByHighTemperature:
-            case Msg_SleepRequiredByLowBattery:
-                DaemonLog("power: msg %u -> sleep (menu=%d app=%d)",
-                          msg, (int)la::IsMenuAlive(), (int)app::g_AppRunning);
-                SleepWithMenu();
+            DaemonLog("power: msg %u -> sleep (menu=%d app=%d)",
+                      msg, (int)la::IsMenuAlive(), (int)app::g_AppRunning);
+            SleepWithMenu();
+            continue;
+        }
+        switch (msg) {
+            case Msg_ChangeIntoForeground:
+                FinishHome("confirmed");   // no-op unless a HOME handover is waiting
                 break;
-            case Msg_FinishedSleepSequence:
-                DaemonLog("power: woke up");
-                if (la::IsMenuAlive()) PushMenuEvent(MenuMessage::SleepFinished);
-                break;
+            case Msg_ChangeIntoBackground:           break;
+            case Msg_DetectShortPressingHomeButton:  HandleHomeButton(); break;
+            case Msg_FinishedSleepSequence:          HandleWake(); break;
             case Msg_SdCardRemoved:                  HandleSdCardRemoved(); break;
             // Logged so a message we should act on can be found on hardware.
             default: DaemonLog("applet msg %u ignored", msg); break;
+        }
+    }
+    // The HOME-hold quick menu's buttons: these never arrive as applet
+    // messages, which is why its Sleep did nothing before.
+    while (la::PopGeneralChannel(msg)) {
+        DaemonLog("general channel: msg %u", msg);
+        switch (msg) {
+            case la::Gc_Home:  HandleHomeButton(); break;
+            case la::Gc_Sleep: SleepWithMenu(); break;
+            case la::Gc_Shutdown:
+            case la::Gc_Reboot:
+                // Same path as the menu's own power screen: the game is closed
+                // properly and the menu stopped before the power call.
+                DrainSMIQueue();
+                g_Pending = (msg == la::Gc_Reboot) ? Pending::Reboot : Pending::Shutdown;
+                RunPendingActions();
+                break;
+            default: break;
         }
     }
 }
@@ -1129,6 +1197,7 @@ namespace ams {
 
             // HOME / power-button / sleep messages from Horizon.
             PumpAppletMessages();
+            CheckPendingHome();
 
             // External recovery request from an overlay or other SD-side tool.
             // Once per second is responsive enough without stat() on every frame.

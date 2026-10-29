@@ -3091,7 +3091,7 @@ namespace sl::menu::ui {
         }
         if (b == Btn::X) {   // pin / unpin from the main menu
             ToggleHbPin(m_hb[m_hb_cursor].path);
-            SetStatus(IsHbPinned(m_hb[m_hb_cursor].path) ? "Pinned to menu" : "Unpinned");
+            SetStatus(IsHbPinned(m_hb[m_hb_cursor].path) ? T("Added to the menu") : T("Removed from the menu"));
         }
         return Action::None;
     }
@@ -3134,8 +3134,8 @@ namespace sl::menu::ui {
         // the layout arithmetic below untouched.
         if (!m_show_counter) pos[0] = '\0';
         m_gfx->Text(FontSize::Small, gfx::Gfx::Width - 150, 74, t.dim, pos);
-        DrawHint(m_hb_donor ? "A: Run as app   Y: Applet mode   X: Pin   B: Back"
-                            : "A: Launch   X: Pin to menu   B: Back");
+        DrawHint(m_hb_donor ? "A: Run as app   Y: Applet mode   X: Add to menu   B: Back"
+                            : "A: Launch   X: Add to menu   B: Back");
     }
     // ---- Widgets submenu drawing -------------------------------------------
     void Menu::DrawWidgets() {

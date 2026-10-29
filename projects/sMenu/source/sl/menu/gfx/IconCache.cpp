@@ -103,7 +103,12 @@ namespace sl::menu::gfx {
             else {
                 tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_RGBA32,
                                         SDL_TEXTUREACCESS_STATIC, m_scale, m_scale);
-                if (tex) SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+                if (!tex) {
+                    // ponytail: OOM in applet slot, return nullptr rather than crash
+                    SDL_DestroySurface(surf);
+                    return nullptr;
+                }
+                SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
             }
             if (tex && !SDL_UpdateTexture(tex, nullptr, surf->pixels, surf->pitch)) {
                 m_gfx->FreeImage(tex);
@@ -113,6 +118,11 @@ namespace sl::menu::gfx {
             // Scaling fell back to the source size (out of memory): an odd-sized
             // texture that must not enter the pool, which assumes m_scale.
             tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), surf);
+            if (!tex) {
+                // ponytail: OOM, return nullptr
+                SDL_DestroySurface(surf);
+                return nullptr;
+            }
         }
         SDL_DestroySurface(surf);
         return tex;

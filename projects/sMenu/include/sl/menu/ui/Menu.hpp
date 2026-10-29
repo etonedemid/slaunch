@@ -1404,7 +1404,7 @@ namespace sl::menu::ui {
         // ---- File manager (Menu_Files.cpp) -----------------------------------
         struct FmEntry { std::string name; bool dir = false; long long size = -1; };
         enum class FmOp { None, Copy, Move, Delete };
-        enum class FmAction { Copy, Cut, Paste, Rename, Delete, NewFolder };
+        enum class FmAction { Copy, Cut, Paste, Rename, Delete, NewFolder, AddToMenu, RemoveFromMenu };
         std::string            m_fm_path;
         std::vector<FmEntry>   m_fm_list;
         int                    m_fm_cursor = 0;

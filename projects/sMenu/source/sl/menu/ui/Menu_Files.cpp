@@ -231,6 +231,11 @@ namespace sl::menu::ui {
     std::vector<Menu::FmAction> Menu::FmActions() const {
         std::vector<FmAction> v;
         const bool have = m_fm_cursor >= 0 && m_fm_cursor < (int)m_fm_list.size();
+        // An .nro anywhere on the card can go on the main menu, not only the
+        // ones the homebrew list scans under /switch.
+        if (have && !m_fm_list[m_fm_cursor].dir && IsNro(m_fm_list[m_fm_cursor].name))
+            v.push_back(IsHbPinned(Join(m_fm_path, m_fm_list[m_fm_cursor].name))
+                        ? FmAction::RemoveFromMenu : FmAction::AddToMenu);
         if (have) { v.push_back(FmAction::Copy); v.push_back(FmAction::Cut); }
         if (!m_fm_clip.empty()) v.push_back(FmAction::Paste);
         if (have) { v.push_back(FmAction::Rename); v.push_back(FmAction::Delete); }
@@ -245,6 +250,8 @@ namespace sl::menu::ui {
             case FmAction::Rename:    return "Rename";
             case FmAction::Delete:    return "Delete";
             case FmAction::NewFolder: return "New folder";
+            case FmAction::AddToMenu:      return "Add to menu";
+            case FmAction::RemoveFromMenu: return "Remove from menu";
         }
         return "";
     }
@@ -252,6 +259,11 @@ namespace sl::menu::ui {
         const bool have = m_fm_cursor >= 0 && m_fm_cursor < (int)m_fm_list.size();
         const std::string sel = have ? Join(m_fm_path, m_fm_list[m_fm_cursor].name) : std::string();
         switch (a) {
+            case FmAction::AddToMenu:
+            case FmAction::RemoveFromMenu:
+                ToggleHbPin(sel);
+                SetStatus(IsHbPinned(sel) ? T("Added to the menu") : T("Removed from the menu"));
+                break;
             case FmAction::Copy: m_fm_clip = sel; m_fm_clip_cut = false; SetStatus("Copied"); break;
             case FmAction::Cut:  m_fm_clip = sel; m_fm_clip_cut = true;  SetStatus("Cut"); break;
             case FmAction::Paste: {

@@ -10,6 +10,8 @@
 #include <cstring>
 #include <cmath>
 #include <utility>
+#include <dirent.h>
+#include <sys/stat.h>
 
 namespace sl::menu::gfx {
 
@@ -745,13 +747,19 @@ namespace sl::menu::gfx {
         if (!surf) return nullptr;
         SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, surf);
         SDL_DestroySurface(surf);
+        if (!tex) {
+            // ponytail: log once, don't spam on every icon load failure
+            static bool logged = false;
+            if (!logged) { GfxLog("texture from surface OOM"); logged = true; }
+        }
         return tex;
     }
 
-    SDL_Texture *Gfx::LoadImageCropped(const char *path, int w, int h, float biasY) {
-        SDL_Surface *raw = IMG_Load(path);
+    // RGBA32 at exactly w x h, scaled to cover and cropped (consumes `raw`).
+    // On a failed allocation the uncropped source comes back instead - the
+    // full-size image still beats nothing.
+    SDL_Surface *Gfx::CoverSurface(SDL_Surface *raw, int w, int h, float biasY) {
         if (!raw) return nullptr;
-
         SDL_Surface *src = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
         SDL_DestroySurface(raw);
         if (!src) return nullptr;
@@ -777,17 +785,90 @@ namespace sl::menu::gfx {
         SDL_Rect crop { cx, cy, cw, ch };
 
         SDL_Surface *dst = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGBA32);
-        if (!dst) {   // out of memory: the uncropped source still beats nothing
-            SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, src);
-            SDL_DestroySurface(src);
-            return tex;
-        }
-
+        if (!dst) return src;
         SDL_BlitSurfaceScaled(src, &crop, dst, nullptr, SDL_SCALEMODE_LINEAR);
         SDL_DestroySurface(src);
+        return dst;
+    }
 
-        SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, dst);
-        SDL_DestroySurface(dst);
+    SDL_Texture *Gfx::LoadImageCropped(const char *path, int w, int h, float biasY) {
+        SDL_Surface *surf = CoverSurface(IMG_Load(path), w, h, biasY);
+        if (!surf) return nullptr;
+        SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, surf);
+        SDL_DestroySurface(surf);
+        if (!tex) GfxLog("cropped image OOM");
+        return tex;
+    }
+
+    // A still wallpaper is drawn cover-fit over the whole screen, so decoding
+    // the file itself on every launch is wasted work: a large progressive JPEG
+    // took ~250 ms of the menu's first frame. The first load crops and scales
+    // it to the render output once and keeps that as an uncompressed BMP
+    // (SDL's own writer - never libjpeg, see IMG_SaveJPG's crash); later loads
+    // read it straight back. Keyed on the file's size and mtime and the output
+    // size, so a replaced image or a changed AA setting builds a new one.
+    SDL_Texture *Gfx::LoadWallpaper(const char *path) {
+        int ow = 0, oh = 0;
+        struct stat st;
+        if (!SDL_GetRenderOutputSize(m_renderer, &ow, &oh) || ow <= 0 || oh <= 0 ||
+            stat(path, &st) != 0)
+            return LoadImage(path);
+
+        char key[FS_MAX_PATH + 64];
+        snprintf(key, sizeof(key), "%s|%lld|%lld|%dx%d", path, (long long)st.st_size,
+                 (long long)st.st_mtime, ow, oh);
+        u64 h = 1469598103934665603ULL;
+        for (const char *c = key; *c; c++) { h ^= (unsigned char)*c; h *= 1099511628211ULL; }
+        char cache[96];
+        snprintf(cache, sizeof(cache), "%s/wall_%016llX.bmp", kWallCacheDir, (unsigned long long)h);
+
+        // One read for the whole file, then parsed from memory: SDL_LoadBMP
+        // straight off the card goes through stdio in small chunks, each its
+        // own fs request, which cost more than the decode it replaced.
+        SDL_Surface *bmp = nullptr;
+        if (FILE *fp = fopen(cache, "rb")) {
+            std::vector<u8> buf;
+            if (fseek(fp, 0, SEEK_END) == 0) {
+                const long n = ftell(fp);
+                if (n > 0 && fseek(fp, 0, SEEK_SET) == 0) {
+                    buf.resize((size_t)n);
+                    if (fread(buf.data(), 1, buf.size(), fp) != buf.size()) buf.clear();
+                }
+            }
+            fclose(fp);
+            if (!buf.empty()) bmp = SDL_LoadBMP_IO(SDL_IOFromConstMem(buf.data(), buf.size()), true);
+        }
+        if (bmp) {
+            if (bmp->w == ow && bmp->h == oh) return ScaleToTexture(bmp, ow, oh);
+            SDL_DestroySurface(bmp);
+        }
+
+        SDL_Surface *surf = CoverSurface(IMG_Load(path), ow, oh, 0.5f);
+        if (!surf) return nullptr;
+        if (surf->w == ow && surf->h == oh) {
+            // One wallpaper cache at a time: the old ones are megabytes each.
+            if (DIR *d = opendir(kWallCacheDir)) {
+                while (struct dirent *e = readdir(d))
+                    if (!strncmp(e->d_name, "wall_", 5)) {
+                        char old[96];
+                        snprintf(old, sizeof(old), "%s/%s", kWallCacheDir, e->d_name);
+                        remove(old);
+                    }
+                closedir(d);
+            }
+            mkdir(kWallCacheDir, 0777);
+            // Written beside and renamed, so a power cut never leaves a torn file.
+            char tmp[104];
+            snprintf(tmp, sizeof(tmp), "%s.tmp", cache);
+            // 24-bit: a quarter less to read back than RGBA, and a wallpaper
+            // has no alpha to keep.
+            SDL_Surface *rgb = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_BGR24);
+            if (rgb && SDL_SaveBMP(rgb, tmp)) rename(tmp, cache);
+            else remove(tmp);
+            if (rgb) SDL_DestroySurface(rgb);
+        }
+        SDL_Texture *tex = SDL_CreateTextureFromSurface(m_renderer, surf);
+        SDL_DestroySurface(surf);
         return tex;
     }
 

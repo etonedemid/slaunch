@@ -516,7 +516,8 @@ namespace sl::menu::ui {
                        OptTileSize, OptTileColor, OptTileReset,
                        OptAddWidget, OptAddWidgetMenu, OptSubBack,
                        OptRemoveWidget, OptCollMenu, OptCollToggle,
-                       OptCollNew, OptCollRename, OptCollDelete, OptHide }; 
+                       OptCollNew, OptCollRename, OptCollDelete, OptHide,
+                       OptAddHomebrew }; 
 
     // ---- anonymous online count (opt-out) ----------------------------------
     inline constexpr const char *kPingUrl    = "https://hellmachine.tail10512b.ts.net/ping";
@@ -677,6 +678,15 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v1.6.0" },
+            { false, "HOME from a game waits for the console to hand over the screen before the menu opens, which fixes the freezes on HOME" },
+            { false, "Sleep, Restart and Power off from the HOME button's hold menu work" },
+            { false, "After waking from sleep, the game gets the screen back properly" },
+            { false, "Fixed v1.5.8 starting a second sleep while the console was already going to sleep" },
+            { false, "Add homebrew to the main menu from the X menu, or from any .nro in the file browser (X > Add to menu)" },
+            { false, "Image wallpapers load faster: the first launch saves a ready-to-draw copy" },
+            { false, "UltraHand users get a Restart sLaunch button (sLaunch Control) for a stuck menu (thanks 5l4k)" },
+            { false, "sInstaller's update works when run from its usual place (thanks 5l4k)" },
             { true,  "v1.5.8" },
             { false, "Sleep from the HOME button's hold menu works now" },
             { false, "Album shows PNG screenshots, PNGShot's included" },

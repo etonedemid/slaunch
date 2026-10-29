@@ -6,6 +6,7 @@
 #include <sl/menu/dbg/Crash.hpp>
 #include <switch.h>
 #include <SDL3/SDL.h>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
@@ -59,8 +60,9 @@ static bool  g_HomeAvailable = false;
 static Thread                       g_LoadThread = {};
 static std::vector<menu::ui::AppEntry> g_LoadResult;
 static std::vector<u64>             g_CachedIds;    // ids of the currently-shown list
-static volatile bool                g_LoadDone = false;
-static volatile bool                g_LoadNoChange = false; // list unchanged -> keep cache
+static Mutex                        g_LoadMutex = {};
+static std::atomic<bool>            g_LoadDone{false};
+static std::atomic<bool>            g_LoadNoChange{false}; // list unchanged -> keep cache
 static bool                         g_LoadRunning = false;
 
 // First-run setup is per account: it picks a language, a theme and an icon
@@ -322,12 +324,15 @@ static void LoadAppsTrampoline(void *) {
     // showing, do nothing (no per-app work). Only re-resolve when it changed.
     std::vector<u64> ids = CurrentAppIds();
     if (!ids.empty() && ids == g_CachedIds) {
-        g_LoadNoChange = true;
+        g_LoadNoChange.store(true, std::memory_order_release);
     } else {
-        g_LoadResult = LoadAppEntries();
-        SaveAppList(g_LoadResult);
+        auto result = LoadAppEntries();
+        SaveAppList(result);
+        mutexLock(&g_LoadMutex);
+        g_LoadResult = std::move(result);
+        mutexUnlock(&g_LoadMutex);
     }
-    g_LoadDone = true;
+    g_LoadDone.store(true, std::memory_order_release);
 }
 
 // The daemon sends this when the SD card is physically pulled while powered on.
@@ -690,9 +695,11 @@ int main() {
         // (with a "Loading" screen) instead of hanging until it's done.
         if (g_NeedAppReload && !g_LoadRunning) {
             g_NeedAppReload = false;
-            g_LoadDone = false;
-            g_LoadNoChange = false;
+            g_LoadDone.store(false, std::memory_order_relaxed);
+            g_LoadNoChange.store(false, std::memory_order_relaxed);
+            mutexLock(&g_LoadMutex);
             g_LoadResult.clear();
+            mutexUnlock(&g_LoadMutex);
             if (R_SUCCEEDED(threadCreate(&g_LoadThread, LoadAppsTrampoline, nullptr,
                                          nullptr, 0x10000, 0x3B, -2))) {
                 threadStart(&g_LoadThread);
@@ -701,14 +708,16 @@ int main() {
                 ui.SetApps(LoadAppEntries());   // fallback: synchronous
             }
         }
-        if (g_LoadRunning && g_LoadDone) {
+        if (g_LoadRunning && g_LoadDone.load(std::memory_order_acquire)) {
             threadWaitForExit(&g_LoadThread);
             threadClose(&g_LoadThread);
             g_LoadRunning = false;
-            if (!g_LoadNoChange) {              // list changed -> apply the fresh one
+            if (!g_LoadNoChange.load(std::memory_order_acquire)) {
+                mutexLock(&g_LoadMutex);
                 g_CachedIds.clear();
                 for (auto &a : g_LoadResult) g_CachedIds.push_back(a.app_id);
                 ui.SetApps(std::move(g_LoadResult));
+                mutexUnlock(&g_LoadMutex);
             }
             ui.SetLoading(false);
         }

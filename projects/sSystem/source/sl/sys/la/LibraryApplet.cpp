@@ -45,6 +45,20 @@ namespace sl::sys::la {
         g_MenuRunning = false;
     }
 
+    bool PopGeneralChannel(u32 &msg) {
+        AppletStorage st;
+        if (R_FAILED(appletPopFromGeneralChannel(&st))) return false;
+        // "SAMS" header, then the request. Read and closed whatever it holds,
+        // so storages the daemon does not understand cannot pile up in am.
+        struct { u32 magic, unk, msg, unk2; } hdr = {};
+        s64 size = 0;
+        if (R_SUCCEEDED(appletStorageGetSize(&st, &size)) && size >= (s64)sizeof(hdr))
+            appletStorageRead(&st, 0, &hdr, sizeof(hdr));
+        appletStorageClose(&st);
+        msg = (hdr.magic == 0x534D4153) ? hdr.msg : 0;
+        return true;
+    }
+
     bool IsMenuAlive() {
         if (!g_MenuRunning) return false;
         return !appletHolderCheckFinished(&g_MenuHolder);
@@ -91,14 +105,24 @@ namespace sl::sys::la {
             while (R_SUCCEEDED(appletGetMessage(&msg))) {
                 if (msg == 20 /*DetectShortPressingHomeButton*/) {
                     appletHolderRequestExitOrTerminate(&holder, 5'000'000'000ULL);
-                } else if (msg == 22 /*power*/ || msg == 29 /*auto power down*/ ||
-                           msg == 25 /*HOME long-press Sleep*/ || msg == 27 || msg == 28 /*heat, battery*/) {
+                } else if (IsSleepMessage(msg)) {
                     appletStartSleepSequence(true);
                 } else if (msg == 33 /*SD card removed*/) {
                     // Consumed here, so the main loop never sees it: do what it
                     // would, since everything we serve lives on that card.
                     appletHolderRequestExitOrTerminate(&holder, 3'000'000'000ULL);
                     pwr::Reboot();
+                }
+            }
+            // The quick menu's buttons arrive here too while an applet is up.
+            while (PopGeneralChannel(msg)) {
+                if (msg == Gc_Home) {
+                    appletHolderRequestExitOrTerminate(&holder, 5'000'000'000ULL);
+                } else if (msg == Gc_Sleep) {
+                    appletStartSleepSequence(true);
+                } else if (msg == Gc_Shutdown || msg == Gc_Reboot) {
+                    appletHolderRequestExitOrTerminate(&holder, 3'000'000'000ULL);
+                    if (msg == Gc_Reboot) pwr::Reboot(); else pwr::Shutdown();
                 }
             }
             svcSleepThread(16'666'666ULL); // ~60fps polling

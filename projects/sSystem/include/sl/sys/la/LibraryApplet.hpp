@@ -21,6 +21,28 @@ namespace sl::sys::la {
     // Push an SMI event storage into sMenu's input queue
     Result PushStorage(AppletStorage &st);
 
+    // Requests the system sends qlaunch over the general channel rather than as
+    // applet messages - the HOME-hold quick menu's Sleep/Power off/Restart among
+    // them. Values from SwitchU and uLaunch, which agree.
+    enum GeneralChannelMsg : u32 {
+        Gc_Home     = 2,
+        Gc_Sleep    = 3,
+        Gc_Shutdown = 5,
+        Gc_Reboot   = 6,
+    };
+
+    // Pops one general-channel storage. Returns false when the channel is empty;
+    // `msg` is 0 for anything that is not a well-formed request.
+    bool   PopGeneralChannel(u32 &msg);
+
+    // Applet messages that mean "go to sleep": power button, idle timeout,
+    // overheating, low battery, and the TV entering standby over HDMI-CEC.
+    // RequestToPrepareSleep (25) is deliberately absent: Horizon sends it inside
+    // a sleep already under way, so answering it starts a second one.
+    inline bool IsSleepMessage(u32 msg) {
+        return msg == 22 || msg == 27 || msg == 28 || msg == 29 || msg == 32;
+    }
+
     // Open a system library applet (album, web, mii editor, ...) and block
     // until it closes. Each applet needs a specific common-args `la_version`
     // and its own input struct(s); a negative version means "push no common
