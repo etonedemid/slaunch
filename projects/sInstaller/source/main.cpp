@@ -663,7 +663,7 @@ static void DrawSatelliteAnim(u64 elapsed_ms, SDL_Texture *nx, SDL_Texture *sat)
 
 // ---------------------------------------------------------------------------
 int main() {
-    romfsInit();
+    bool romfsMounted = R_SUCCEEDED(romfsInit());
     plInitialize(PlServiceType_User);
     socketInitializeDefault();          // bsd sockets for the online update check
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -1019,8 +1019,23 @@ int main() {
         }
 
         if (screen == Screen::Extracting) {
+            // The release zip contains switch/sInstaller/sInstaller.nro. When
+            // this installer is launched from that path, its embedded RomFS
+            // keeps the running NRO open and prevents ExtractZip() from
+            // replacing it. The update path no longer needs romfs:/payload or
+            // the bundled UI assets, so release the mount before extracting.
+            if (romfsMounted) {
+                romfsExit();
+                romfsMounted = false;
+            }
+
             ok = ExtractZip("sdmc:/slaunch_update.zip");
             remove("sdmc:/slaunch_update.zip");
+
+            // A failed update returns to the main menu, where Install/Re-install
+            // still needs romfs:/payload. Restore the mount in that case.
+            if (!ok && !romfsMounted)
+                romfsMounted = R_SUCCEEDED(romfsInit());
             // Same reasoning as a fresh Install: a stale disabled-aside copy
             // would otherwise outlive the update it was disabled before.
             if (ok) { struct stat st; if (stat(kQlaunchDisabled, &st) == 0) DeleteTree(kQlaunchDisabled); }
@@ -1050,6 +1065,6 @@ cleanup:
     SDL_DestroyWindow(win);
     SDL_Quit();
     plExit();
-    romfsExit();
+    if (romfsMounted) romfsExit();
     return 0;
 }
