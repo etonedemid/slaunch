@@ -1466,6 +1466,7 @@ namespace sl::menu::ui {
 
         // Soft-keyboard state.
         int  m_kb_purpose = 0;   // sl::smi::Kb_* constants
+        bool m_kb_to_picker = false;   // SteamGridDB key asked for by the cover picker
         u64  m_kb_app     = 0;   // context (app_id, theme index, or widget index)
         int  m_kb_opt     = 0;   // widget option index (Kb_WidgetOption)
         std::string m_kb_text; // current input buffer

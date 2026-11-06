@@ -52,9 +52,10 @@ namespace sl::menu::qext {
     void OnBackInMenu();
     // A RestartMenu command is pending. Clears it.
     bool TakeRestart();
-    // The browser was asked for. Clears it. The menu has to be gone before StartWeb.
-    bool TakeWebRequest();
-    void StartWeb(unsigned heap_mb_left);
+    // The browser, album, profile or Mii edit was asked for: they need the menu's memory.
+    bool WantsUnload();
+    // Starts it, once the menu is gone.
+    void StartUnloadedApplet(unsigned heap_mb_left);
     // A user rename, into the loader's registry. Empty restores the original name.
     void RenameTitle(u64 tid, const char *name);
 }

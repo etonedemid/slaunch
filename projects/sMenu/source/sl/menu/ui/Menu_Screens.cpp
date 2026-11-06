@@ -108,7 +108,12 @@ namespace sl::menu::ui {
                     m_sgdb_key = m_kb_text;
                     m_sgdb_key_loaded = true;
                     SetStatus(m_kb_text.empty() ? T("Key cleared") : T("Key saved"));
-                    m_screen = Screen::Theming;
+                    if (m_kb_to_picker) {       // asked for by the cover picker: search now
+                        m_kb_to_picker = false;
+                        EnterCoverPicker();
+                    } else {
+                        m_screen = Screen::Theming;
+                    }
                     break;
                 }
                 case sl::smi::Kb_Search: {
@@ -196,7 +201,10 @@ namespace sl::menu::ui {
                        (m_kb_purpose == sl::smi::Kb_WidgetOption)
                        ? Screen::WidgetOptions :
                        (m_kb_purpose == sl::smi::Kb_ThemeName)
-                       ? Screen::ThemeEditor : Screen::Main;
+                       ? Screen::ThemeEditor :
+                       (m_kb_purpose == sl::smi::Kb_SteamGridKey)
+                       ? (m_kb_to_picker ? Screen::CoverPicker : Screen::Theming) : Screen::Main;
+            m_kb_to_picker = false;
         }
         return Action::None;
     }
@@ -501,6 +509,21 @@ namespace sl::menu::ui {
             return Action::None;
         }
 
+        // Without a working key there is nothing to choose from, so ask for one here
+        // instead of sending people to find the row in Theming.
+        const PickState pick_st = (PickState)m_pick_state.load(std::memory_order_acquire);
+        if (b == Btn::A && !m_pick_running &&
+            (pick_st == PickState::NoKey || pick_st == PickState::BadKey)) {
+            m_sfx_confirm = true;
+            m_kb_purpose   = sl::smi::Kb_SteamGridKey;
+            m_kb_text      = m_sgdb_key;
+            m_kb_to_picker = true;
+            m_kb_row = m_kb_col = 0;
+            m_kb_upper = false;
+            m_screen = Screen::Keyboard;
+            return Action::None;
+        }
+
         const int have = m_pick_have.load(std::memory_order_acquire);
         if (have <= 0) return Action::None;          // nothing to move around yet
 
@@ -564,7 +587,10 @@ namespace sl::menu::ui {
         }
         if (have <= 0 && msg) {
             m_gfx->TextCentered(FontSize::Normal, W / 2, 330, t.fg, msg);
-            DrawHint({ {{"b"}, "Back"} });
+            if (st == PickState::NoKey || st == PickState::BadKey)
+                DrawHint({ {{"a"}, "Enter key"}, {{"b"}, "Back"} });
+            else
+                DrawHint({ {{"b"}, "Back"} });
             return;
         }
 

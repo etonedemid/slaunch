@@ -59,7 +59,8 @@ namespace {
 
     AccountUid g_User = {};
     bool g_Restart = false;
-    bool g_WebPending = false;
+    enum class Heavy { None, Web, Album, UserPage, MiiEdit };
+    Heavy g_Heavy = Heavy::None;   // waiting for the menu to unload
 
     bool Exists(const char *path) { struct stat st; return stat(path, &st) == 0; }
 
@@ -228,13 +229,18 @@ void OnBackInMenu() {
     else       OpenHomebrewApplet(req.nro, req.argv);
 }
 
-bool TakeWebRequest() {
-    const bool r = g_WebPending;
-    g_WebPending = false;
-    return r;
+bool WantsUnload() {
+    return g_Heavy != Heavy::None;
 }
 
-void StartWeb(unsigned heap_mb_left) {
+static Result StartUserPage() {
+    FriendsLaArg arg = {};
+    arg.hdr.type = FriendsLaArgType_ShowMyProfile;
+    arg.hdr.uid  = g_User;
+    return la::Start(AppletId_LibraryAppletMyPage, 0x10000, &arg, sizeof(arg));
+}
+
+static void StartWeb(unsigned heap_mb_left) {
     // An applet that runs out of memory takes the console with it. On hardware:
     // out of memory at 192 and 100 MB of heap, hung at 114. 64 is a guess at what
     // is low enough, so anything above it is refused instead of risking that.
@@ -250,6 +256,21 @@ void StartWeb(unsigned heap_mb_left) {
     }
     DaemonLog("qext: browser rc=0x%x", rc);
     if (R_FAILED(rc)) Fail("Could not open the browser");
+}
+
+void StartUnloadedApplet(unsigned heap_mb_left) {
+    const Heavy heavy = g_Heavy;
+    g_Heavy = Heavy::None;
+    if (heavy == Heavy::Web) { StartWeb(heap_mb_left); return; }
+    Result rc;
+    const char *fail;
+    switch (heavy) {
+        case Heavy::Album:   rc = qext_launch_applet(0); fail = "Could not open the album";   break;
+        case Heavy::MiiEdit: rc = qext_launch_applet(2); fail = "Could not open Mii edit";    break;
+        default:             rc = StartUserPage();       fail = "Could not open the profile"; break;
+    }
+    DaemonLog("qext: unloaded applet %d rc=0x%x", (int)heavy, rc);
+    if (R_FAILED(rc)) Fail(fail);
 }
 
 void RenameTitle(u64 tid, const char *name) {
@@ -285,21 +306,22 @@ Result QextCommand(SystemMessage msg, const void *payload, size_t) {
             return LaunchApp(static_cast<const PayloadAppLaunch *>(payload)->app_id);
         case SystemMessage::ResumeApplication:    return qext_resume_game();
         case SystemMessage::TerminateApplication: return qext_terminate_game();
-        case SystemMessage::OpenAlbum:            return qext_launch_applet(0);
+        case SystemMessage::OpenAlbum:
+            g_Heavy = Heavy::Album;
+            return 0;
         case SystemMessage::OpenControllers:      return qext_launch_applet(1);
-        case SystemMessage::OpenMiiEdit:          return qext_launch_applet(2);
-        case SystemMessage::OpenUserPage: {
-            FriendsLaArg arg = {};
-            arg.hdr.type = FriendsLaArgType_ShowMyProfile;
-            arg.hdr.uid  = g_User;
-            return la::Start(AppletId_LibraryAppletMyPage, 0x10000, &arg, sizeof(arg));
-        }
+        case SystemMessage::OpenMiiEdit:
+            g_Heavy = Heavy::MiiEdit;
+            return 0;
+        case SystemMessage::OpenUserPage:
+            g_Heavy = Heavy::UserPage;
+            return 0;
         case SystemMessage::OpenNetConnect: {
             const u32 type = 1;   // HomeMenu
             return la::Start(AppletId_LibraryAppletNetConnect, 1, &type, sizeof(type));
         }
         case SystemMessage::OpenWebBrowser:
-            g_WebPending = true;
+            g_Heavy = Heavy::Web;
             return 0;
         case SystemMessage::OpenSystemSettings:
             return la::Start(AppletId_LibraryAppletSet, 1);

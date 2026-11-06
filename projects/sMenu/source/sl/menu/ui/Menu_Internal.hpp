@@ -683,6 +683,10 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.0.1" },
+            { false, "The album, profile and Mii edit close the menu while they run, so they have the memory they need" },
+            { false, "Choosing a cover offers to enter your SteamGridDB key when it is missing or rejected" },
+            { false, "Backing out of the SteamGridDB key keyboard returns to Theming" },
             { true,  "v2.0.0" },
             { false, "The menu is instant now: it stays loaded, so leaving a game or applet drops you straight back into it" },
             { false, "Rebuilt on qlaunch-ext: one HOME Menu process instead of a daemon and a separate menu" },

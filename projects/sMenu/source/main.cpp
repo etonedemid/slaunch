@@ -1109,10 +1109,11 @@ static void CaptureHomeFrame() {
     free(buf);
 }
 
-// The browser does not fit in the applet pool next to the menu, so for this one
-// the menu goes away completely and starts again from nothing when it ends.
+// The browser does not fit in the applet pool next to the menu, and the album,
+// profile and Mii edit get the same room, so for these the menu goes away completely and starts
+// again from nothing when they end.
 static bool g_Unloaded = false;
-static void UnloadForWeb() {
+static void UnloadForApplet() {
     MenuShutdown();
     socketExit();          // buffers; onBoot's counterpart is in the reload below
     plExit();
@@ -1126,8 +1127,8 @@ static void UnloadForWeb() {
     FILE *blog = fopen("sdmc:/slaunch/boot.log", "a");
     const unsigned left = qext_heap_release(blog);
     if (blog) fclose(blog);
-    BootLog("qext: unloaded for the browser, heap %u MB", left);
-    menu::qext::StartWeb(left);
+    BootLog("qext: unloaded for an applet, heap %u MB", left);
+    menu::qext::StartUnloadedApplet(left);
 }
 
 // qlaunch-ext's menu interface. The loader is the HOME Menu process and owns the
@@ -1150,7 +1151,7 @@ int onBoot(NWindow *win) {
 }
 
 int loop(void) {
-    // Back from the browser: same as a fresh start.
+    // Back from an applet that needed the memory: same as a fresh start.
     if (g_Unloaded) {
         g_Unloaded = false;
         plInitialize(PlServiceType_User);
@@ -1166,8 +1167,8 @@ int loop(void) {
         if (MIX_Mixer *m = menu::audio::Mixer()) MIX_ResumeAllTracks(m);
     }
     MenuFrame();
-    if (menu::qext::TakeWebRequest()) {
-        UnloadForWeb();
+    if (menu::qext::WantsUnload()) {
+        UnloadForApplet();
         return 0;
     }
     // sLaunch Control's request (see MenuRestartRequestPath). sSystem watches for it
