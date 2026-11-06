@@ -1070,7 +1070,7 @@ static void GrowHeap() {
     // right on every firmware, so the file can override it: "total small".
     // Small is malloc's own heap, which never shrinks, so it is what the browser
     // has to live with; everything of 64 KB and up goes in the rest.
-    unsigned heap_mb = 192, small_mb = 48;
+    unsigned heap_mb = 256, small_mb = 48;
     if (FILE *fp = fopen("sdmc:/slaunch/config/qext_heap_mb.txt", "r")) {
         fscanf(fp, "%u %u", &heap_mb, &small_mb);
         fclose(fp);
