@@ -163,9 +163,9 @@ package: all
 # the installer goes in last, carrying that as its payload. Copied over an old sSystem
 # install this replaces it.
 package-qext: all
-	@./scripts/build-qext.sh
+	@sh scripts/build-qext.sh
 	@$(MAKE) -C projects/sInstaller SDOUT=../../SdOut-qext
-	@./scripts/qext/test_upgrade.sh
+	@sh scripts/qext/test_upgrade.sh
 	@rm -f slaunch-v$(RELEASE)-sd.zip
 	@cd SdOut-qext && zip -qr ../slaunch-v$(RELEASE)-sd.zip .
 	@ls -lh slaunch-v$(RELEASE)-sd.zip
