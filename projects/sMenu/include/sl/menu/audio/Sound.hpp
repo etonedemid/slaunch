@@ -30,7 +30,10 @@ namespace sl::menu::audio {
 
     class Sound {
     public:
-        void Init(bool audio_ok);   // load effects; pass Music::Init()'s result
+        // Load effects; pass Music::Init()'s result. `pack` is a folder whose
+        // files of the same names (welcome.wav, move.wav, ...) win over the
+        // default ones - a layout's own sound set. Missing files fall back.
+        void Init(bool audio_ok, const char *pack = nullptr);
         void Exit();                // free them (before the mixer is closed)
         void Play(Sfx s);
         void SetVolume(int vol);    // 0..100

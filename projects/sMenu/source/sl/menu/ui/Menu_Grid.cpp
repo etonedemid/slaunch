@@ -449,7 +449,11 @@ namespace sl::menu::ui {
                                                 SDL_TEXTUREACCESS_TARGET,
                                                 kTileWidgetW, gfx::Gfx::Height);
             if (!m_tile_wscratch) return;
+#ifdef SL_QEXT
+            SDL_SetTextureBlendMode(m_tile_wscratch, SDL_BLENDMODE_BLEND_PREMULTIPLIED);   // see LuaWidget::Render
+#else
             SDL_SetTextureBlendMode(m_tile_wscratch, SDL_BLENDMODE_BLEND);
+#endif
         }
 
         // The wall draws inside a clip rect, and that clip is in the screen's
@@ -489,6 +493,9 @@ namespace sl::menu::ui {
         const int dh = std::max(1, (int)(natH * s));
 
         SDL_SetTextureAlphaMod(m_tile_wscratch, a);
+#ifdef SL_QEXT
+        SDL_SetTextureColorMod(m_tile_wscratch, a, a, a);   // premultiplied: colour fades too
+#endif
         const SDL_FRect src{ 0, 0, (float)kTileWidgetW, (float)natH };
         const SDL_FRect dst{ r.x + (r.w - dw) / 2.0f, r.y + (r.h - dh) / 2.0f, (float)dw, (float)dh };
         m_gfx->FxClose();

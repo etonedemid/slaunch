@@ -305,6 +305,9 @@ extern "C" Result accountProfileGet(AccountProfile *p, void *userdata,
 }
 
 extern "C" Result accountProfileClose(AccountProfile *p) { (void)p; return 0; }
+// No account picture on a PC: the menu draws its placeholder.
+extern "C" Result accountProfileGetImageSize(AccountProfile *, u32 *out) { if (out) *out = 0; return SIM_UNSUPPORTED; }
+extern "C" Result accountProfileLoadImage(AccountProfile *, void *, size_t, u32 *out) { if (out) *out = 0; return SIM_UNSUPPORTED; }
 
 // ---------------------------------------------------------------------------
 extern "C" Result nifmGetCurrentIpAddress(u32 *out) {

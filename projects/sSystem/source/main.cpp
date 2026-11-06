@@ -767,6 +767,40 @@ static void FinishHome(const char *why) {
         LaunchMenu();
 }
 
+// See HomeFrameFlag. Taken while the game still has the screen, so it is the
+// game and nothing of ours; a JPEG because the raw capture is stubbed since
+// 5.0.0 and this one is not (10.0.0+). Any old frame goes first, so a failed
+// capture never leaves the previous game's picture behind.
+static void CaptureHomeFrame() {
+    remove(HomeFramePath);
+    struct stat st;
+    if (stat(HomeFrameFlag, &st) != 0) return;
+    constexpr size_t kMax = 0x80000;   // what the system's own capture uses
+    u8 *buf = (u8 *)malloc(kMax);
+    if (!buf) return;
+    const u64 t0 = armGetSystemTick();
+    u64 size = 0;
+    Result rc = capsscInitialize();
+    if (R_SUCCEEDED(rc)) {
+        rc = capsscCaptureJpegScreenShot(&size, buf, kMax, ViLayerStack_Screenshot, 100'000'000);
+        capsscExit();
+    }
+    bool ok = false;
+    if (R_SUCCEEDED(rc) && size > 0 && size <= kMax) {
+        static constexpr const char *Tmp = "sdmc:/slaunch/cache/home_frame.tmp";
+        if (FILE *fp = fopen(Tmp, "wb")) {
+            ok = fwrite(buf, 1, size, fp) == size;
+            ok = (fclose(fp) == 0) && ok;
+            ok = ok && rename(Tmp, HomeFramePath) == 0;
+            if (!ok) remove(Tmp);
+        }
+    }
+    free(buf);
+    DaemonLog("home: frame rc=0x%x %llu bytes %s in %llums", rc, (unsigned long long)size,
+              ok ? "saved" : "dropped",
+              (unsigned long long)((armGetSystemTick() - t0) * 1000 / armGetSystemTickFreq()));
+}
+
 static void HandleHomeButton() {
     if (g_HomePending) {
         DaemonLog("home: ignored (handover already under way)");
@@ -782,6 +816,7 @@ static void HandleHomeButton() {
         }
         // In a game: suspend (do NOT terminate) and bring the menu up over it,
         // once am confirms the screen is ours (FinishHome).
+        CaptureHomeFrame();
         if (const Result rc = app::FocusSystem(); R_FAILED(rc)) {
             app::g_AppHasFocus = true;      // the game kept the screen
             DaemonLog("home: RequestToGetForeground failed rc=0x%x", rc);

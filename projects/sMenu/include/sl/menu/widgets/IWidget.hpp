@@ -457,7 +457,13 @@ namespace sl::menu::widgets {
                 if (m_cacheTex) SDL_DestroyTexture(m_cacheTex);
                 m_cacheTex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32,
                                                SDL_TEXTUREACCESS_TARGET, w, gfx::Gfx::Height);
+#ifdef SL_QEXT
+                // Blending onto a clear target leaves premultiplied colour, so a
+                // straight blit darkens every soft edge a second time - text most.
+                if (m_cacheTex) SDL_SetTextureBlendMode(m_cacheTex, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+#else
                 if (m_cacheTex) SDL_SetTextureBlendMode(m_cacheTex, SDL_BLENDMODE_BLEND);
+#endif
                 m_cacheW = w;
             }
 

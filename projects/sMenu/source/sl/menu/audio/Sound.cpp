@@ -1,6 +1,8 @@
 #include <sl/menu/audio/Sound.hpp>
 #include <sl/menu/audio/Music.hpp>
 #include <SDL3_mixer/SDL_mixer.h>
+#include <cstdio>
+#include <cstring>
 
 namespace sl::menu::audio {
 
@@ -29,10 +31,21 @@ namespace sl::menu::audio {
         };
     }
 
-    void Sound::Init(bool audio_ok) {
+    void Sound::Init(bool audio_ok, const char *pack) {
         MIX_Mixer *mixer = Mixer();
         if (!audio_ok || !mixer) return;
         for (int i = 0; i < (int)Sfx::Count; i++) {
+            // A layout's own set goes first: the same file names, in its folder.
+            if (pack) {
+                const char *name = strrchr(kPaths[i][0], '/');
+                char path[160];
+                for (const char *ext : { ".wav", ".mp3" }) {
+                    snprintf(path, sizeof(path), "%s%.*s%s", pack,
+                             (int)(strlen(name) - 4), name, ext);
+                    if ((m_sfx[i] = MIX_LoadAudio(mixer, path, true))) break;
+                }
+                if (m_sfx[i]) continue;
+            }
             for (int k = 0; k < 3 && kPaths[i][k]; k++) {
                 // Decoded once, up front: an effect must start on the frame
                 // it is asked for.

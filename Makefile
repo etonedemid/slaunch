@@ -21,7 +21,7 @@
 #   dkp-pacman -S devkitA64 libnx switch-tools switch-curl switch-mbedtls
 #---------------------------------------------------------------------------------
 
-.PHONY: all ssystem smenu sinstaller hbloader nxlink clean package assets
+.PHONY: all ssystem smenu sinstaller hbloader nxlink clean package package-qext assets
 
 # Order matters: sInstaller bundles SdOut/ into its romfs, so everything that
 # stages files there (including hbloader -> assets) must run before it. Listing
@@ -51,6 +51,9 @@ assets: hbloader
 	@# .ttc: the bundled Noto Sans CJK collection (Japanese/Korean/Chinese).
 	@cp -f assets/fonts/*.ttc SdOut/slaunch/fonts/ 2>/dev/null || true
 	@cp -f assets/fonts/LICENSE-OFL.txt assets/fonts/ATTRIBUTION.md SdOut/slaunch/fonts/ 2>/dev/null || true
+	@# The Metro layout's typeface, in a subfolder so the Fonts screen does not list it.
+	@mkdir -p SdOut/slaunch/fonts/metro
+	@cp -f assets/fonts/metro/*.ttf assets/fonts/metro/LICENSE-Selawik.txt SdOut/slaunch/fonts/metro/
 	@# Default Lua widgets. example.lua is reference-only, so it is not shipped.
 	@# All ship disabled by default (Theming > Widgets turns them on).
 	@cp -f assets/widgets/weather.lua assets/widgets/auroracross.lua \
@@ -155,3 +158,16 @@ package: all
 	@cd SdOut && zip -r ../slaunch.zip .
 	@echo "Created slaunch.zip"
 	@ls -lh slaunch.zip
+
+# The qlaunch-ext build, which is what ships. scripts/build-qext.sh stages SdOut-qext/;
+# the installer goes in last, carrying that as its payload. Copied over an old sSystem
+# install this replaces it.
+package-qext: all
+	@./scripts/build-qext.sh
+	@$(MAKE) -C projects/sInstaller SDOUT=../../SdOut-qext
+	@./scripts/qext/test_upgrade.sh
+	@rm -f slaunch-v$(RELEASE)-sd.zip
+	@cd SdOut-qext && zip -qr ../slaunch-v$(RELEASE)-sd.zip .
+	@ls -lh slaunch-v$(RELEASE)-sd.zip
+
+RELEASE := $(shell sed -n 's/^APP_VERSION := //p' projects/sMenu/Makefile)

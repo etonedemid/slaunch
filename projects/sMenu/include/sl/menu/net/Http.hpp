@@ -45,6 +45,12 @@ namespace sl::menu::net {
     // after ':' or " - " allowed on either side.
     std::string SteamAppFor(const std::string &search_json, const std::string &title);
 
+    // Nintendo's store art for `title` from a store search response (flat
+    // hits of title / productImage / platform): the productImage path of the
+    // entry that really is this game, the Switch release before a Switch 2
+    // one, or "" when none is. Same matching rule as SteamAppFor.
+    std::string NintendoArtFor(const std::string &search_json, const std::string &title);
+
     // The same rule on its own: is `candidate` the game called `title`?
     bool TitlesMatch(const std::string &candidate, const std::string &title);
 

@@ -43,3 +43,6 @@ projects/sMenu/sim/slaunch-sim
 # colon is not a legal Windows filename and would break Windows tooling.
 projects/sMenu/sim/sdmc:/
 projects/sMenu/sim/shots/
+SdOut-qext/
+projects/sMenu/build-qext/
+slaunch-v*-source.tar.xz

@@ -65,7 +65,7 @@ namespace sl::menu::ui {
 
     // What the box-art worker is doing (see Menu::DrawFetchStatus). Stages run
     // top to bottom; the last three are outcomes.
-    enum class FetchStage { Idle, Lookup, Index, Scan, Save, Sgdb, Shots,
+    enum class FetchStage { Idle, Lookup, Index, Scan, Save, Sgdb, Shots, Eshop,
                             Added, NotFound, Failed };
 
     // Horizontal alignment of the main list text.
@@ -87,8 +87,9 @@ namespace sl::menu::ui {
     // Deck is the SteamOS gamepad layout: one big hero, a row of covers beside
     // it, and a row of news or widget cards under both, with the whole library
     // one button away. Appended like every mode before it - the active one is
-    // persisted by number.
-    enum class UiMode { List, Line, Grid, Cover, Shelf, XMB, Flow, Deck, Count };
+    // persisted by number. Metro is the Xbox 360's last dashboard: pivot tabs
+    // over panels of tiles, a card view of the library and the Guide on HOME.
+    enum class UiMode { List, Line, Grid, Cover, Shelf, XMB, Flow, Deck, Metro, Count };
 
     struct MenuItem {
         ItemKind    kind;
@@ -129,6 +130,7 @@ namespace sl::menu::ui {
             OpenWebBrowser, OpenControllers, OpenHomebrewMenu,
             PowerSleep, PowerReboot, PowerShutdown, PowerPayload,
             LaunchHomebrew, LaunchHomebrewApp, FinishSetup, Quit,
+            OpenSystemSettings,
         };
 
         // Path of the .nro to launch, valid when OnButton returns LaunchHomebrew[App].
@@ -184,6 +186,9 @@ namespace sl::menu::ui {
         // suspended game, if there is one - a quick way back into it that
         // doesn't care what screen is currently up. Does nothing otherwise.
         Action OnHomeButton(u64 &out_app_id);
+#ifdef SL_QEXT
+        void ShowPendingError() { ShowPowerError(); }   // the menu is not restarted to show it
+#endif
 
         void Render();
 
@@ -234,7 +239,8 @@ namespace sl::menu::ui {
                             Network, CoverPicker, Bluetooth,
                             // Deck: its side menu, the full-library grid, and the
                             // reader a news card opens into.
-                            DeckMenu, DeckLibrary, DeckNews };
+                            DeckMenu, DeckLibrary, DeckNews,
+                            MetroGames };   // Metro's "my games" card view
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower,
                             ConfirmRetroArch, ConfirmDelete,
                             CrashReport };   // a notice: one OK, no choice
@@ -268,6 +274,9 @@ namespace sl::menu::ui {
         // What an A press on m_items[m_cursor] does; also called directly by
         // DeckMenu/FlowMenu for their own selection. See its own definition.
         Action ActivateSelected(u64 &out_app_id);
+        // The same for an entry that need not be in m_items: Metro has tiles for
+        // system entries the user hid from the list.
+        Action ActivateItem(MenuItem it, u64 &out_app_id);
         Action OnButtonOptions(Btn b, u64 &out_app_id);
         Action OnButtonTheming(Btn b);
         Action OnButtonAbout(Btn b);
@@ -1391,8 +1400,8 @@ namespace sl::menu::ui {
         void CheckSysmoduleNotice();
         float        m_oobe_gallery = 0.0f;    // layout gallery position
         float        m_oobe_list    = 0.0f;    // theme list position
-        SDL_Texture *m_oobe_prev[8] = {};      // layout screenshots, loaded lazily
-        bool         m_oobe_prev_tried[8] = {};
+        SDL_Texture *m_oobe_prev[(int)UiMode::Count] = {};   // layout screenshots, loaded lazily
+        bool         m_oobe_prev_tried[(int)UiMode::Count] = {};
         SDL_Texture *OobePreview(int mode);
         void         FreeOobePreviews();
         std::vector<std::string> WrapText(gfx::FontSize fs, const std::string &text, int width);
@@ -1501,6 +1510,90 @@ namespace sl::menu::ui {
         u64        m_status_tick  = 0;
         u64        m_status_secs  = 3;   // how long the current status stays up
         bool       m_upd_told     = false;   // home notice shown for m_upd_latest
+
+        // ---- Metro: the Xbox 360 dashboard (Menu_Metro.cpp) -------------------
+        // Pivot tabs over a strip of panels, one open at a time with its
+        // neighbours peeking in at the edges; each panel is a fixed set of tiles
+        // laid out the way the 2012 dashboard laid them out. Built from m_items
+        // every frame, so it follows the list without a cache to keep in step.
+        enum MetroPanel { MP_Search, MP_Home, MP_Social, MP_Games, MP_Media, MP_Apps,
+                          MP_Settings, MP_Count };
+        enum MetroSpecial { MS_None, MS_Kind, MS_Pins, MS_Recent, MS_MyGames, MS_Search,
+                            MS_System, MS_About, MS_Gamer, MS_Spotlight };
+        struct MetroTile {
+            int x = 0, y = 0, w = 0, h = 0;   // panel space
+            int item = -1;                    // m_items index, or -1
+            int special = MS_None;
+            ItemKind kind = ItemKind::Game;   // MS_Kind: the entry it opens
+            std::string caption;
+        };
+        void   MetroBuild(int panel, std::vector<MetroTile> &out) const;
+        void   MetroRecent(std::vector<int> &out) const;   // games, last played first
+        int    MetroFindKind(ItemKind k) const;
+        int    MetroPanelX(int panel) const;
+        void   DrawMainMetro();
+        void   MetroDrawTile(const MetroTile &t, int x, int y, float scale, Uint8 a, bool focus);
+        void   MetroDrawBackdrop();
+        void   MetroDrawHints(std::initializer_list<std::pair<char, const char *>> hints, int y);
+        void   MetroDrawUser();
+        SDL_Texture *MetroFill(const MenuItem &it, SDL_Texture *src);
+        SDL_Texture *MetroAvatar();
+        bool   MetroNav(Btn b, Action &out, u64 &out_app_id);
+        Action MetroActivate(const MetroTile &t, u64 &out_app_id);
+        void   MetroSync();   // m_cursor follows the focused tile
+        // Selawik: 0 light, 1 semilight, 2 semibold; FontSize when missing.
+        void   MText(int face, int pt, int x, int y, SDL_Color c, const char *s);
+        int    MWidth(int face, int pt, const char *s);
+        std::string MFit(int face, int pt, const std::string &s, int maxw);
+        void   MetroPalette();
+        // The rest of the menu in Metro's clothes: every sub-screen draws its
+        // header, list and prompts through these when Metro is the layout.
+        void   DrawMetroHeader(const char *title);
+        void   DrawCarouselMetro(const std::vector<std::string> &labels,
+                                 const std::vector<std::string> &values,
+                                 int cursor, float &scroll_pos);
+        void   MetroHintSegs(std::initializer_list<HintSeg> segs);
+        void   DrawMetroOptions();
+        void   DrawMetroDialog();
+        bool   m_metro_themed = false;    // theme colours instead of the 360's
+        SDL_Color m_mt_accent{}, m_mt_on{}, m_mt_fg{};
+        int    m_metro_panel = MP_Home;
+        int    m_metro_last[MP_Count] = {};   // focused tile, per panel
+        bool   m_metro_hdr   = false;         // the pivot header has focus
+        float  m_metro_cam   = -1.0f;         // panel strip scroll; <0 = snap
+        float  m_metro_hdr_x = 0.0f;
+        u64    m_metro_focus_tick = 0;        // focus zoom starts here
+        int    m_metro_spot  = 0;             // spotlight rotation
+        u64    m_metro_spot_tick = 0;
+        bool   m_metro_booted = false;
+        std::string m_metro_search_seen;
+        SDL_Texture *m_metro_bg = nullptr;
+        SDL_Texture *m_metro_avatar = nullptr;
+        bool   m_metro_avatar_tried = false;
+        std::unordered_map<u64, SDL_Texture *> m_metro_fill;
+        // The Guide: a panel of tabs over whatever is behind it, on HOME.
+        enum { MG_Games, MG_User, MG_Media, MG_Settings, MG_Count };
+        enum { GA_Home, GA_Resume, GA_Close, GA_MyGames, GA_Launch, GA_Kind, GA_System };
+        struct MetroGuideRow { std::string label; int act; int arg; };
+        void   MetroGuideRows(int tab, std::vector<MetroGuideRow> &out) const;
+        void   MetroOpenGuide(bool over_game);
+        void   DrawMetroGuide();
+        bool   MetroGuideNav(Btn b, Action &out, u64 &out_app_id);
+        bool   m_metro_guide = false;
+        bool   m_metro_guide_game = false;   // opened over a game: B goes back to it
+        SDL_Texture *m_metro_frame = nullptr;   // the game, captured by the daemon on HOME
+        bool   m_metro_frame_tried = false;
+        int    m_metro_gtab = MG_User, m_metro_grow = 0;
+        u64    m_metro_guide_tick = 0;
+        // "my games": the library as cards, with the show-me and sort pickers.
+        void   MetroLibList(std::vector<int> &out) const;
+        void   MetroOpenLib(int filter);
+        void   DrawMetroGames();
+        Action OnButtonMetroGames(Btn b, u64 &out_app_id);
+        int    m_metro_lib_filter = 0, m_metro_lib_sort = 0;
+        int    m_metro_lib_cur = 0;
+        int    m_metro_lib_hdr = -1;          // -1 the cards, 0 show me, 1 sort
+        float  m_metro_lib_scroll = 0.0f;
 
         static constexpr int VisibleRows = 9;
     };

@@ -14,8 +14,12 @@ folder too.
 | RedactedScript-Regular.ttf | Redacted Script    | Christian Naths               | SIL OFL 1.1 |
 | NotoSansSymbols2-Regular.ttf | Noto Sans Symbols 2 | Google (Noto Project)      | SIL OFL 1.1 |
 | NotoSansCJK-Regular.ttc    | Noto Sans CJK      | Google / Adobe (Noto Project) | SIL OFL 1.1 |
+| metro/selawk*.ttf          | Selawik (Light, Semilight, Semibold) | Microsoft | SIL OFL 1.1 |
 
-Full license text: `LICENSE-OFL.txt`.
+Full license text: `LICENSE-OFL.txt` (Selawik: `metro/LICENSE-Selawik.txt`).
+
+The Selawik files live in `metro/`, out of the Fonts screen's list: they are the
+Metro layout's own typeface, an open replacement metric-compatible with Segoe UI.
 
 ## About the CJK font
 

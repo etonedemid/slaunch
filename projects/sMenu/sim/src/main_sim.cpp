@@ -76,6 +76,7 @@ namespace {
             case Menu::Action::LaunchHomebrewApp:return "LaunchHomebrewApp";
             case Menu::Action::FinishSetup:      return "FinishSetup";
             case Menu::Action::Quit:             return "Quit";
+            case Menu::Action::OpenSystemSettings: return "OpenSystemSettings";
             default:                             return "None";
         }
     }
@@ -504,6 +505,7 @@ int main(int argc, char **argv) {
                     case '[': b = Btn::L;     break;
                     case ']': b = Btn::R;     break;
                     case 't': trig_until = elapsed_ms() + 1300; break;   // hold ZL+ZR
+                    case 'h': { u64 id = 0; run(ui.OnHomeButton(id), id); break; }   // HOME
                     default:  break;
                 }
                 nav_i++;

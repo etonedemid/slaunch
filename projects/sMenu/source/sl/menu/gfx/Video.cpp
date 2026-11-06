@@ -6,6 +6,9 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
+#ifdef SL_QEXT
+#include <libswscale/swscale.h>
+#endif
 }
 #include <SDL3_mixer/SDL_mixer.h>
 #include <sl/menu/audio/Music.hpp>
@@ -52,6 +55,12 @@ namespace sl::menu::gfx {
                 }
             }
         }
+#ifdef SL_QEXT
+        // Video has only been seen failing on hardware here, with nothing to say why.
+        #define VLOG(...) do { if (FILE *vf_ = fopen("sdmc:/slaunch/boot.log", "a")) { fputs("video: ", vf_); fprintf(vf_, __VA_ARGS__); fputc('\n', vf_); fclose(vf_); } } while (0)
+#else
+        #define VLOG(...) do {} while (0)
+#endif
     } // namespace
 
     bool VideoPlayer::Open(Gfx *gfx, const char *path, bool loop, bool audio) {
@@ -71,19 +80,19 @@ namespace sl::menu::gfx {
         // else in this codebase.
         const std::string url = "file:" + m_path;
 
-        if (avformat_open_input(&m_fmt, url.c_str(), nullptr, nullptr) < 0) { Close(); return false; }
-        if (avformat_find_stream_info(m_fmt, nullptr) < 0) { Close(); return false; }
+        if (avformat_open_input(&m_fmt, url.c_str(), nullptr, nullptr) < 0) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
+        if (avformat_find_stream_info(m_fmt, nullptr) < 0) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
 
         m_stream_idx = av_find_best_stream(m_fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        if (m_stream_idx < 0) { Close(); return false; }
+        if (m_stream_idx < 0) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
 
         AVStream *stream = m_fmt->streams[m_stream_idx];
         const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
-        if (!codec) { Close(); return false; }
+        if (!codec) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
 
         m_dec = avcodec_alloc_context3(codec);
-        if (!m_dec) { Close(); return false; }
-        if (avcodec_parameters_to_context(m_dec, stream->codecpar) < 0) { Close(); return false; }
+        if (!m_dec) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
+        if (avcodec_parameters_to_context(m_dec, stream->codecpar) < 0) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
 
 #ifdef SL_HAS_NVTEGRA
         // Only present when built against averne/FFmpeg's nvtegra branch
@@ -94,15 +103,16 @@ namespace sl::menu::gfx {
         // Tegra hardware, which is only reachable if this somehow ran on
         // non-Switch nvtegra-enabled FFmpeg) is not fatal: m_hw_device_ctx
         // stays null and the decoder falls back to its normal software path.
-        av_hwdevice_ctx_create(&m_hw_device_ctx, AV_HWDEVICE_TYPE_NVTEGRA, nullptr, nullptr, 0);
+        const int hw_rc = av_hwdevice_ctx_create(&m_hw_device_ctx, AV_HWDEVICE_TYPE_NVTEGRA, nullptr, nullptr, 0);
+        VLOG("nvtegra device rc=%d", hw_rc);
         if (m_hw_device_ctx) m_dec->hw_device_ctx = av_buffer_ref(m_hw_device_ctx);
 #endif
 
-        if (avcodec_open2(m_dec, codec, nullptr) < 0) { Close(); return false; }
+        if (avcodec_open2(m_dec, codec, nullptr) < 0) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
 
         m_width  = m_dec->width;
         m_height = m_dec->height;
-        if (m_width <= 0 || m_height <= 0) { Close(); return false; }
+        if (m_width <= 0 || m_height <= 0) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
 
         m_duration = (m_fmt->duration > 0) ? (double)m_fmt->duration / AV_TIME_BASE : 0.0;
 
@@ -131,15 +141,27 @@ namespace sl::menu::gfx {
         }
 
         for (auto &b : m_buf) {
+#ifdef SL_QEXT
+            b.rgba.resize((size_t)m_width * m_height * 4);
+#else
             b.y.resize(YSize(m_width, m_height));
             b.uv.resize(UVSize(m_width, m_height));
+#endif
             b.y_pitch  = m_width;
             b.uv_pitch = m_width; // NV12: chroma row is (w/2) U,V pairs = w bytes
         }
 
+#ifdef SL_QEXT
+        // deko3d's SDL renderer has no NV12: SDL would convert every frame on the
+        // main thread, into uncached memory, which is far too slow. The decode
+        // thread converts instead (see DecodeLoop) and this takes plain RGBA.
+        m_tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_RGBA32,
+                                  SDL_TEXTUREACCESS_STREAMING, m_width, m_height);
+#else
         m_tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_NV12,
                                   SDL_TEXTUREACCESS_STREAMING, m_width, m_height);
-        if (!m_tex) { Close(); return false; }
+#endif
+        if (!m_tex) { VLOG("open failed at line %d: %s", __LINE__, SDL_GetError()); Close(); return false; }
 
         m_stop.store(false, std::memory_order_release);
         m_paused.store(false);
@@ -154,6 +176,7 @@ namespace sl::menu::gfx {
         }
         threadStart(&m_thread);
         m_thread_running = true;
+        VLOG("opened %dx%d %s", m_width, m_height, m_path.c_str());
         return true;
     }
 
@@ -161,7 +184,13 @@ namespace sl::menu::gfx {
         int ready = m_ready_buf.load(std::memory_order_acquire);
         if (ready < 0 || ready == m_shown_buf || !m_tex) return;
         const Buf &b = m_buf[ready];
+#ifdef SL_QEXT
+        const bool up_ok = SDL_UpdateTexture(m_tex, nullptr, b.rgba.data(), m_width * 4);
+        static bool logged = false;
+        if (!logged) { logged = true; VLOG("first texture update %s: %s", up_ok ? "ok" : "FAILED", up_ok ? "" : SDL_GetError()); }
+#else
         SDL_UpdateNVTexture(m_tex, nullptr, b.y.data(), b.y_pitch, b.uv.data(), b.uv_pitch);
+#endif
         m_shown_buf = ready;
     }
 
@@ -361,6 +390,12 @@ namespace sl::menu::gfx {
         AVPacket *pkt       = av_packet_alloc();
         AVFrame  *dec_frame = av_frame_alloc();
         AVFrame  *sw_frame  = av_frame_alloc();
+#ifdef SL_QEXT
+        SwsContext *sws = nullptr;
+        AVPixelFormat sws_fmt = AV_PIX_FMT_NONE;
+        u64 sws_ticks = 0;
+        int sws_frames = 0;
+#endif
         AVFrame  *a_frame   = av_frame_alloc();
         std::deque<AVPacket *> vq;          // video packets read but not decoded
         bool   read_eof  = false;           // demuxer is done
@@ -433,6 +468,10 @@ namespace sl::menu::gfx {
                 if (now - frame_pts > 0.5) ClockSet(frame_pts);
 
                 AVFrame *src = dec_frame;
+#ifdef SL_QEXT
+                static bool fmt_logged = false;
+                if (!fmt_logged) { fmt_logged = true; VLOG("first frame format %d (nvtegra %d)", dec_frame->format, (int)AV_PIX_FMT_NVTEGRA); }
+#endif
 #ifdef SL_HAS_NVTEGRA
                 if (dec_frame->format == AV_PIX_FMT_NVTEGRA) {
                     sw_frame->format = AV_PIX_FMT_NV12;
@@ -441,6 +480,31 @@ namespace sl::menu::gfx {
 #endif
                 if (src) {
                     Buf &b = m_buf[write_buf];
+#ifdef SL_QEXT
+                    const AVPixelFormat fmt = (AVPixelFormat)src->format;
+                    if (!sws || sws_fmt != fmt) {
+                        if (sws) sws_freeContext(sws);
+                        sws_fmt = fmt;
+                        sws = sws_getContext(m_width, m_height, fmt, m_width, m_height, AV_PIX_FMT_RGBA,
+                                             SWS_POINT, nullptr, nullptr, nullptr);
+                        // H.264 at this size is BT.709, limited range, to full-range RGB.
+                        const int *cs = sws_getCoefficients(SWS_CS_ITU709);
+                        if (sws) sws_setColorspaceDetails(sws, cs, 0, cs, 1, 0, 1 << 16, 1 << 16);
+                    }
+                    if (sws) {
+                        const u64 t0 = armGetSystemTick();
+                        uint8_t *dst[4] = { b.rgba.data() };
+                        const int dst_ls[4] = { m_width * 4 };
+                        sws_scale(sws, src->data, src->linesize, 0, m_height, dst, dst_ls);
+                        m_ready_buf.store(write_buf, std::memory_order_release);
+                        write_buf ^= 1;
+                        sws_ticks += armGetSystemTick() - t0;
+                        if (++sws_frames == 120) {
+                            VLOG("convert %.1f ms a frame", armTicksToNs(sws_ticks / 120) / 1e6);
+                            sws_frames = 0; sws_ticks = 0;
+                        }
+                    }
+#else
                     if (src->format == AV_PIX_FMT_NV12) {
                         CopyPlane(b.y.data(), b.y_pitch, src->data[0], src->linesize[0], m_width, m_height);
                         CopyPlane(b.uv.data(), b.uv_pitch, src->data[1], src->linesize[1], m_width, m_height / 2);
@@ -455,6 +519,7 @@ namespace sl::menu::gfx {
                     }
                     // Any other pixel format (e.g. 10-bit) is dropped - out of
                     // scope (8-bit H.264 only).
+#endif
                 }
                 av_frame_unref(dec_frame);
                 av_frame_unref(sw_frame);
@@ -474,6 +539,9 @@ namespace sl::menu::gfx {
         for (AVPacket *q : vq) av_packet_free(&q);
         av_frame_free(&a_frame);
         av_frame_free(&sw_frame);
+#ifdef SL_QEXT
+        if (sws) sws_freeContext(sws);
+#endif
         av_frame_free(&dec_frame);
         av_packet_free(&pkt);
     }

@@ -43,7 +43,7 @@ namespace sl::menu::ui {
     static void StepAutoUser(int dir) {
         AccountUid uids[ACC_USER_LIST_SIZE];
         s32 n = 0;
-        if (R_FAILED(accountListAllUsers(uids, ACC_USER_LIST_SIZE, &n)) || n <= 0) return;
+        if (!sys::ListUsers(uids, ACC_USER_LIST_SIZE, &n) || n <= 0) return;
         int pos = 0;                                   // 0 = Off, i + 1 = uids[i]
         AccountUid cur;
         if (ReadAutoUser(cur))
@@ -626,7 +626,7 @@ namespace sl::menu::ui {
         NetStatus s;
 
         bool wl = true;
-        if (R_SUCCEEDED(nifmIsWirelessCommunicationEnabled(&wl))) s.wifi_on = wl;
+        if (sys::WirelessOn(wl)) s.wifi_on = wl;
 
         NifmInternetConnectionType   type = (NifmInternetConnectionType)0;
         NifmInternetConnectionStatus st   = (NifmInternetConnectionStatus)0;
@@ -1221,6 +1221,11 @@ namespace sl::menu::ui {
         if (m_theming_cursor == TH_ShelfStyle &&
             (b == Btn::Left || b == Btn::Right || b == Btn::A))
             toggleShelfStyle();
+        if (m_theming_cursor == TH_MetroColors &&
+            (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_metro_themed = !m_metro_themed;
+            SaveSettings();
+        }
         auto toggleWrap    = [&]() { m_wrap_nav     = !m_wrap_nav;     SaveSettings(); };
         auto toggleHints   = [&]() { m_show_hints   = !m_show_hints;   SaveSettings(); };
         auto toggleCounter = [&]() { m_show_counter = !m_show_counter; SaveSettings(); };
@@ -1905,7 +1910,7 @@ namespace sl::menu::ui {
     // screenshots (sdmc:/slaunch/previews, shipped with the menu), because a
     // layout is something you choose by looking at it.
     static const char *kLayoutFiles[] = { "list", "line", "grid", "cover",
-                                          "shelf", "xmb", "flow", "deck" };
+                                          "shelf", "xmb", "flow", "deck", "metro" };
     static_assert(sizeof(kLayoutFiles) / sizeof(kLayoutFiles[0]) == (size_t)UiMode::Count,
                   "one preview per layout");
 
@@ -1955,12 +1960,13 @@ namespace sl::menu::ui {
         const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
 
         static const char *kLayoutNames[] = { "List", "Line", "Grid", "Cover",
-                                              "Shelf", "XMB", "Flow", "Deck" };
+                                              "Shelf", "XMB", "Flow", "Deck", "Metro" };
         static const char *kLayoutDesc[] = {
             "A simple scrolling list", "A carousel of covers",
             "A wall of tiles", "One big cover at a time",
             "A shelf of covers with details", "The PlayStation cross-media bar",
-            "3D game cases on a mirrored floor", "Steam Deck: hero, covers and news" };
+            "3D game cases on a mirrored floor", "Steam Deck: hero, covers and news",
+            "The Xbox 360 dashboard: tabs of tiles and the Guide" };
 
         struct Page { const char *title, *sub; };
         const Page pages[kOobeSteps] = {
@@ -2189,6 +2195,7 @@ namespace sl::menu::ui {
             if (i == TH_FlowSet && m_ui_mode != UiMode::Flow) continue;
             if (i == TH_ShelfVert && (m_ui_mode != UiMode::Shelf || m_shelf_ps)) continue;
             if (i == TH_ShelfStyle && m_ui_mode != UiMode::Shelf) continue;
+            if (i == TH_MetroColors && m_ui_mode != UiMode::Metro) continue;
             if (i == TH_Backdrop && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::Line &&
                 m_ui_mode != UiMode::Cover && m_ui_mode != UiMode::Deck) continue;
             // The wall shape is only meaningful where there is a wall.
@@ -2217,12 +2224,12 @@ namespace sl::menu::ui {
     }
     void Menu::DrawTheming() {
         DrawTopBar("Theming");
-        const char *modes[8]  = { T("List"), T("Line"), T("Grid"), T("Cover"),
-                                  T("Shelf"), T("XMB"), T("Flow"), T("Deck") };
+        const char *modes[9]  = { T("List"), T("Line"), T("Grid"), T("Cover"),
+                                  T("Shelf"), T("XMB"), T("Flow"), T("Deck"), T("Metro") };
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Vertical covers"), T("Background art"),
+            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Metro colours"), T("Vertical covers"), T("Background art"),
             T("Columns"), T("Rows"),
             T("Box art region"), T("SteamGridDB"), T("SteamGridDB key"), T("Flow layout"),
             T("Wrap around"), T("Button hints"), T("Position counter"),
@@ -2245,6 +2252,7 @@ namespace sl::menu::ui {
         values[TH_Antialias]   = m_antialias ? T("On") : T("Off");
         values[TH_ShelfVert]   = m_shelf_vertical ? T("On") : T("Off");
         values[TH_ShelfStyle]  = m_shelf_ps ? "PS4" : "Xbox 360";
+        values[TH_MetroColors] = m_metro_themed ? T("Theme") : "Xbox 360";
         values[TH_Backdrop]    = m_backdrop == Backdrop::Off ? T("Off")
                                : m_backdrop == Backdrop::Icon ? T("Game icon") : T("Screenshot");
         {
@@ -3533,6 +3541,7 @@ namespace sl::menu::ui {
         DrawHint({ {{"a"}, "Type"}, {{"x"}, "Shift"}, {{"y"}, "Backspace"}, {{"plus"}, "Done"}, {{"b"}, "Cancel"} });
     }
     void Menu::DrawDialog() {
+        if (m_ui_mode == UiMode::Metro) { DrawMetroDialog(); return; }
         const Theme &t = m_theme.Current();
         // Dim the whole screen, then draw a centered box.
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0,0,0,150});

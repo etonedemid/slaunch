@@ -203,6 +203,7 @@ namespace sl::menu::ui {
     void Menu::BackdropDecodeTrampoline(void *self) {
         Menu *m = static_cast<Menu *>(self);
         m->m_bdj_surf = DecodeCoverSurfaceCropped(m->m_bdj_path, 960, 540, 0.5f);
+        gfx::Gfx::PrepareArt(m->m_bdj_surf);
         m->m_bdj_done.store(true, std::memory_order_release);
     }
 
@@ -238,7 +239,7 @@ namespace sl::menu::ui {
                 if (m_bdj_id == it.app_id && it.kind == ItemKind::Game) {
                     // RGB565 has no alpha, so the texture would come out with
                     // blending off and ignore the dimming and crossfade.
-                    SDL_Texture *tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_bdj_surf);
+                    SDL_Texture *tex = m_gfx->UploadArt(m_bdj_surf);
                     if (tex) SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
                     show(tex);
                 }

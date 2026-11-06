@@ -2,6 +2,11 @@
 #ifdef SL_VULKAN
 #include "fx_spirv.h"   // scripts/fx-spirv.py, from the effects' GLSL
 #endif
+#ifdef SL_QEXT
+#include <sl/menu/gfx/Bc1.hpp>
+#include <deko3d.h>
+#include "fx_dksh.h"    // scripts/fx-spirv.py --dksh, from the same GLSL
+#endif
 #include <vector>
 #include <algorithm>
 #include <SDL3_image/SDL_image.h>
@@ -21,7 +26,7 @@ namespace sl::menu::gfx {
     // brings up Mesa's GL beside NVK, and the process gets killed seconds in.
 #ifdef SL_VULKAN
     static constexpr SDL_WindowFlags kWindowFlags = SDL_WINDOW_VULKAN;
-#else
+#elif !defined(SL_QEXT)
     static constexpr SDL_WindowFlags kWindowFlags = SDL_WINDOW_OPENGL;
 #endif
 
@@ -34,6 +39,9 @@ namespace sl::menu::gfx {
 #ifdef SL_VULKAN
     static void FxFrameDone();
 #endif
+#ifdef SL_QEXT
+    static void FxShutdown();
+#endif
 
     static void GfxLog(const char *step) {
         FILE *fp = fopen("sdmc:/slaunch/boot.log", "a");
@@ -41,6 +49,22 @@ namespace sl::menu::gfx {
         fprintf(fp, "gfx: %s FAILED: %s\n", step, SDL_GetError());
         fclose(fp);
     }
+
+#ifdef SL_QEXT
+    extern "C" void qext_display_size(int *w, int *h);
+    // The loader owns the layer; SDL draws into the window it hands the menu.
+    static NWindow *s_nwindow = nullptr;
+    void Gfx::SetNWindow(NWindow *win) { s_nwindow = win; }
+    static SDL_Window *CreateLoaderWindow(int w, int h) {
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetPointerProperty(props, SDL_PROP_WINDOW_CREATE_SWITCH_NWINDOW_POINTER, s_nwindow);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
+        SDL_Window *win = SDL_CreateWindowWithProperties(props);
+        SDL_DestroyProperties(props);
+        return win;
+    }
+#endif
 
     bool Gfx::Init() {
         // Textures sample linearly: SDL3's default, where SDL2 needed a hint.
@@ -79,14 +103,25 @@ namespace sl::menu::gfx {
             m_aa_on = true;
         }
 
+#ifdef SL_QEXT
+        // The layer's size is the loader's to pick, so no anti-aliased window.
+        qext_display_size(&win_w, &win_h);
+        m_aa_on = win_w != Width;
+        m_window = CreateLoaderWindow(win_w, win_h);
+#else
         m_window = SDL_CreateWindow(m_title, win_w, win_h, kWindowFlags);
+#endif
         if (!m_window && m_aa_on) {
             // The display would not take it: carry on at native size rather
             // than refusing to start.
             GfxLog("aa window");
             m_aa_on = false;
             m_ss    = 1;
+#ifdef SL_QEXT
+            m_window = CreateLoaderWindow(Width, Height);
+#else
             m_window = SDL_CreateWindow(m_title, Width, Height, kWindowFlags);
+#endif
         }
         if (!m_window) { GfxLog("SDL_CreateWindow"); fatalThrow(MAKERESULT(360, 32)); }
         m_ts = m_aa_on ? (float)win_w / (float)Width : (float)m_ss;
@@ -95,7 +130,10 @@ namespace sl::menu::gfx {
         // GLES2 on the console (the path SDL2 always took there), desktop GL
         // first in the simulator. The Vulkan build draws through SDL_GPU,
         // and its effects take their SDL-drawn fallbacks.
-#if defined(SL_VULKAN)
+#if defined(SL_QEXT)
+        // Effects draw through deko3d directly, see "The same effects on deko3d".
+        m_renderer = SDL_CreateRenderer(m_window, "deko3d");
+#elif defined(SL_VULKAN)
         m_renderer = SDL_CreateRenderer(m_window, "gpu");
 #elif defined(__SWITCH__)
         m_renderer = SDL_CreateRenderer(m_window, "opengles2,opengl");
@@ -137,6 +175,8 @@ namespace sl::menu::gfx {
             R_FAILED(plGetSharedFontByType(&font, PlSharedFontType_Standard)))
             fatalThrow(MAKERESULT(360, 35)); // pl shared font
 
+        m_plFontAddr = font.address;
+        m_plFontSize = font.size;
         for (int i = 0; i < (int)FontSize::Count; i++) {
             // Fresh RWops per open; the font memory is owned by pl and stays valid.
             SDL_IOStream *rw = SDL_IOFromConstMem(font.address, font.size);
@@ -213,6 +253,10 @@ namespace sl::menu::gfx {
     void Gfx::ClearContentFont() { FreeAltFonts(); }
 
     void Gfx::Exit() {
+#ifdef SL_QEXT
+        FxClose();
+        FxShutdown();   // its memory belongs to the device the renderer is about to take down
+#endif
         ClearTextCache();
         ReapTextures();   // retired textures must not outlive the renderer
         if (m_textEngine) { TTF_DestroyRendererTextEngine(m_textEngine); m_textEngine = nullptr; }
@@ -223,6 +267,12 @@ namespace sl::menu::gfx {
         if (m_small) { SDL_DestroyTexture(m_small); m_small = nullptr; }
         FreeAltFonts();
         ReapTextures();   // closes the fonts FreeAltFonts retired
+        for (auto &kv : m_downText) SDL_DestroyTexture(kv.second);
+        m_downText.clear();
+        for (auto &kv : m_faces) if (kv.second) TTF_CloseFont(kv.second);
+        m_faces.clear();
+        for (TTF_Font *f : m_faceFallbacks) TTF_CloseFont(f);
+        m_faceFallbacks.clear();
         for (auto &f : m_sysFonts) { if (f) TTF_CloseFont(f); f = nullptr; }
         if (m_renderer) SDL_DestroyRenderer(m_renderer);
         if (m_window)   SDL_DestroyWindow(m_window);
@@ -448,9 +498,8 @@ namespace sl::menu::gfx {
     }
 
     // Lay (font, size, string) out once and keep it; colour is set per draw.
-    TTF_Text *Gfx::GetText(FontSize s, const char *text) {
-        if (!text || !text[0]) return nullptr;
-        TTF_Font *font = Font(s); // may be the system or the content font
+    TTF_Text *Gfx::GetText(TTF_Font *font, const char *text) {
+        if (!text || !text[0] || !font) return nullptr;
         std::string key((const char *)&font, sizeof(font));
         key += text;
 
@@ -485,10 +534,9 @@ namespace sl::menu::gfx {
     // hint bar), and TTF_GetStringSize walks the glyphs each time - a real cost
     // on the console's CPU, not on a PC. Capped, and emptied whenever the
     // fonts change (ClearTextCache).
-    int Gfx::TextWidth(FontSize s, const char *text) {
-        if (!text || !text[0]) return 0;
-        TTF_Font *font = Font(s);
-        if (!font) return 0;
+    int Gfx::TextWidth(FontSize s, const char *text) { return TextWidth(Font(s), text); }
+    int Gfx::TextWidth(TTF_Font *font, const char *text) {
+        if (!text || !text[0] || !font) return 0;
         std::string key((const char *)&font, sizeof(font));
         key += text;
         auto it = m_widthCache.find(key);
@@ -501,17 +549,21 @@ namespace sl::menu::gfx {
         return lw;
     }
 
-    int Gfx::LineHeight(FontSize s) { return (int)(TTF_GetFontHeight(Font(s)) / m_ts + 0.5f); }
+    int Gfx::LineHeight(FontSize s) { return LineHeight(Font(s)); }
+    int Gfx::LineHeight(TTF_Font *f) { return f ? (int)(TTF_GetFontHeight(f) / m_ts + 0.5f) : 0; }
 
     void Gfx::Text(FontSize s, int x, int y, SDL_Color c, const char *text) {
+        Text(Font(s), x, y, c, text);
+    }
+    void Gfx::Text(TTF_Font *font, int x, int y, SDL_Color c, const char *text) {
         FxClose();   // an open GPU pass must end before SDL draws again
         if (c.a == 0) return;   // see FillRect: 0 means invisible
-        TTF_Text *t = GetText(s, text);
+        TTF_Text *t = GetText(font, text);
         if (!t) return;
         if (m_capturing) {
             u64 h = 1469598103934665603ull;               // FNV-1a of the string
             for (const char *p = text; *p; p++) h = (h ^ (u8)*p) * 1099511628211ull;
-            Record((float)x, (float)y, (float)TextWidth(s, text), (float)LineHeight(s), h);
+            Record((float)x, (float)y, (float)TextWidth(font, text), (float)LineHeight(font), h);
         }
         TTF_SetTextColor(t, c.r, c.g, c.b, c.a);
         // The glyphs are m_ss times the layout size. Drawing at 1/m_ss scale
@@ -540,6 +592,79 @@ namespace sl::menu::gfx {
     void Gfx::TextCentered(FontSize s, int cx, int y, SDL_Color c, const char *text) {
         int w = TextWidth(s, text);
         Text(s, cx - w / 2, y, c, text);
+    }
+
+    TTF_Font *Gfx::Face(const char *path, int pt) {
+        if (!path || pt <= 0) return nullptr;
+        std::string key = std::string(path) + "@" + std::to_string(pt);
+        auto it = m_faces.find(key);
+        if (it != m_faces.end()) return it->second;   // a failed open is cached too
+        TTF_Font *f = TTF_OpenFont(path, pt * m_ts);
+        if (f) {
+            TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
+            TTF_SetFontKerning(f, true);
+            if (m_plFontAddr) {
+                SDL_IOStream *rw = SDL_IOFromConstMem(m_plFontAddr, m_plFontSize);
+                if (TTF_Font *fb = TTF_OpenFontIO(rw, true, pt * m_ts)) {
+                    TTF_SetFontHinting(fb, TTF_HINTING_LIGHT);
+                    if (TTF_AddFallbackFont(f, fb)) m_faceFallbacks.push_back(fb);
+                    else TTF_CloseFont(fb);
+                }
+            }
+        } else {
+            GfxLog("TTF_OpenFont (face)");
+        }
+        m_faces.emplace(std::move(key), f);
+        return f;
+    }
+
+    void Gfx::TextDown(TTF_Font *f, int x, int y, SDL_Color c, const char *text) {
+        FxClose();
+        if (!f || !text || !text[0] || c.a == 0) return;
+        std::string key((const char *)&f, sizeof(f));
+        key += text;
+        SDL_Texture *tex = nullptr;
+        auto it = m_downText.find(key);
+        if (it != m_downText.end()) {
+            tex = it->second;
+        } else {
+            // Rasterised white once and tinted per draw, like the TTF_Text
+            // path; there are only a handful of these (the Guide's spines).
+            if (SDL_Surface *s = TTF_RenderText_Blended(f, text, 0, SDL_Color{255, 255, 255, 255})) {
+                tex = SDL_CreateTextureFromSurface(m_renderer, s);
+                SDL_DestroySurface(s);
+            }
+            if (tex) SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+            m_downText.emplace(std::move(key), tex);
+        }
+        if (!tex) return;
+        float tw = 0, th = 0;
+        SDL_GetTextureSize(tex, &tw, &th);
+        tw /= m_ts; th /= m_ts;
+        // Rotated about its centre: after the quarter turn the box is th wide
+        // and tw tall, so that centre sits at (x + th/2, y + tw/2).
+        const float cx = x + th * 0.5f, cy = y + tw * 0.5f;
+        const SDL_FRect dst{ cx - tw * 0.5f, cy - th * 0.5f, tw, th };
+        SDL_SetTextureColorMod(tex, c.r, c.g, c.b);
+        SDL_SetTextureAlphaMod(tex, c.a);
+        SDL_RenderTextureRotated(m_renderer, tex, nullptr, &dst, 90.0, nullptr, SDL_FLIP_NONE);
+    }
+
+    void Gfx::DrawImageCrop(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha) {
+        FxClose();
+        if (!tex || w <= 0 || h <= 0) return;
+        float tw = 0, th = 0;
+        SDL_GetTextureSize(tex, &tw, &th);
+        if (tw <= 0 || th <= 0) return;
+        SDL_FRect src{ 0, 0, tw, th };
+        const float want = (float)w / (float)h;
+        if (tw / th > want) { src.w = th * want; src.x = (tw - src.w) * 0.5f; }
+        else                { src.h = tw / want; src.y = (th - src.h) * 0.5f; }
+        const SDL_FRect dst = F(x, y, w, h);
+        Record(dst.x, dst.y, dst.w, dst.h, (u64)(uintptr_t)tex, true);
+        SDL_SetTextureAlphaMod(tex, alpha);
+        SDL_RenderTexture(m_renderer, tex, &src, &dst);
+        SDL_SetTextureAlphaMod(tex, 255);
     }
 
     // ---- 3D quads ---------------------------------------------------------
@@ -876,7 +1001,216 @@ namespace sl::menu::gfx {
     // SDL_RenderGeometry, so the span between the two active edges is drawn as
     // a 1px rect per row. Only used for small shapes (the XMB selection wedge),
     // where a few dozen rows costs nothing.
-#ifndef SL_VULKAN
+#if defined(SL_QEXT)
+    // =========================================================================
+    // The same effects on deko3d, for qlaunch-ext
+    //
+    // They draw straight into SDL's own command buffer, between its draws and on
+    // whatever target is bound, so they land exactly as drawing them in place
+    // should. Each SDL draw binds all of its state again, so nothing is restored.
+    // Program ids are indexes into fxspv::kPrograms and outlive a menu reload;
+    // only the GPU side is rebuilt then.
+    // =========================================================================
+    namespace {
+        constexpr int kFxVerts = 4096;   // as the GL path: vertex k = (k/2, k%2, k/6, corner)
+        constexpr uint32_t kFxUboSize = 0x1000;
+
+        struct DkProg { DkShader vs, fs; std::vector<float> u; };
+        std::vector<DkProg> g_progs;
+        DkMemBlock g_code = nullptr, g_vbuf = nullptr, g_ubo = nullptr;
+        DkCmdBuf g_cmd = nullptr;
+        int g_cur = -1;
+
+        DkMemBlock FxBlock(DkDevice dev, uint32_t size, uint32_t flags) {
+            DkMemBlockMaker mk;
+            dkMemBlockMakerDefaults(&mk, dev, (size + 0xFFFu) & ~0xFFFu);
+            mk.flags = flags;
+            return dkMemBlockCreate(&mk);
+        }
+        int FxLoc(const char *name) {
+            const fxspv::Program &p = fxspv::kPrograms[g_cur];
+            for (int i = 0; i < p.n_uniforms; i++)
+                if (!strcmp(p.uniforms[i], name)) return i;
+            return -1;
+        }
+        void FxDraw(DkPrimitive prim, uint32_t verts) {
+            const std::vector<float> &u = g_progs[g_cur].u;
+            dkCmdBufPushConstants(g_cmd, dkMemBlockGetGpuAddr(g_ubo), kFxUboSize, 0,
+                                  (uint32_t)(u.size() * sizeof(float)), u.data());
+            dkCmdBufDraw(g_cmd, prim, verts, 1, 0, 0);
+        }
+    }
+
+    static void FxShutdown() {
+        if (g_code) { dkMemBlockDestroy(g_code); g_code = nullptr; }
+        if (g_vbuf) { dkMemBlockDestroy(g_vbuf); g_vbuf = nullptr; }
+        if (g_ubo)  { dkMemBlockDestroy(g_ubo);  g_ubo  = nullptr; }
+    }
+
+    bool Gfx::ShaderFxInit() {
+        if (m_fx_tried) return m_fx_tried > 0;
+        m_fx_tried = -1;
+        // Escape hatch: this file puts every effect back on the rect-drawn fallback.
+        if (FILE *f = fopen("sdmc:/slaunch/config/no_gpu_fx", "r")) { fclose(f); return false; }
+        SDL_PropertiesID props = SDL_GetRendererProperties(m_renderer);
+        DkDevice dev = (DkDevice)SDL_GetPointerProperty(props, SDL_PROP_RENDERER_DEKO3D_DEVICE_POINTER, nullptr);
+        if (!dev || !SDL_GetPointerProperty(props, "SDL.renderer.deko3d.begin_external", nullptr)) return false;
+
+        const size_t count = sizeof(fxspv::kPrograms) / sizeof(fxspv::kPrograms[0]);
+        uint32_t code_size = DK_SHADER_CODE_UNUSABLE_SIZE;
+        for (size_t i = 0; i < count; i++) {
+            code_size += (uint32_t)((fxspv::kPrograms[i].vs_size + DK_SHADER_CODE_ALIGNMENT - 1) & ~(size_t)(DK_SHADER_CODE_ALIGNMENT - 1));
+            code_size += (uint32_t)((fxspv::kPrograms[i].fs_size + DK_SHADER_CODE_ALIGNMENT - 1) & ~(size_t)(DK_SHADER_CODE_ALIGNMENT - 1));
+        }
+        const uint32_t uncached = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+        g_code = FxBlock(dev, code_size, uncached | DkMemBlockFlags_Code);
+        g_vbuf = FxBlock(dev, kFxVerts * 4 * sizeof(float), uncached);
+        g_ubo  = FxBlock(dev, kFxUboSize, uncached);
+        if (!g_code || !g_vbuf || !g_ubo) { FxShutdown(); GfxLog("fx memory"); return false; }
+
+        float *v = (float *)dkMemBlockGetCpuAddr(g_vbuf);
+        static const int kCorner[6] = { 0, 1, 2, 2, 1, 3 };   // two triangles
+        for (int k = 0; k < kFxVerts; k++) {
+            v[k * 4 + 0] = (float)(k >> 1);
+            v[k * 4 + 1] = (float)(k & 1);
+            v[k * 4 + 2] = (float)(k / 6);
+            v[k * 4 + 3] = (float)kCorner[k % 6];
+        }
+
+        g_progs.resize(count);
+        uint32_t off = 0;
+        auto load = [&](DkShader &sh, const void *data, size_t size) {
+            memcpy((char *)dkMemBlockGetCpuAddr(g_code) + off, data, size);
+            DkShaderMaker mk;
+            dkShaderMakerDefaults(&mk, g_code, off);
+            dkShaderInitialize(&sh, &mk);
+            off += (uint32_t)((size + DK_SHADER_CODE_ALIGNMENT - 1) & ~(size_t)(DK_SHADER_CODE_ALIGNMENT - 1));
+        };
+        for (size_t i = 0; i < count; i++) {
+            const fxspv::Program &p = fxspv::kPrograms[i];
+            load(g_progs[i].vs, p.vs, p.vs_size);
+            load(g_progs[i].fs, p.fs, p.fs_size);
+            g_progs[i].u.assign((size_t)std::max(1, p.n_uniforms) * 4, 0.0f);
+        }
+        m_fx_tex_ok = true;
+        m_fx_tried = 1;
+        return true;
+    }
+
+    int Gfx::FxProgram(const char *vs, const char *fs) {
+        if (!ShaderFxInit()) return -1;
+        u32 h = 0x811c9dc5;
+        for (const char *c = vs; *c; c++) h = (h ^ (unsigned char)*c) * 0x01000193;
+        for (const char *c = fs; *c; c++) h = (h ^ (unsigned char)*c) * 0x01000193;
+        const int count = (int)(sizeof(fxspv::kPrograms) / sizeof(fxspv::kPrograms[0]));
+        for (int i = 0; i < count; i++)
+            if (fxspv::kPrograms[i].hash == h) return i;
+        return -1;
+    }
+
+    bool Gfx::FxBegin(int prog) {
+        if (prog < 0 || prog >= (int)g_progs.size() || !g_code) return false;
+        // All of it, every time, not once a pass. An image loaded on demand switches
+        // the render target and draws through SDL in the middle of a row of quads,
+        // which changes every piece of state here, and a texture made since the last
+        // quad needs the caches invalidated (begin_external does) before it is read.
+        // Each SDL draw pays the same, so this is the same cost as drawing through SDL.
+        SDL_FlushRenderer(m_renderer);   // what SDL has queued goes first
+        auto begin = (DkCmdBuf (*)(SDL_Renderer *))SDL_GetPointerProperty(
+            SDL_GetRendererProperties(m_renderer), "SDL.renderer.deko3d.begin_external", nullptr);
+        g_cmd = begin ? begin(m_renderer) : nullptr;
+        if (!g_cmd) return false;
+
+        DkRasterizerState rast;
+        dkRasterizerStateDefaults(&rast);
+        rast.cullMode = DkFace_None;
+        dkCmdBufBindRasterizerState(g_cmd, &rast);
+        DkColorState col;
+        dkColorStateDefaults(&col);
+        dkColorStateSetBlendEnable(&col, 0, true);
+        dkCmdBufBindColorState(g_cmd, &col);
+        DkColorWriteState colw;
+        dkColorWriteStateDefaults(&colw);
+        dkCmdBufBindColorWriteState(g_cmd, &colw);
+        // Shaders write premultiplied colour, so one function covers both an
+        // ordinary blend (rgb*a, a) and a purely additive glow (rgb, 0).
+        DkBlendState bl;
+        dkBlendStateDefaults(&bl);
+        dkBlendStateSetOps(&bl, DkBlendOp_Add, DkBlendOp_Add);
+        dkBlendStateSetFactors(&bl, DkBlendFactor_One, DkBlendFactor_InvSrcAlpha,
+                               DkBlendFactor_One, DkBlendFactor_InvSrcAlpha);
+        dkCmdBufBindBlendStates(g_cmd, 0, &bl, 1);
+
+        DkVtxAttribState attr;
+        memset(&attr, 0, sizeof(attr));
+        attr.bufferId = 0;
+        attr.offset = 0;
+        attr.size = DkVtxAttribSize_4x32;
+        attr.type = DkVtxAttribType_Float;
+        dkCmdBufBindVtxAttribState(g_cmd, &attr, 1);
+        DkVtxBufferState state{};
+        state.stride = 4 * sizeof(float);
+        state.divisor = 0;
+        dkCmdBufBindVtxBufferState(g_cmd, &state, 1);
+        DkBufExtents vb = { dkMemBlockGetGpuAddr(g_vbuf), kFxVerts * 4 * sizeof(float) };
+        dkCmdBufBindVtxBuffers(g_cmd, 0, &vb, 1);
+        DkBufExtents ub = { dkMemBlockGetGpuAddr(g_ubo), kFxUboSize };
+        dkCmdBufBindUniformBuffers(g_cmd, DkStage_Vertex, 0, &ub, 1);
+        dkCmdBufBindUniformBuffers(g_cmd, DkStage_Fragment, 0, &ub, 1);
+        g_cur = prog;
+        const DkShader *shaders[2] = { &g_progs[prog].vs, &g_progs[prog].fs };
+        dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, shaders, 2);
+        // Row 0 of every target here is the top of the picture, unlike GL's FBOs.
+        FxSet("uFlip", 1.0f);
+        FxSet("uTime", (float)armGetSystemTick() / (float)armGetSystemTickFreq());
+        return true;
+    }
+
+    void Gfx::FxSet(const char *name, float a) { FxSet(name, a, 0.0f, 0.0f, 0.0f); }
+    void Gfx::FxSet(const char *name, float a, float b, float c, float d) {
+        if (g_cur < 0) return;
+        const int l = FxLoc(name);
+        if (l < 0) return;
+        float *u = &g_progs[g_cur].u[(size_t)l * 4];
+        u[0] = a; u[1] = b; u[2] = c; u[3] = d;
+    }
+    void Gfx::FxSet(const char *name, SDL_Color c) {
+        FxSet(name, c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f);
+    }
+    void Gfx::FxStrip(int columns) {
+        if (g_cur < 0 || columns < 2) return;
+        FxDraw(DkPrimitive_TriangleStrip, (uint32_t)std::min(columns, kFxVerts / 2) * 2);
+    }
+    void Gfx::FxQuads(int count) {
+        if (g_cur < 0 || count < 1) return;
+        FxDraw(DkPrimitive_Triangles, (uint32_t)std::min(count, kFxVerts / 6) * 6);
+    }
+
+    bool Gfx::FxTexturesWork() { return m_fx_tex_ok; }
+    bool Gfx::FxTextureSelfTest() { return true; }
+
+    // Every format is stored as RGBA by the renderer, so no swizzle; the formats
+    // without alpha still leave junk there.
+    void Gfx::FxTexture(SDL_Texture *tex) {
+        if (g_cur < 0) return;
+        if (!tex) tex = WhiteTexture();
+        const Sint64 slot = SDL_GetNumberProperty(SDL_GetTextureProperties(tex), "SDL.texture.deko3d.slot", -1);
+        if (slot < 0) return;
+        const DkResHandle h = dkMakeTextureHandle((uint32_t)slot, 0);
+        dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, &h, 1);
+        m_fx_tex = tex;
+        FxSet("uTexScale", 1.0f, 1.0f, 0.0f, 0.0f);
+        FxSet("uSwz", 0.0f, SDL_ISPIXELFORMAT_ALPHA(tex->format) ? 0.0f : 1.0f, 0.0f, 0.0f);
+    }
+
+    void Gfx::FxClose() { FxEnd(); }
+    void Gfx::FxEnd() {
+        g_cur = -1;
+        g_cmd = nullptr;
+        m_fx_tex = nullptr;
+    }
+
+#elif !defined(SL_VULKAN)
     // =========================================================================
     // Raw GL, alongside SDL's renderer
     //
@@ -2020,6 +2354,43 @@ void main() {
     // from inside the draw loop (evicting to make room for the icon they are
     // about to load), which is exactly the moment Mesa is most likely to still
     // have the outgoing texture bound.
+#ifdef SL_QEXT
+    static constexpr const char *kBc1Prop = "sl.bc1";
+    void Gfx::PrepareArt(SDL_Surface *surf) {
+        if (!surf) return;
+        SDL_Surface *rgba = surf->format == SDL_PIXELFORMAT_RGBA32
+                                ? surf : SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+        if (!rgba) return;
+        uint8_t *data = bc1::Encode((const uint8_t *)rgba->pixels, rgba->w, rgba->h, rgba->pitch);
+        if (rgba != surf) SDL_DestroySurface(rgba);
+        if (!data) return;
+        // Freed with the surface, including one dropped before it is ever uploaded.
+        SDL_SetPointerPropertyWithCleanup(SDL_GetSurfaceProperties(surf), kBc1Prop, data,
+                                          [](void *, void *p) { free(p); }, nullptr);
+    }
+    SDL_Texture *Gfx::UploadArt(SDL_Surface *surf) {
+        if (!surf) return nullptr;
+        void *data = SDL_GetPointerProperty(SDL_GetSurfaceProperties(surf), kBc1Prop, nullptr);
+        if (data) {
+            SDL_PropertiesID props = SDL_CreateProperties();
+            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_RGBA32);
+            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
+            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, surf->w);
+            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, surf->h);
+            SDL_SetPointerProperty(props, "SDL.texture.create.deko3d.bc1", data);
+            SDL_Texture *tex = SDL_CreateTextureWithProperties(m_renderer, props);
+            SDL_DestroyProperties(props);
+            if (tex) return tex;
+        }
+        return SDL_CreateTextureFromSurface(m_renderer, surf);
+    }
+#else
+    void Gfx::PrepareArt(SDL_Surface *) {}
+    SDL_Texture *Gfx::UploadArt(SDL_Surface *surf) {
+        return surf ? SDL_CreateTextureFromSurface(m_renderer, surf) : nullptr;
+    }
+#endif
+
     void Gfx::FreeImage(SDL_Texture *tex) {
         if (tex && tex == m_fx_tex) FxClose();   // do not free what a pass has bound
         if (tex) m_textGraveyard.push_back(tex);

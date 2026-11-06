@@ -1,4 +1,5 @@
 #pragma once
+#include <sl/menu/qext/Sys.hpp>
 // Shared implementation detail for the Menu.cpp / Menu_*.cpp split: row-id
 // enums, per-layout constants and small helpers that used to live in
 // anonymous namespaces inside one Menu.cpp. OnTouch's generic submenu
@@ -20,13 +21,17 @@ namespace sl::menu::ui {
 
     using gfx::FontSize;
 
+    // Metro's own sound set, if the card has one: same file names as the
+    // default set in sdmc:/slaunch/sounds.
+    inline constexpr const char *kMetroSoundDir = "sdmc:/slaunch/sounds/metro";
+
     // ---- submenu row ids ---------------------------------------------------
     // Declared up here rather than beside each screen's handler because the
     // touch code near the top of the file has to know how many rows a screen
     // has; a stale hand-counted number there silently makes the last row
     // untappable.
     enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_ShelfVert, TH_Backdrop, TH_TileCols, TH_TileRows,
+           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_MetroColors, TH_ShelfVert, TH_Backdrop, TH_TileCols, TH_TileRows,
            TH_TdbRegion, TH_Sgdb, TH_SgdbKey, TH_FlowSet, TH_Wrap,
            TH_Hints, TH_Counter, TH_RetroArch, TH_Collections, TH_ShowHidden, TH_Fonts,
            TH_Language, TH_Music,
@@ -678,6 +683,16 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.0.0" },
+            { false, "The menu is instant now: it stays loaded, so leaving a game or applet drops you straight back into it" },
+            { false, "Rebuilt on qlaunch-ext: one HOME Menu process instead of a daemon and a separate menu" },
+            { false, "Every layout, effect and video wallpaper runs on a new deko3d renderer" },
+            { false, "New layout: Metro" },
+            { false, "Covers and box art use compressed textures, 1/8 of the memory" },
+            { false, "Renames and search use the system keyboard" },
+            { false, "The browser closes the menu while it runs, and the menu starts again when you leave it" },
+            { false, "sInstaller upgrades older versions and keeps your settings" },
+            { false, "Not yet on the new renderer: anti-aliasing, and the safe mode after a crash" },
             { true,  "v1.6.0" },
             { false, "HOME from a game waits for the console to hand over the screen before the menu opens, which fixes the freezes on HOME" },
             { false, "Sleep, Restart and Power off from the HOME button's hold menu work" },

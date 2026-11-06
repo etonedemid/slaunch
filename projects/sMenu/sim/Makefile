@@ -34,6 +34,7 @@ MENU_SRCS := \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Xmb.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Flow.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Deck.cpp \
+	$(MENU_DIR)/source/sl/menu/ui/Menu_Metro.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Boom.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Files.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Screens.cpp \

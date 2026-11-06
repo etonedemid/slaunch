@@ -27,11 +27,17 @@
 #include <sl/menu/ui/Menu.hpp>
 #include <sl/menu/ui/Locale.hpp>
 #include <sl/menu/usb/Mtp.hpp>
+#ifdef SL_QEXT
+#include <SDL3_mixer/SDL_mixer.h>
+#include <sl/menu/audio/Music.hpp>
+#include <sl/menu/smi/QextBackend.hpp>
+#endif
 
 using namespace sl;
 using menu::ui::Menu;
 using menu::ui::Btn;
 
+#ifndef SL_QEXT
 extern "C" {
     // Explicitly declare we are a library applet. A raw NSO launched into an
     // applet slot by qlaunch (not via hbloader's homebrew ABI) has no env for
@@ -48,6 +54,7 @@ extern "C" {
     // 128MB heap did not).
     u64 __nx_heap_size = 0;
 }
+#endif
 
 static Menu *g_UI            = nullptr;
 static bool  g_NeedAppReload = true;
@@ -146,6 +153,53 @@ static Btn TranslateButton(int b) {
 // just returned, so an unchanged title costs one stat() and no write.
 static constexpr const char *IconCacheDir = "sdmc:/slaunch/cache/icons";
 
+#ifdef SL_QEXT
+// Titles come from the loader's registry, which also holds plugins' virtual
+// titles, and decodes the compressed names of firmware 21+. Icons still land in
+// the cache the layouts load them from. Not thread-safe: main thread only.
+static std::vector<menu::ui::AppEntry> LoadAppEntries() {
+    std::vector<u64> ids;
+    const int count = qext_title_count();
+    for (int i = 0; i < count; i++)
+        if (!qext_title_is_virtual(qext_title_id(i))) ids.push_back(qext_title_id(i));
+    std::vector<NsApplicationView> views;
+    os::ListApplicationViews(ids, views);
+    std::unordered_map<u64, u32> flags;
+    for (size_t i = 0; i < views.size() && i < ids.size(); i++)
+        flags[ids[i]] = *reinterpret_cast<const u32*>(reinterpret_cast<const u8*>(&views[i]) + 0xC);
+
+    mkdir("sdmc:/slaunch", 0777);
+    mkdir("sdmc:/slaunch/cache", 0777);
+    mkdir(IconCacheDir, 0777);
+
+    std::vector<menu::ui::AppEntry> entries;
+    entries.reserve(count);
+    std::vector<u8> icon;
+    for (int i = 0; i < count; i++) {
+        const u64 id = qext_title_id(i);
+        char name[0x201] = {};
+        if (qext_title_name(i, name, sizeof(name)) <= 0)
+            snprintf(name, sizeof(name), "0x%016llX", (unsigned long long)id);
+
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%016llX.jpg", IconCacheDir, (unsigned long long)id);
+        const int size = qext_title_icon_size(i);
+        struct stat st;
+        if (size > 0 && (stat(path, &st) != 0 || st.st_size != size)) {
+            icon.resize(size);
+            const int got = qext_title_icon(i, icon.data(), size);
+            if (got > 0) {
+                if (FILE *fp = fopen(path, "wb")) { fwrite(icon.data(), 1, got, fp); fclose(fp); }
+            }
+        }
+        const auto f = flags.find(id);
+        const u32 fl = f == flags.end() ? 0 : f->second;
+        entries.push_back({ id, name, (fl & BIT(2)) != 0, (fl & BIT(4)) != 0 });
+    }
+    return entries;
+}
+
+#else
 static void CacheAppIcon(u64 app_id, const NsApplicationControlData &ctrl, u64 ctrl_size) {
     const size_t icon_len = os::IconSize(ctrl_size);
     if (icon_len == 0) return; // icon-less title
@@ -278,6 +332,8 @@ static std::vector<menu::ui::AppEntry> LoadAppEntries() {
     return entries;
 }
 
+#endif
+
 // Persisted copy of the fully-resolved list, so a relaunch shows games on the
 // first frame instead of re-enumerating. Format per line: hexid<TAB>gc<TAB>upd<TAB>name.
 static constexpr const char *AppListCache = "sdmc:/slaunch/cache/applist.txt";
@@ -310,6 +366,7 @@ static std::vector<menu::ui::AppEntry> LoadAppList() {
     return e;
 }
 
+#ifndef SL_QEXT
 // One cheap NS call: just the installed title ids, for change detection.
 static std::vector<u64> CurrentAppIds() {
     std::vector<NsApplicationRecord> records;
@@ -335,9 +392,13 @@ static void LoadAppsTrampoline(void *) {
     g_LoadDone.store(true, std::memory_order_release);
 }
 
+#endif
+
 // The daemon sends this when the SD card is physically pulled while powered on.
 // Show the full-screen warning; the daemon reboots the console shortly after.
+#ifndef SL_QEXT
 static void OnSdEjected()      { if (g_UI) g_UI->ShowSdRemoved(); }
+#endif
 static void OnAppListChanged() { g_NeedAppReload = true; }
 // The daemon says the console is going to sleep: draw nothing until it says
 // it woke up (or am reports a resume, or any input arrives - a lost
@@ -350,6 +411,7 @@ static void OnAppletHook(AppletHookType hook, void *) {
     if (hook == AppletHookType_OnResume) OnSleepFinished();
 }
 
+#ifndef SL_QEXT
 // ---------------------------------------------------------------------------
 // libnx internals: normally called by libnx's default __appInit, which we
 // override -- so we must call them ourselves. __nx_win_init() creates the
@@ -407,6 +469,7 @@ extern "C" void __appExit() {
     setExit(); setsysExit(); timeExit();
     fsdevUnmountAll(); fsExit(); smExit();
 }
+#endif // !SL_QEXT
 
 // ---------------------------------------------------------------------------
 // Menu actions -> SMI requests to the sSystem daemon.
@@ -428,6 +491,23 @@ static void RecordLaunch(u64 program_id, const char *nro) {
     }
 }
 
+// The menu's slot has to be free before the daemon can use it, so a separate
+// process quits here. Inside the loader the menu stays resident: it only lets go
+// of what the next thing on screen needs (USB, the speakers), and the loader
+// stops calling loop() until the menu is back.
+#ifdef SL_QEXT
+static bool g_Suspended = false;
+static void HandOff() {
+    if (g_Suspended) return;
+    g_Suspended = true;
+    menu::usb::MtpStop();
+    appletSetAutoSleepDisabled(false);
+    if (MIX_Mixer *m = menu::audio::Mixer()) MIX_PauseAllTracks(m);
+}
+#else
+static void HandOff() { g_Running = false; }
+#endif
+
 static void DispatchAction(Menu::Action action, u64 launch_id,
                            bool &has_suspended, u64 &suspended_id) {
     switch (action) {
@@ -437,12 +517,12 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
                 menu::smi::ResumeApp();
             else
                 menu::smi::LaunchApp(launch_id);
-            g_Running = false; // hand off to the daemon
+            HandOff();
             break;
         case Menu::Action::ResumeApp:
             RecordLaunch(suspended_id, nullptr);
             menu::smi::ResumeApp();
-            g_Running = false;
+            HandOff();
             break;
         case Menu::Action::TerminateApp:
             // Just closes the running game; the menu stays up.
@@ -453,39 +533,45 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
         case Menu::Action::OpenAlbum:
             RecordLaunch(kAlbumSlotProgramId, nullptr);   // the real Album, in the same slot
             menu::smi::OpenAlbum();
-            g_Running = false;
+            HandOff();
             break;
-        case Menu::Action::OpenUserPage:     menu::smi::OpenUserPage();     g_Running = false; break;
-        case Menu::Action::OpenNetConnect:   menu::smi::OpenNetConnect();   g_Running = false; break;
-        case Menu::Action::OpenMiiEdit:      menu::smi::OpenMiiEdit();      g_Running = false; break;
-        case Menu::Action::OpenWebBrowser:   menu::smi::OpenWebBrowser();   g_Running = false; break;
-        case Menu::Action::OpenControllers:  menu::smi::OpenControllers();  g_Running = false; break;
+        case Menu::Action::OpenUserPage:     menu::smi::OpenUserPage();     HandOff(); break;
+        case Menu::Action::OpenNetConnect:   menu::smi::OpenNetConnect();   HandOff(); break;
+        case Menu::Action::OpenSystemSettings: menu::smi::OpenSystemSettings(); HandOff(); break;
+        case Menu::Action::OpenMiiEdit:      menu::smi::OpenMiiEdit();      HandOff(); break;
+        case Menu::Action::OpenWebBrowser:   menu::smi::OpenWebBrowser();   HandOff(); break;
+        case Menu::Action::OpenControllers:  menu::smi::OpenControllers();  HandOff(); break;
         case Menu::Action::OpenHomebrewMenu:
             RecordLaunch(kAlbumSlotProgramId, "Homebrew menu");
             menu::smi::OpenHomebrewMenu();
-            g_Running = false;
+            HandOff();
             break;
         case Menu::Action::LaunchHomebrew:
             RecordLaunch(kAlbumSlotProgramId, g_UI->HomebrewPath().c_str());
             menu::smi::OpenHomebrew(g_UI->HomebrewPath().c_str(),
                                     g_UI->HomebrewArgv().c_str());
-            g_Running = false;
+            HandOff();
             break;
         case Menu::Action::LaunchHomebrewApp:
             RecordLaunch(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str());
             menu::smi::LaunchHomebrewApp(g_UI->HomebrewDonor(), g_UI->HomebrewPath().c_str(),
                                          g_UI->HomebrewArgv().c_str());
-            g_Running = false;
+            HandOff();
             break;
         // Sleep is instant and the menu is still there when the console wakes.
         // The other three tear the system down, so - like a game launch - the menu
         // sends the request and quits, leaving the daemon to carry it out.
-        case Menu::Action::PowerSleep:       menu::smi::PowerSleep();       break;
-        case Menu::Action::PowerReboot:      menu::smi::PowerReboot();      g_Running = false; break;
-        case Menu::Action::PowerShutdown:    menu::smi::PowerShutdown();    g_Running = false; break;
+        case Menu::Action::PowerSleep:
+#ifdef SL_QEXT
+            OnSleepRequested();   // nothing presents under a sleeping vi (issue #13)
+#endif
+            menu::smi::PowerSleep();
+            break;
+        case Menu::Action::PowerReboot:      menu::smi::PowerReboot();      HandOff(); break;
+        case Menu::Action::PowerShutdown:    menu::smi::PowerShutdown();    HandOff(); break;
         case Menu::Action::PowerPayload:
             menu::smi::RebootToPayload(g_UI->PayloadPath().c_str());
-            g_Running = false;
+            HandOff();
             break;
         case Menu::Action::FinishSetup:
             MarkSetupDone();
@@ -497,9 +583,39 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
 }
 
 // ---------------------------------------------------------------------------
-int main() {
+// One run of the menu, from the first frame to the last. A separate applet
+// process holds this for its lifetime; the loader calls the three steps below
+// from its own main loop, so none of it can live on a stack.
+struct MenuRun {
+    menu::gfx::Gfx gfx;
+    SDL_Joystick *joy = nullptr;
+    Menu *ui = nullptr;
+    bool has_suspended = false;
+    u64  suspended_id = 0;
+    int  crashes = 0;
+    AppletHookCookie sleep_hook = {};
+    int held_v = 0, held_h = 0;     // current held direction (-1/0/+1)
+    u64 next_v = 0, next_h = 0;     // tick of the next repeat
+    u64 start_v = 0, start_h = 0;   // tick the hold began (for accel)
+    u64 next_verify = 0;            // periodic app-list re-verify
+    bool first_frame_logged = false;
+    bool aa_confirmed = false;
+    u64  next_usb_check = 0;
+    bool usb_connected = false;
+};
+static MenuRun *g_Run = nullptr;
+
+static bool MenuBoot() {
+    MenuRun &r = *(g_Run = new MenuRun);
+
     // sSystem hands us the selected user + suspended-app state at launch.
     smi::SystemStatus status = {};
+#ifdef SL_QEXT
+    // Nobody hands this over in-process: the loader knows both already.
+    accountGetLastOpenedUser(&status.selected_user);
+    status.suspended_app_id  = qext_suspended_title();
+    status.has_suspended_app = status.suspended_app_id != 0;
+#else
     {
         // The daemon pushes a LibAppletArgs common-args storage (0x20 bytes)
         // FIRST, then our SystemStatus. Pop a couple of InData storages and read
@@ -516,6 +632,7 @@ int main() {
             appletStorageClose(&st);
         }
     }
+#endif
 
     BootLog("applet: main enter (status user_valid=%d suspended=%d id=%016llX)",
             (int)accountUidIsValid(&status.selected_user), (int)status.has_suspended_app,
@@ -555,7 +672,7 @@ int main() {
     // the Lua widgets - so a bad setting or widget cannot crash-loop the
     // console. Nothing is written to the settings: the next clean run is back
     // to normal.
-    int crashes = 0;
+    int &crashes = r.crashes;
     if (FILE *cf = fopen(menu::dbg::kCrashCountPath, "r")) {
         if (fscanf(cf, "%d", &crashes) != 1) crashes = 0;
         fclose(cf);
@@ -564,7 +681,7 @@ int main() {
     if (crashes) BootLog("applet: %d crash(es) in a row before this run%s", crashes,
                          safe_mode ? " - safe mode" : "");
 
-    menu::gfx::Gfx gfx;
+    menu::gfx::Gfx &gfx = r.gfx;
     // Read straight from the config rather than through Menu: the renderer has
     // to be built with this already decided, and Menu is not constructed until
     // after Gfx is up.
@@ -603,13 +720,13 @@ int main() {
     }
     if (!gfx.Init()) {
         BootLog("applet: gfx.Init FAILED: %s", SDL_GetError());
-        return 0; // sSystem will relaunch us
+        return false; // sSystem will relaunch us
     }
     BootLog("applet: gfx.Init OK, entering loop");
     menu::dbg::StartProfiler();
 
     // SDL3 opens by instance ID, not by index: the first pad SDL knows of.
-    SDL_Joystick *joy = nullptr;
+    SDL_Joystick *&joy = r.joy;
     if (SDL_JoystickID *ids = SDL_GetJoysticks(nullptr)) {
         if (ids[0]) joy = SDL_OpenJoystick(ids[0]);
         SDL_free(ids);
@@ -619,11 +736,9 @@ int main() {
     // pad handling and can leave the touch screen unconfigured for our reads).
     hidInitializeTouchScreen();
 
-    // Scope the Menu so its destructor (which frees icon/widget textures) runs
-    // while the SDL renderer is still alive - gfx.Exit() is called after this
-    // block closes.
-    {
-    Menu ui;
+    // On the heap so MenuShutdown can destroy it (which frees icon/widget
+    // textures) while the SDL renderer is still alive, before gfx.Exit().
+    Menu &ui = *(r.ui = new Menu);
     g_UI = &ui;
     ui.SetSafeMode(safe_mode);
     ui.Init(&gfx, status.selected_user, status.suspended_app_id, IsFirstRun());
@@ -646,19 +761,35 @@ int main() {
     }
     BootLog("applet: cached app list in");
 
-    bool has_suspended = status.has_suspended_app;
-    u64  suspended_id  = status.suspended_app_id;
-    if (has_suspended) ui.SetSuspendedApp(suspended_id);
+    r.has_suspended = status.has_suspended_app;
+    r.suspended_id  = status.suspended_app_id;
+    if (r.has_suspended) ui.SetSuspendedApp(r.suspended_id);
 
-    menu::smi::MessageCallbacks cbs;
-    cbs.on_sd_ejected       = OnSdEjected;
-    cbs.on_app_list_changed = OnAppListChanged;
-    cbs.on_sleep_requested  = OnSleepRequested;
-    cbs.on_sleep_finished   = OnSleepFinished;
-    AppletHookCookie sleep_hook;
-    appletHook(&sleep_hook, OnAppletHook, nullptr);
+#ifndef SL_QEXT
+    appletHook(&r.sleep_hook, OnAppletHook, nullptr);
+#endif
 
     g_NeedAppReload = true;
+    r.next_verify = armGetSystemTick();
+    return true;
+}
+
+// One frame: input, then draw. Returns early while asleep.
+static void MenuFrame() {
+    MenuRun &r = *g_Run;
+    Menu &ui = *r.ui;
+    SDL_Joystick *joy = r.joy;
+    bool &has_suspended = r.has_suspended;
+    u64  &suspended_id  = r.suspended_id;
+    int  &crashes       = r.crashes;
+    int &held_v = r.held_v, &held_h = r.held_h;
+    u64 &next_v = r.next_v, &next_h = r.next_h;
+    u64 &start_v = r.start_v, &start_h = r.start_h;
+    u64 &g_NextVerify = r.next_verify;
+    bool &first_frame_logged = r.first_frame_logged;
+    bool &aa_confirmed = r.aa_confirmed;
+    u64  &next_usb_check = r.next_usb_check;
+    bool &usb_connected = r.usb_connected;
     constexpr int Deadzone = 20000;
 
     auto run = [&](Menu::Action act, u64 launch_id) {
@@ -672,17 +803,26 @@ int main() {
     const u64 freq        = armGetSystemTickFreq();
     const u64 RepeatDelay = (360 * freq) / 1000; // before the first repeat
     auto ms = [&](u64 m) { return (m * freq) / 1000; };
-    int held_v = 0, held_h = 0;                  // current held direction (-1/0/+1)
-    u64 next_v = 0, next_h = 0;                   // tick of the next repeat
-    u64 start_v = 0, start_h = 0;                 // tick the hold began (for accel)
 
-    u64 g_NextVerify = armGetSystemTick();   // periodic app-list re-verify
-    bool first_frame_logged = false;
-    bool aa_confirmed = false;
-    u64  next_usb_check = 0;
-    bool usb_connected  = false;
-
-    while (g_Running && appletMainLoop()) {
+    {
+#ifdef SL_QEXT
+        // The loader signals install/uninstall/card changes. First load waits for
+        // the first frame, so the cached list is what greets the user.
+        if (qext_titles_changed()) g_NeedAppReload = true;
+        if (g_NeedAppReload && first_frame_logged) {
+            g_NeedAppReload = false;
+            qext_refresh_titles();
+            auto entries = LoadAppEntries();
+            std::vector<u64> ids;
+            for (auto &e : entries) ids.push_back(e.app_id);
+            if (ids != g_CachedIds) {
+                g_CachedIds = std::move(ids);
+                SaveAppList(entries);
+                ui.SetApps(std::move(entries));
+            }
+            ui.SetLoading(false);
+        }
+#else
         // Re-verify the installed set every ~2s: the daemon doesn't push gamecard
         // events, so poll instead. The check is cheap (one NS list + id compare)
         // and only does real work when something actually changed (card in/out,
@@ -721,7 +861,15 @@ int main() {
             }
             ui.SetLoading(false);
         }
+#endif
+#ifndef SL_QEXT
+        menu::smi::MessageCallbacks cbs;
+        cbs.on_sd_ejected       = OnSdEjected;
+        cbs.on_app_list_changed = OnAppListChanged;
+        cbs.on_sleep_requested  = OnSleepRequested;
+        cbs.on_sleep_finished   = OnSleepFinished;
         menu::smi::PollMessages(cbs);
+#endif
 
         // Action buttons via events (no repeat); directions are polled below.
         // SDL maps touch to mouse events; keep the button state across frames --
@@ -786,6 +934,7 @@ int main() {
         // sampled *state* (held or not) rather than a press event - firing on
         // every sample the bit is set would repeat it for as long as the
         // button stays down, not once per press.
+#ifndef SL_QEXT
         if (g_HomeAvailable) {
             static bool was_home_down = false;
             HidHomeButtonState hs = {0};
@@ -796,6 +945,7 @@ int main() {
             }
             was_home_down = home_down;
         }
+#endif
 
         // Poll the current directional state from dpad + hat + left stick.
         int dir_v = 0, dir_h = 0;
@@ -846,7 +996,7 @@ int main() {
         };
         step(dir_v, held_v, next_v, start_v, Btn::Up,   Btn::Down);
         step(dir_h, held_h, next_h, start_h, Btn::Left, Btn::Right);
-        if (g_Asleep) { svcSleepThread(16'666'666ULL); continue; }
+        if (g_Asleep) { svcSleepThread(16'666'666ULL); return; }
         ui.Render();
         // An action the menu held back to animate first (the Flow launch
         // bounce). Dispatched exactly like an OnButton result.
@@ -885,14 +1035,203 @@ int main() {
         // First frame is up; now do the heavier init (widgets) off the hot path.
         ui.InitDeferred();
     }
+}
+
+static void MenuShutdown() {
+    if (!g_Run) return;
+    MenuRun &r = *g_Run;
     // Let go of USB before handing off: whatever runs next (homebrew like DBI
     // or Goldleaf especially) may want it for itself.
-    appletUnhook(&sleep_hook);
+#ifdef SL_QEXT
+    if (g_LoadRunning) {   // the process stays up, so its thread has to be joined
+        threadWaitForExit(&g_LoadThread);
+        threadClose(&g_LoadThread);
+        g_LoadRunning = false;
+    }
+#else
+    appletUnhook(&r.sleep_hook);
+#endif
     menu::usb::MtpStop();
-    if (usb_connected) appletSetAutoSleepDisabled(false);
-    } // ui destroyed here, before gfx.Exit(), so its textures free cleanly
+    if (r.usb_connected) appletSetAutoSleepDisabled(false);
+    delete r.ui;           // before gfx.Exit(), so its textures free cleanly
+    g_UI = nullptr;
 
-    if (joy) SDL_CloseJoystick(joy);
-    gfx.Exit();
+    if (r.joy) SDL_CloseJoystick(r.joy);
+    r.gfx.Exit();
+    delete g_Run;
+    g_Run = nullptr;
+}
+
+#ifdef SL_QEXT
+static void GrowHeap() {
+    // Library applets share this pool. On hardware the framework's 384 MB cap
+    // starved player select (os::OutOfMemory) and its 96 MB floor ran the menu
+    // itself out while scrolling (DkResult_OutOfMemory). No size is known to be
+    // right on every firmware, so the file can override it: "total small".
+    // Small is malloc's own heap, which never shrinks, so it is what the browser
+    // has to live with; everything of 64 KB and up goes in the rest.
+    unsigned heap_mb = 192, small_mb = 48;
+    if (FILE *fp = fopen("sdmc:/slaunch/config/qext_heap_mb.txt", "r")) {
+        fscanf(fp, "%u %u", &heap_mb, &small_mb);
+        fclose(fp);
+    }
+    const int heap_rc = qext_heap_setup(heap_mb, small_mb);
+    BootLog("qext: heap %u MB rc=0x%x", heap_mb, heap_rc);
+}
+
+extern "C" void __libnx_init_time(void);
+extern "C" void qext_set_before_home(void (*hook)(void));
+
+// The game's last frame, for Metro's Guide, written beside the path and renamed in
+// so it is never half there. Only while the menu keeps the flag file, since the
+// capture costs the HOME press its time.
+static void CaptureHomeFrame() {
+    remove(smi::HomeFramePath);
+    struct stat st;
+    if (stat(smi::HomeFrameFlag, &st) != 0) return;
+    constexpr size_t kMax = 0x80000;   // what the system's own capture uses
+    u8 *buf = (u8 *)malloc(kMax);
+    if (!buf) return;
+    u64 size = 0;
+    Result rc = capsscInitialize();
+    if (R_SUCCEEDED(rc)) {
+        rc = capsscCaptureJpegScreenShot(&size, buf, kMax, ViLayerStack_Screenshot, 100'000'000);
+        capsscExit();
+    }
+    if (R_SUCCEEDED(rc) && size > 0 && size <= kMax) {
+        static constexpr const char *Tmp = "sdmc:/slaunch/cache/home_frame.tmp";
+        if (FILE *fp = fopen(Tmp, "wb")) {
+            bool ok = fwrite(buf, 1, size, fp) == size;
+            ok = (fclose(fp) == 0) && ok;
+            if (!ok || rename(Tmp, smi::HomeFramePath) != 0) remove(Tmp);
+        }
+    }
+    free(buf);
+}
+
+// The browser does not fit in the applet pool next to the menu, so for this one
+// the menu goes away completely and starts again from nothing when it ends.
+static bool g_Unloaded = false;
+static void UnloadForWeb() {
+    MenuShutdown();
+    socketExit();          // buffers; onBoot's counterpart is in the reload below
+    plExit();
+    g_Suspended = false;
+    g_Unloaded = true;
+    // The loader's caches were last allocated above the running menu, where they
+    // would pin the heap. Refreshing them now puts them in the space just freed.
+    qext_refresh_titles();
+    qext_album_refresh();
+    // The loader's own log is not visible over MTP, this one is.
+    FILE *blog = fopen("sdmc:/slaunch/boot.log", "a");
+    const unsigned left = qext_heap_release(blog);
+    if (blog) fclose(blog);
+    BootLog("qext: unloaded for the browser, heap %u MB", left);
+    menu::qext::StartWeb(left);
+}
+
+// qlaunch-ext's menu interface. The loader is the HOME Menu process and owns the
+// applet messages; it calls these from its main loop, and stops calling loop()
+// while a game or an applet has the screen.
+extern "C" {
+
+int onBoot(NWindow *win) {
+    g_BootTick0 = armGetSystemTick();
+    __libnx_init_time();   // the loader does not, and time() is 0 until it runs
+    qext_set_before_home(CaptureHomeFrame);
+    menu::qext::CleanUpLeftovers();
+    // Services the loader does not open for itself. All refcounted.
+    plInitialize(PlServiceType_User);
+    socketInitializeDefault();
+    hidInitializeTouchScreen();
+    menu::gfx::Gfx::SetNWindow(win);
+    GrowHeap();
+    return MenuBoot() ? 0 : -1;
+}
+
+int loop(void) {
+    // Back from the browser: same as a fresh start.
+    if (g_Unloaded) {
+        g_Unloaded = false;
+        plInitialize(PlServiceType_User);
+        socketInitializeDefault();
+        GrowHeap();
+        if (!MenuBoot()) return -1;
+    }
+    // Being called at all means the menu is what is on screen. Taking back what
+    // HandOff gave up here (not only in onOpen) also covers a launch that failed.
+    if (g_Suspended) {
+        g_Suspended = false;
+        if (g_UI->UsbTransfer()) menu::usb::MtpStart();
+        if (MIX_Mixer *m = menu::audio::Mixer()) MIX_ResumeAllTracks(m);
+    }
+    MenuFrame();
+    if (menu::qext::TakeWebRequest()) {
+        UnloadForWeb();
+        return 0;
+    }
+    // sLaunch Control's request (see MenuRestartRequestPath). sSystem watches for it
+    // from outside the menu; here this is the only code that runs, so a menu frozen
+    // inside MenuFrame never gets this far.
+    static u64 next_request_check = 0;
+    bool external_restart = false;
+    if (armGetSystemTick() >= next_request_check) {
+        next_request_check = armGetSystemTick() + armGetSystemTickFreq();
+        struct stat st;
+        external_restart = stat(smi::MenuRestartRequestPath, &st) == 0 &&
+                           remove(smi::MenuRestartRequestPath) == 0;
+        if (external_restart) BootLog("qext: external restart request");
+    }
+    if (!g_Running || menu::qext::TakeRestart() || external_restart) {
+        MenuShutdown();
+        g_Running = true;
+        if (!MenuBoot()) return -1;
+    }
     return 0;
 }
+void onShutdown(void) {
+    MenuShutdown();
+    qext_set_before_home(nullptr);
+    if (!g_Unloaded) {     // otherwise already closed
+        socketExit();
+        plExit();
+    }
+}
+
+void onReload(void) { g_NeedAppReload = true; }
+
+// Our loader patch calls this as the console starts to sleep; onOpen ends it.
+void onPowerButton(void) { OnSleepRequested(); }
+
+// Back from a game, an applet or sleep.
+void onOpen(void) {
+    OnSleepFinished();   // the loader has just refreshed its titles; MenuFrame sees any change
+    // Asked for while a game had the screen: sSystem ignores that case too, and
+    // restarting the moment the user comes back would be a surprise.
+    remove(smi::MenuRestartRequestPath);
+    if (!g_Run) return;
+    menu::qext::OnBackInMenu();
+    g_Run->suspended_id  = qext_suspended_title();
+    g_Run->has_suspended = g_Run->suspended_id != 0;
+    if (g_Run->has_suspended) g_UI->SetSuspendedApp(g_Run->suspended_id);
+    else                      g_UI->ClearSuspendedApp();
+    g_UI->ShowPendingError();
+}
+
+void onHomeButton(void) {
+    if (!g_Run) return;
+    u64 id = 0;
+    const Menu::Action a = g_UI->OnHomeButton(id);
+    if (a != Menu::Action::None)
+        DispatchAction(a, id, g_Run->has_suspended, g_Run->suspended_id);
+}
+
+} // extern "C"
+#else
+int main() {
+    if (!MenuBoot()) return 0;
+    while (g_Running && appletMainLoop()) MenuFrame();
+    MenuShutdown();
+    return 0;
+}
+#endif

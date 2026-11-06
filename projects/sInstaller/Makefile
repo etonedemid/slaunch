@@ -9,7 +9,8 @@ BUILD    := build
 SOURCES  := source
 INCLUDES := include
 
-SDOUT    := ../../SdOut
+# make SDOUT=../../SdOut-qext for an installer of the qlaunch-ext build.
+SDOUT    ?= ../../SdOut
 OUTDIR   := $(SDOUT)/switch/sInstaller
 ROMFS    := romfs
 
@@ -18,7 +19,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sLaunch Installer
 APP_AUTHOR  := sLaunch
-APP_VERSION := 1.6.0
+APP_VERSION := 2.0.0
 APP_ICON    := ../../assets/icon.jpg
 
 PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
@@ -71,6 +72,9 @@ romfs_stage:
 	@mkdir -p $(ROMFS)/payload
 	@cp -r $(SDOUT)/atmosphere $(ROMFS)/payload/ 2>/dev/null || true
 	@cp -r $(SDOUT)/slaunch    $(ROMFS)/payload/ 2>/dev/null || true
+	@# Only in the qlaunch-ext layout.
+	@cp -r $(SDOUT)/lib         $(ROMFS)/payload/ 2>/dev/null || true
+	@cp -r $(SDOUT)/qlaunch-ext $(ROMFS)/payload/ 2>/dev/null || true
 	@# Optional UltraHand package shipped by sLaunch. Keep it under switch/.packages
 	@# so the installer copies it to the same location UltraHand already scans.
 	@mkdir -p $(ROMFS)/payload/switch

@@ -11,6 +11,13 @@
 namespace sl::smi {
 
     constexpr u32 Magic = 0x214C4D53; // "SML!"
+
+    // The game's last frame, for Metro's Guide. A library applet is refused a
+    // screen capture, so the daemon takes one on HOME - only while the menu
+    // keeps the flag file, i.e. while it is in a layout that shows it - and
+    // writes it beside the path, then renames it in, so it is never half there.
+    constexpr const char *HomeFrameFlag = "sdmc:/slaunch/config/home_frame";
+    constexpr const char *HomeFramePath = "sdmc:/slaunch/cache/home_frame.jpg";
     constexpr size_t StorageSize = 0x4000;
 
     // Commands: sMenu -> sSystem
@@ -189,6 +196,19 @@ namespace sl::smi {
         }
     };
 
+#ifdef SL_QEXT
+    // Built as a qlaunch-ext menu there is no daemon: the same commands are
+    // carried out in-process (sMenu/source/sl/menu/qext/QextBackend.cpp).
+    Result QextCommand(SystemMessage msg, const void *payload, size_t size);
+
+    template<typename TPayload>
+    inline Result SendMenuCommand(SystemMessage msg, const TPayload &payload) {
+        return QextCommand(msg, &payload, sizeof(payload));
+    }
+    inline Result SendMenuCommand(SystemMessage msg) {
+        return QextCommand(msg, nullptr, 0);
+    }
+#else
     // Send a command from sMenu to sSystem (via the library applet holder)
     // Push into the outgoing data queue; sSystem reads it.
     template<typename TPayload>
@@ -220,5 +240,6 @@ namespace sl::smi {
         if (rc != 0) return rc;
         return appletPushOutData(&w.GetStorage());
     }
+#endif // SL_QEXT
 
 } // namespace sl::smi

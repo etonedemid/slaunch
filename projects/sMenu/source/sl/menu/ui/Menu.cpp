@@ -73,7 +73,7 @@ namespace sl::menu::ui {
         if (!accountUidIsValid(&m_user)) {
             s32 count = 0;
             AccountUid uids[ACC_USER_LIST_SIZE];
-            if (R_SUCCEEDED(accountListAllUsers(uids, ACC_USER_LIST_SIZE, &count)) && count > 0)
+            if (sys::ListUsers(uids, ACC_USER_LIST_SIZE, &count) && count > 0)
                 m_user = uids[0];
         }
         AccountProfile profile;
@@ -174,7 +174,10 @@ namespace sl::menu::ui {
         if (!m->m_safe_mode) m->m_widgets.Init();  // curl global init + Lua parse
         m->m_news.Init();                          // whatever news the card holds
         m->m_deferred_audio = m->m_music.Init();   // mixer + decoders
-        m->m_sfx.Init(m->m_deferred_audio);        // ~1.4 MB of WAV off the SD
+        // ~1.4 MB of WAV off the SD. Metro has a set of its own if the card
+        // holds one (sdmc:/slaunch/sounds/metro), read at start like the rest.
+        m->m_sfx.Init(m->m_deferred_audio,
+                      m->m_ui_mode == UiMode::Metro ? kMetroSoundDir : nullptr);
         m->m_deferred_flag.store(true, std::memory_order_release);
     }
     void Menu::InitDeferred() {
@@ -959,6 +962,8 @@ namespace sl::menu::ui {
                 m_shelf_vertical = (v != 0);
             else if (sscanf(line, "shelf_ps=%d", &v) == 1)
                 m_shelf_ps = (v != 0);
+            else if (sscanf(line, "metro_theme=%d", &v) == 1)
+                m_metro_themed = (v != 0);
             else if (sscanf(line, "backdrop=%d", &v) == 1 && v >= 0 && v <= 2)
                 m_backdrop = (Backdrop)v;
             else if (sscanf(line, "wrap_nav=%d", &v) == 1)
@@ -1018,6 +1023,11 @@ namespace sl::menu::ui {
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
         fprintf(fp, "shelf_vertical=%d\n", m_shelf_vertical ? 1 : 0);
         fprintf(fp, "shelf_ps=%d\n", m_shelf_ps ? 1 : 0);
+        fprintf(fp, "metro_theme=%d\n", m_metro_themed ? 1 : 0);
+        // Tells the daemon to capture the game on HOME (see HomeFrameFlag):
+        // only Metro shows it, and the capture costs the HOME press time.
+        if (m_ui_mode == UiMode::Metro) { if (FILE *ff = fopen(sl::smi::HomeFrameFlag, "w")) fclose(ff); }
+        else remove(sl::smi::HomeFrameFlag);
         fprintf(fp, "backdrop=%d\n", (int)m_backdrop);
         fprintf(fp, "wrap_nav=%d\n", m_wrap_nav ? 1 : 0);
         fprintf(fp, "show_hints=%d\n", m_show_hints ? 1 : 0);
@@ -1063,6 +1073,9 @@ namespace sl::menu::ui {
         return nullptr;
     }
     void Menu::SetCustomName(u64 app_id, const char *name) {
+#ifdef SL_QEXT
+        qext::RenameTitle(app_id, name);
+#endif
         for (auto it = m_names.begin(); it != m_names.end(); ++it) {
             if (it->first == app_id) {
                 if (name && name[0]) it->second = name;
@@ -1228,6 +1241,7 @@ namespace sl::menu::ui {
             case Screen::DeckMenu:      a = OnButtonDeckMenu(b, out_app_id); break;
             case Screen::DeckLibrary:   a = OnButtonDeckLibrary(b, out_app_id); break;
             case Screen::DeckNews:      a = OnButtonDeckNews(b);      break;
+            case Screen::MetroGames:    a = OnButtonMetroGames(b, out_app_id); break;
             case Screen::FlowSettings:  a = OnButtonFlowSettings(b);  break;
             case Screen::About:         a = OnButtonAbout(b);         break;
             case Screen::Welcome:       a = OnButtonWelcome(b);       break;
@@ -1261,6 +1275,14 @@ namespace sl::menu::ui {
         if (m_options_open)               return Action::None;
         if (m_dialog != Dialog::None)     return Action::None;
 
+        // Metro: HOME is the Guide button. It brings the Guide up over the
+        // dashboard, and a second press goes back to the game, if there is one.
+        if (m_ui_mode == UiMode::Metro && m_screen == Screen::Main) {
+            if (!m_metro_guide) { MetroOpenGuide(false); return Action::None; }
+            if (m_suspended != 0) return Action::ResumeApp;
+            m_metro_guide = false;
+            return Action::None;
+        }
         if (m_ui_mode == UiMode::Deck && m_screen == Screen::Main) {
             m_screen = Screen::DeckMenu;   // same as pressing Minus on this screen
             m_deck_menu_cursor = 0;
@@ -1275,7 +1297,10 @@ namespace sl::menu::ui {
     // their own selection to it. See the call site in OnButtonMain for why
     // this is not just inlined there.
     Menu::Action Menu::ActivateSelected(u64 &out_app_id) {
-        const MenuItem &it = m_items[m_cursor];
+        return ActivateItem(m_items[m_cursor], out_app_id);
+    }
+    // By value: opening some of these rebuilds m_items under it.
+    Menu::Action Menu::ActivateItem(MenuItem it, u64 &out_app_id) {
 
         switch (it.kind) {
             // A live tile is something to look at, not somewhere to go.
@@ -1373,6 +1398,13 @@ namespace sl::menu::ui {
         // The bounce is playing and the launch is already committed; scrolling
         // away underneath it would animate the wrong case.
         if (m_launch_tick != 0) return Action::None;
+        // Metro draws its panels whether or not there is anything in the list,
+        // so it takes the buttons first; what it does not claim (X, Y, +, B on
+        // a search) falls through to the handling every layout shares.
+        if (m_ui_mode == UiMode::Metro) {
+            Action ma = Action::None;
+            if (MetroNav(b, ma, out_app_id)) return ma;
+        }
         if (m_items.empty()) {
             if (b == Btn::Plus) EnterPower();
             // A search that matched nothing empties the list, and every other
@@ -1562,6 +1594,11 @@ namespace sl::menu::ui {
                     return Action::None;
                 }
             }
+            // The Minus menu moves m_cursor onto its own entry, and nothing moves it
+            // back. The row then draws box 0, while A activated that menu entry again.
+            if (b == Btn::A && !m_flow_items.empty() &&
+                std::find(m_flow_items.begin(), m_flow_items.end(), m_cursor) == m_flow_items.end())
+                m_cursor = m_flow_items[0];
             if (b == Btn::Minus) {
                 m_screen = Screen::FlowMenu;
                 m_flow_menu_cursor = 0;
@@ -2237,6 +2274,11 @@ namespace sl::menu::ui {
     }
     void Menu::DrawBackground() {
         const Theme &t = m_theme.Current();
+        // Metro in its own colours has its own backdrop on every screen.
+        if (m_ui_mode == UiMode::Metro) {
+            MetroPalette();
+            if (!m_metro_themed) { MetroDrawBackdrop(); return; }
+        }
         m_gfx->GradientV(t.bg_top, t.bg_bottom);
 
         // Wallpaper first (when set), so ribbons draw on top.
@@ -2311,12 +2353,8 @@ namespace sl::menu::ui {
         char clock[32];
         strftime(clock, sizeof(clock), "%H:%M", &tm_now);
 
-        u32 charge = 0;
-        psmGetBatteryChargePercentage(&charge);
-        PsmChargerType charger = PsmChargerType_Unconnected;
-        bool charging = false;
-        if (R_SUCCEEDED(psmGetChargerType(&charger)))
-            charging = charger != PsmChargerType_Unconnected;
+        const u32 charge = sys::BatteryPercent();
+        const bool charging = sys::Charging();
         // Charging marked with a leading '+' rather than a bolt glyph, for the
         // same reason as DrawTopBar: user-supplied fonts draw tofu.
         char batt[24];
@@ -2339,6 +2377,10 @@ namespace sl::menu::ui {
             DrawXmbHeader((center_title && *center_title) ? T(center_title) : "");
             return;
         }
+        if (m_ui_mode == UiMode::Metro) {
+            DrawMetroHeader((center_title && *center_title) ? T(center_title) : "");
+            return;
+        }
 
         time_t now = time(nullptr);
         struct tm tm_now;
@@ -2349,12 +2391,8 @@ namespace sl::menu::ui {
 
         // Right side: nickname then battery (with charging indicator), laid out
         // by measured width so the gap is even and nothing crowds the screen edge.
-        u32 charge = 0;
-        psmGetBatteryChargePercentage(&charge);
-        PsmChargerType charger = PsmChargerType_Unconnected;
-        bool is_charging = false;
-        if (R_SUCCEEDED(psmGetChargerType(&charger)))
-            is_charging = charger != PsmChargerType_Unconnected;
+        const u32 charge = sys::BatteryPercent();
+        const bool is_charging = sys::Charging();
         // Charging is marked with a leading '+' rather than a bolt glyph: the
         // menu can be rendered in any user-supplied font, and a font without
         // that glyph draws tofu here.
@@ -2391,6 +2429,7 @@ namespace sl::menu::ui {
     // to know its total width without laying it out once first.
     void Menu::DrawHint(std::initializer_list<HintSeg> segs) {
         if (!m_show_hints) return;
+        if (m_ui_mode == UiMode::Metro) { MetroHintSegs(segs); return; }
         const Theme &t = m_theme.Current();
         constexpr int kIcon = 22, kIconGap = 2, kLabelGap = 7, kSegGap = 26;
         const FontSize fs = FontSize::Small;
@@ -2517,6 +2556,10 @@ namespace sl::menu::ui {
         // carries the XMB look across the whole menu.
         if (m_ui_mode == UiMode::XMB) {
             DrawCarouselXmb(labels, values, cursor, scroll_pos);
+            return;
+        }
+        if (m_ui_mode == UiMode::Metro) {
+            DrawCarouselMetro(labels, values, cursor, scroll_pos);
             return;
         }
 
@@ -2690,10 +2733,32 @@ namespace sl::menu::ui {
         constexpr size_t kArtKeep = 48;
         bool low = false;
 #ifndef SL_SIMULATOR
+#ifdef SL_QEXT
+        constexpr size_t kLowHeap = 24u << 20;   // the arena is big blocks only, little waste
+#else
         constexpr size_t kLowHeap = 40u << 20;
+#endif
+#ifdef SL_QEXT
+        // Art is all big allocations, so what counts is the loader's arena.
+        const size_t heap = qext_arena_size();
+        const size_t used = heap - qext_arena_free_bytes();
+#else
         const size_t heap = (size_t)(fake_heap_end - fake_heap_start);
         const size_t used = (size_t)(unsigned)mallinfo().uordblks;
+#endif
         low = heap > used && heap - used < kLowHeap;
+#ifdef SL_QEXT
+        // The heap is a fixed size here: this is what says whether it is big enough.
+        static bool was_low = false;
+        if (low != was_low) {
+            was_low = low;
+            if (FILE *fp = fopen("sdmc:/slaunch/boot.log", "a")) {
+                fprintf(fp, "qext: arena %s, %zu of %zu MB used, malloc heap %u MB\n", low ? "low" : "ok",
+                        used >> 20, heap >> 20, (unsigned)mallinfo().uordblks >> 20);
+                fclose(fp);
+            }
+        }
+#endif
 #endif
         const size_t n = m_covers.size() + m_hero_art.size() + m_game_wraps.size() + m_shots.size();
         if (!low && n <= kArtKeep) return;
@@ -2701,7 +2766,15 @@ namespace sl::menu::ui {
         // overrides them.
         if (!low && (m_ui_mode == UiMode::Flow || m_ui_mode == UiMode::Shelf)) return;
 
+#ifdef SL_QEXT
+        // Dropping what is on screen only for it to load straight back made Flow's
+        // boxes flip between their cover and the square icon, twice a second, for
+        // as long as the arena stayed low. Only the last resort touches those.
+        const bool critical = low && heap - used < (size_t)(8u << 20);
+        const int radius = critical ? 0 : low ? 8 : 12;
+#else
         const int radius = low ? 0 : 12;
+#endif
         std::unordered_set<u64> keep;
         const int total = (int)m_items.size();
         for (int i = m_cursor - radius; total > 0 && i <= m_cursor + radius; i++)
@@ -2718,7 +2791,11 @@ namespace sl::menu::ui {
         trim(m_hero_art, free_tex);
         trim(m_game_wraps, free_tex);
         trim(m_shots, [&](FlowShots &s) { free_tex(s.a); free_tex(s.b); });
+#ifdef SL_QEXT
+        if (critical) {
+#else
         if (low) {
+#endif
             DeckFreeArt();
             for (auto &kv : m_folder_art) {
                 free_tex(kv.second.tex);
@@ -2728,6 +2805,20 @@ namespace sl::menu::ui {
     }
 
     void Menu::Render() {
+#ifdef SL_QEXT
+        // The loader's system keyboard instead of the drawn one. It blocks, and
+        // both outcomes finish through the drawn keyboard's own handler, so every
+        // purpose still applies its result the one way.
+        if (m_screen == Screen::Keyboard) {
+            SwkbdOptions opt{};
+            opt.initialText = m_kb_text.c_str();
+            opt.maxLength = 120;
+            char out[128];
+            const int n = qext_swkbd_show_ex(&opt, out, sizeof(out));
+            if (n >= 0) { m_kb_text = out; OnButtonKeyboard(Btn::Plus); }
+            else        { OnButtonKeyboard(Btn::B); }
+        }
+#endif
         TrimArt();
         PollHbScan();       // swap in the homebrew browser list when its worker finishes
         PollResolvePins();  // fold in pinned-homebrew names/icons when its worker finishes
@@ -2859,6 +2950,7 @@ namespace sl::menu::ui {
             case Screen::DeckMenu:    DrawDeckMenu(); break;
             case Screen::DeckLibrary: DrawDeckLibrary(); break;
             case Screen::DeckNews:    DrawDeckNews(); break;
+            case Screen::MetroGames:  DrawMetroGames(); break;
             case Screen::FlowSettings: DrawFlowSettings(); break;
             case Screen::About:       DrawAbout(); break;
             case Screen::Welcome:     DrawWelcome(); break;
@@ -2873,6 +2965,7 @@ namespace sl::menu::ui {
         // Under the options overlay and any dialog on purpose - both already
         // have their own way out, and neither is what B does while they're up.
         if (m_screen != Screen::Main && m_screen != Screen::Oobe &&
+            m_screen != Screen::MetroGames &&   // Metro is buttons only
             !m_options_open && m_dialog == Dialog::None)
             DrawBackTap();
         DrawUsbStatus();   // over the screen, under the options overlay and dialogs
@@ -3081,6 +3174,7 @@ namespace sl::menu::ui {
             case UiMode::XMB:     DrawMainXmb();     break;
             case UiMode::Flow:    DrawMainFlow();    break;
             case UiMode::Deck:    DrawMainDeck();    break;
+            case UiMode::Metro:   DrawMainMetro();   break;
             default:              DrawMainList();    break;
         }
 
@@ -3088,7 +3182,8 @@ namespace sl::menu::ui {
         // Nothing to draw until the deferred worker has finished building them.
         // Deck is the exception: it gives the widgets a row of cards of their
         // own, and the floating copies would land on top of it.
-        if (m_deferred_joined && m_widgets.AnyEnabled() && m_ui_mode != UiMode::Deck) {
+        if (m_deferred_joined && m_widgets.AnyEnabled() && m_ui_mode != UiMode::Deck &&
+            m_ui_mode != UiMode::Metro) {
             const Theme &t = m_theme.Current();
             m_widgets.Render(m_gfx, t, m_ui_mode == UiMode::Grid);
 
@@ -3243,6 +3338,7 @@ namespace sl::menu::ui {
         const Theme &t = m_theme.Current();
         const int n = (int)m_options.size();
         if (n == 0) return;
+        if (m_ui_mode == UiMode::Metro) { DrawMetroOptions(); return; }
 
         // Dim the menu behind the panel.
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0, 0, 0, 150});

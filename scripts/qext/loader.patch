@@ -1,0 +1,456 @@
+diff --git a/build-ffmpeg.sh b/build-ffmpeg.sh
+index d90a851..575bf0f 100644
+--- a/build-ffmpeg.sh
++++ b/build-ffmpeg.sh
+@@ -62,6 +62,7 @@ cd "$BUILD"
+     --enable-avutil \
+     --enable-nvtegra \
+     --enable-demuxer=mov \
++    --enable-protocol=file \
+     --enable-decoder='h264,aac' \
+     --enable-parser='h264,aac' \
+     --enable-bsf='h264_mp4toannexb,aac_adtstoasc' \
+diff --git a/loader/Makefile b/loader/Makefile
+index 96b4ac9..d08b9fe 100644
+--- a/loader/Makefile
++++ b/loader/Makefile
+@@ -62,6 +62,8 @@ NEKOMOD := $(TOPDIR)/../extern/SDL-dlink/extern/neko3d/neko3d-module
+ NEKO_UNDEFS := $(shell cat $(NEKOMOD)/neko3d.undef 2>/dev/null)
+ NEKO_DEFS := $(shell cat $(NEKOMOD)/neko3d.def 2>/dev/null)
+ MENU_UNDEFS := $(shell cat $(TOPDIR)/../menu/menu.undef 2>/dev/null)
++# A third-party menu's imports, so the loader links in what it needs.
++MENU_UNDEFS += $(shell cat $(QEXT_EXTRA_UNDEF) 2>/dev/null)
+ # FIXED loader ABI: every libc/libm leaf any menu build (past or future) may
+ # import, independent of menu.undef. The loader never needs a relink for menu
+ # changes; menus must stay within this surface (build.sh checks and fails
+diff --git a/loader/src/arena_core.h b/loader/src/arena_core.h
+new file mode 100644
+index 0000000..c49bdb5
+--- /dev/null
++++ b/loader/src/arena_core.h
+@@ -0,0 +1,118 @@
++/* First-fit allocator over one address range, for the big allocations (see
++   main.cpp). Not thread-safe; callers hold the lock. No libnx in here, so
++   scripts/qext/test_arena.cpp can run it on a PC. */
++#pragma once
++#include <stddef.h>
++#include <stdint.h>
++
++namespace arena {
++
++struct Free { size_t size; Free *next; };
++struct Head { size_t size; size_t magic; };   /* just before the payload, block starts here */
++constexpr size_t kMagic = 0x4152454E41424C4BULL;
++constexpr size_t kMinBlock = sizeof(Head) + 16;
++
++inline Free *g_free = nullptr;   /* sorted by address */
++
++inline void Insert(char *start, size_t size)
++{
++    Free *prev = nullptr, *cur = g_free;
++    while (cur && (char *)cur < start) {
++        prev = cur;
++        cur = cur->next;
++    }
++    Free *f = (Free *)start;
++    f->size = size;
++    f->next = cur;
++    if (cur && start + size == (char *)cur) {
++        f->size += cur->size;
++        f->next = cur->next;
++    }
++    if (prev && (char *)prev + prev->size == start) {
++        prev->size += f->size;
++        prev->next = f->next;
++    } else if (prev) {
++        prev->next = f;
++    } else {
++        g_free = f;
++    }
++}
++
++inline void *Alloc(size_t n, size_t align)
++{
++    if (align < 16)
++        align = 16;
++    if (n > SIZE_MAX / 2)
++        return nullptr;
++    n = (n + 15) & ~(size_t)15;
++    Free *prev = nullptr;
++    for (Free *f = g_free; f; prev = f, f = f->next) {
++        char *start = (char *)f;
++        char *limit = start + f->size;
++        char *p = (char *)(((uintptr_t)start + sizeof(Head) + align - 1) & ~(uintptr_t)(align - 1));
++        /* A gap in front must be able to hold a free block of its own. */
++        if (p - sizeof(Head) != start && (size_t)(p - sizeof(Head) - start) < kMinBlock)
++            p += align;
++        char *end = p + n;
++        if (end > limit)
++            continue;
++        if ((size_t)(limit - end) < kMinBlock)
++            end = limit;   /* a tail too small to track stays with this block */
++        Free *next = f->next;
++        if (prev)
++            prev->next = next;
++        else
++            g_free = next;
++        char *block = p - sizeof(Head);
++        if (block != start)
++            Insert(start, (size_t)(block - start));
++        if (end != limit)
++            Insert(end, (size_t)(limit - end));
++        Head *h = (Head *)block;
++        h->size = (size_t)(end - block);
++        h->magic = kMagic;
++        return p;
++    }
++    return nullptr;
++}
++
++inline size_t Usable(void *p)
++{
++    Head *h = (Head *)p - 1;
++    return h->size - sizeof(Head);
++}
++
++inline void Release(void *p)
++{
++    Head *h = (Head *)p - 1;
++    h->magic = 0;
++    Insert((char *)h, h->size);
++}
++
++/* Bytes free. */
++inline size_t FreeBytes()
++{
++    size_t n = 0;
++    for (Free *f = g_free; f; f = f->next)
++        n += f->size;
++    return n;
++}
++
++/* If the last free block runs up to `end`, take it off the list and return where
++   it starts; otherwise return `end`. That is how far the range can shrink. */
++inline char *TrimEnd(char *end)
++{
++    Free *prev = nullptr;
++    for (Free *f = g_free; f; prev = f, f = f->next) {
++        if ((char *)f + f->size == end) {
++            if (prev)
++                prev->next = f->next;
++            else
++                g_free = f->next;
++            return (char *)f;
++        }
++    }
++    return end;
++}
++
++} // namespace arena
+diff --git a/loader/src/main.cpp b/loader/src/main.cpp
+index 30c988c..ee22857 100644
+--- a/loader/src/main.cpp
++++ b/loader/src/main.cpp
+@@ -5,6 +5,7 @@
+ #include <cstdio>
+ #include <cstring>
+ #include <malloc.h>
++#include <unistd.h>
+ #include <switch.h>
+ #include <switch/display/parcel.h>
+ #include <dlink/dlink.h>
+@@ -95,6 +96,203 @@ extern "C" int qext_heap_set(int profile)
+     return (int)rc;
+ }
+ 
++/* Big allocations live apart from malloc's heap, at the top of the heap region.
++   Only the top of the region can go back to the system, and small long-lived
++   allocations made at any time pin everything below them. With these two
++   separated, unloading a menu empties the arena and the whole of it can go,
++   leaving the applet pool the room for large applets. */
++#include "arena_core.h"
++static constexpr size_t kBigAlloc = 64 * 1024;
++static Mutex s_arenaLock;
++static char *s_arenaStart = nullptr;
++static char *s_arenaEnd = nullptr;
++
++static inline bool InArena(void *p)
++{
++    return (char *)p >= s_arenaStart && (char *)p < s_arenaEnd;
++}
++
++static void *ArenaAlloc(size_t n, size_t align)
++{
++    if (n < kBigAlloc || s_arenaEnd == s_arenaStart)
++        return nullptr;
++    mutexLock(&s_arenaLock);
++    void *p = arena::Alloc(n, align);
++    mutexUnlock(&s_arenaLock);
++    return p; /* full: the caller falls back on malloc's heap */
++}
++
++extern "C" {
++
++void *malloc(size_t n)
++{
++    void *p = ArenaAlloc(n, 16);
++    return p ? p : _malloc_r(_REENT, n);
++}
++
++void free(void *p)
++{
++    if (!p)
++        return;
++    if (InArena(p)) {
++        mutexLock(&s_arenaLock);
++        arena::Release(p);
++        mutexUnlock(&s_arenaLock);
++        return;
++    }
++    _free_r(_REENT, p);
++}
++
++void *calloc(size_t a, size_t b)
++{
++    size_t n;
++    if (__builtin_mul_overflow(a, b, &n))
++        return nullptr;
++    void *p = ArenaAlloc(n, 16);
++    if (p) {
++        memset(p, 0, n);
++        return p;
++    }
++    return _calloc_r(_REENT, a, b);
++}
++
++void *memalign(size_t align, size_t n)
++{
++    void *p = ArenaAlloc(n, align);
++    return p ? p : _memalign_r(_REENT, align, n);
++}
++
++void *aligned_alloc(size_t align, size_t n)
++{
++    return memalign(align, n);
++}
++
++int posix_memalign(void **out, size_t align, size_t n)
++{
++    void *p = memalign(align, n);
++    if (!p)
++        return 12; /* ENOMEM */
++    *out = p;
++    return 0;
++}
++
++size_t malloc_usable_size(void *p)
++{
++    if (!p)
++        return 0;
++    return InArena(p) ? arena::Usable(p) : _malloc_usable_size_r(_REENT, p);
++}
++
++void *realloc(void *p, size_t n)
++{
++    if (!p)
++        return malloc(n);
++    if (n == 0) {
++        free(p);
++        return nullptr;
++    }
++    const size_t old = malloc_usable_size(p);
++    if (!InArena(p) && (n < kBigAlloc || s_arenaEnd == s_arenaStart))
++        return _realloc_r(_REENT, p, n);
++    if (InArena(p) && n <= old)
++        return p;
++    void *q = malloc(n);
++    if (!q)
++        return nullptr;
++    memcpy(q, p, old < n ? old : n);
++    free(p);
++    return q;
++}
++
++/* Sets the heap region to total_mb, of which malloc's own heap keeps small_mb and
++   the arena gets the rest. Call again to regrow after qext_heap_release. */
++int qext_heap_setup(unsigned total_mb, unsigned small_mb)
++{
++    size_t total = (size_t)((total_mb + 1) & ~1u) << 20;
++    void *addr = nullptr;
++    Result rc = svcSetHeapSize(&addr, total);
++    if (R_FAILED(rc)) {
++        logging::LogLine("[heap] setup %u MB failed (rc=0x%X)", total_mb, rc);
++        return (int)rc;
++    }
++    g_heapSize = total;
++    mutexLock(&s_arenaLock);
++    if (!s_arenaStart) {
++        size_t small = (size_t)((small_mb + 1) & ~1u) << 20;
++        size_t used = ((size_t)((char *)sbrk(0) - fake_heap_start) + 0x1FFFFFu) & ~(size_t)0x1FFFFFu;
++        if (small < used)
++            small = used;
++        s_arenaStart = s_arenaEnd = fake_heap_start + small;
++        fake_heap_end = s_arenaStart;
++    }
++    char *end = fake_heap_start + total;
++    if (end > s_arenaEnd) {
++        arena::Insert(s_arenaEnd, (size_t)(end - s_arenaEnd));
++        s_arenaEnd = end;
++    }
++    mutexUnlock(&s_arenaLock);
++    logging::LogLine("[heap] %zu MB: malloc %zu, arena %zu", total >> 20,
++                     (size_t)(s_arenaStart - fake_heap_start) >> 20,
++                     (size_t)(s_arenaEnd - s_arenaStart) >> 20);
++    return 0;
++}
++
++unsigned long qext_arena_free_bytes(void)
++{
++    mutexLock(&s_arenaLock);
++    size_t n = arena::FreeBytes();
++    mutexUnlock(&s_arenaLock);
++    return n;
++}
++
++unsigned long qext_arena_size(void)
++{
++    return (unsigned long)(s_arenaEnd - s_arenaStart);
++}
++
++/* Give the arena back, down to its highest live block, so a large applet fits.
++   Lists what is still in there, since anything left is a leak holding it up.
++   Returns the heap size left in MB. */
++unsigned qext_heap_release(FILE *also)
++{
++    mutexLock(&s_arenaLock);
++    for (char *c = s_arenaStart; c < s_arenaEnd; ) {
++        size_t size = *(size_t *)c;
++        if (size < 16 || c + size > s_arenaEnd)
++            break;
++        if (((arena::Head *)c)->magic == arena::kMagic) {
++            char text[33] = {};
++            const char *data = c + sizeof(arena::Head);
++            for (unsigned j = 0; j < 32; j++)
++                text[j] = (data[j] >= 32 && data[j] < 127) ? data[j] : '.';
++            logging::LogLine("[heap] arena live +%zu KB size %zu: %s",
++                             (size_t)(c - s_arenaStart) >> 10, size, text);
++            if (also)
++                fprintf(also, "[heap] arena live +%zu KB size %zu: %s\n",
++                        (size_t)(c - s_arenaStart) >> 10, size, text);
++        }
++        c += size;
++    }
++    char *top = arena::TrimEnd(s_arenaEnd);
++    char *target = fake_heap_start + (((size_t)(top - fake_heap_start) + 0x1FFFFFu) & ~(size_t)0x1FFFFFu);
++    if (target < top || target > s_arenaEnd)
++        target = s_arenaEnd;
++    if (target > top)
++        arena::Insert(top, (size_t)(target - top));
++    void *addr = nullptr;
++    if (target < s_arenaEnd && R_SUCCEEDED(svcSetHeapSize(&addr, (size_t)(target - fake_heap_start)))) {
++        s_arenaEnd = target;
++        g_heapSize = (size_t)(target - fake_heap_start);
++    } else if (target < s_arenaEnd) {
++        arena::Insert(target, (size_t)(s_arenaEnd - target));
++    }
++    mutexUnlock(&s_arenaLock);
++    logging::LogLine("[heap] released to %zu MB", g_heapSize >> 20);
++    return (unsigned)(g_heapSize >> 20);
++}
++
++} /* extern "C" */
++
+ #define FB_W 1280
+ #define FB_H 720
+ 
+@@ -599,6 +797,10 @@ static void reopen_menu(const char *source)
+                      (unsigned long long)now_ms());
+ }
+ 
++/* Runs while the game is still the thing on screen, so a menu can capture it. */
++static void (*s_beforeHome)(void);
++extern "C" void qext_set_before_home(void (*hook)(void)) { s_beforeHome = hook; }
++
+ static void do_home(const char *source)
+ {
+     logging::LogLine("[qlaunch-ext] Home request (%s) t=%llu", source,
+@@ -609,6 +811,8 @@ static void do_home(const char *source)
+         return;
+     }
+     if (app::IsActive() && app::HasForeground()) {
++        if (s_beforeHome)
++            s_beforeHome();
+         Result rc = sys::SetForeground();
+         logging::LogLine("[qlaunch-ext] fg request rc=0x%X", rc);
+         if (R_SUCCEEDED(rc)) {
+@@ -626,6 +830,9 @@ static void do_sleep(const char *source)
+     logging::LogLine("[qlaunch-ext] sleep request (%s) t=%llu", source,
+                      (unsigned long long)now_ms());
+     plugins::PowerAll();
++    /* Lets the menu stop presenting before vi and nvservices power down. */
++    if (g_booted && s_onPowerButton)
++        s_onPowerButton();
+     sys::EnterSleep();
+ }
+ 
+diff --git a/loader/src/qext.cpp b/loader/src/qext.cpp
+index 68d2662..6b6bb69 100644
+--- a/loader/src/qext.cpp
++++ b/loader/src/qext.cpp
+@@ -113,6 +113,25 @@ extern "C" Result qext_launch_title(u64 tid)
+     return rc;
+ }
+ 
++/* Same as qext_launch_title for a real title, for a menu that picks the user. */
++extern "C" Result qext_launch_title_as(u64 tid, AccountUid uid)
++{
++    if (!tid)
++        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
++    nro::Disarm();
++    if (app::IsActive()) {
++        Result trc = app::Terminate();
++        if (R_FAILED(trc))
++            logging::LogLine("[qext] terminate-before-launch failed (rc=0x%X), continuing", trc);
++    }
++    Result rc = app::Start(tid, false, uid);
++    if (R_SUCCEEDED(rc)) {
++        titles::NoteLaunched(tid);
++        g_launchedTid = tid;
++    }
++    return rc;
++}
++
+ extern "C" Result qext_resume_game(void)
+ {
+     if (!app::IsActive())
+@@ -173,8 +192,9 @@ extern "C" int qext_swkbd_show_ex(const SwkbdOptions *options, char *out, unsign
+         return -1;
+     }
+ 
++    /* Confirmed empty is not cancelled: 0 here, negative above. */
+     if (result[0] == 0)
+-        return -1;
++        return 0;
+ 
+     size_t n = 0;
+     while (n + 1 < cap && result[n]) {
+diff --git a/plugins/ForwarderPlugin/Makefile b/plugins/ForwarderPlugin/Makefile
+index a529992..50a6160 100644
+--- a/plugins/ForwarderPlugin/Makefile
++++ b/plugins/ForwarderPlugin/Makefile
+@@ -4,13 +4,14 @@ SDK := $(TOP)/../../plugins/include
+ MINIINI := $(TOP)/../../extern/miniini
+ 
+ DEVKITPRO ?= /opt/devkitpro
++LIBNX ?= $(DEVKITPRO)/libnx
+ DKA64 := $(DEVKITPRO)/devkitA64
+ CC := $(DKA64)/bin/aarch64-none-elf-gcc
+ CXX := $(DKA64)/bin/aarch64-none-elf-g++
+ PY := python3
+ 
+ ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIC
+-BASEFLAGS := -g -O2 -ffunction-sections -fdata-sections $(ARCH) -D__SWITCH__ -I$(DEVKITPRO)/libnx/include -I$(SDK) -I$(MINIINI) -I$(TOP)/src -DINI_READONLY -DINI_NOBROWSE -DNDEBUG
++BASEFLAGS := -g -O2 -ffunction-sections -fdata-sections $(ARCH) -D__SWITCH__ -I$(LIBNX)/include -I$(SDK) -I$(MINIINI) -I$(TOP)/src -DINI_READONLY -DINI_NOBROWSE -DNDEBUG
+ CFLAGS := $(BASEFLAGS) -fvisibility=hidden
+ 
+ CXXFLAGS := $(BASEFLAGS) -std=gnu++23 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fvisibility=hidden

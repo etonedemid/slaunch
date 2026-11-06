@@ -227,6 +227,8 @@ Result accountListAllUsers(AccountUid *uids, s32 max, s32 *actual);
 Result accountGetProfile(AccountProfile *out, AccountUid uid);
 Result accountProfileGet(AccountProfile *p, void *userdata, AccountProfileBase *base);
 Result accountProfileClose(AccountProfile *p);
+Result accountProfileGetImageSize(AccountProfile *p, u32 *out);
+Result accountProfileLoadImage(AccountProfile *p, void *buf, size_t len, u32 *out);
 
 // ---------------------------------------------------------------------------
 // Network (nifm). Answers come from a small simulated state so the Network

@@ -20,9 +20,15 @@ behind its own vertex shader, whose outputs are the vertex colour (location
 0) and the texture coordinate (location 1) - so the shader's `vP` is read
 from the texture coordinate, which the menu fills with the pixel position.
 
-Usage: fx-spirv.py OUT.h SOURCE...
+With --dksh the same programs are compiled for deko3d by uam (the qlaunch-ext
+build): one uniform block at binding 0 in both stages, and sampler binding 0.
+Card is an ordinary program there, since deko3d takes any vertex shader.
+
+Usage: fx-spirv.py [--dksh] OUT.h SOURCE...
 """
 import re, subprocess, sys, tempfile, os
+
+DKSH = False
 
 # Must match kVsPrelude / kFsPrelude in Gfx.cpp.
 VS_PRELUDE_UNIFORMS = [('float', 'uFlip'), ('float', 'uTime')]
@@ -70,12 +76,30 @@ def varyings(body):
 
 
 def block(table, set_):
-    lines = ['layout(std140, set = %d, binding = 0) uniform FxU { vec4 v[%d]; } fxu;' % (set_, max(1, len(table)))]
+    where = 'binding = 0' if DKSH else 'set = %d, binding = 0' % set_
+    lines = ['layout(std140, %s) uniform FxU { vec4 v[%d]; } fxu;' % (where, max(1, len(table)))]
     lines += ['#define %s (fxu.v[%d]%s)' % (n, i, SWIZZLE[t]) for i, (t, n) in enumerate(table)]
     return '\n'.join(lines) + '\n'
 
 
+def compile_dksh(text, stage):
+    uam = os.path.join(os.environ.get('DEVKITPRO', '/opt/devkitpro'), 'tools/bin/uam')
+    text = text.replace('#version 450', '#version 460')
+    with tempfile.TemporaryDirectory() as d:
+        src, out = os.path.join(d, 'fx.glsl'), os.path.join(d, 'fx.dksh')
+        open(src, 'w').write(text)
+        r = subprocess.run([uam, '-s', stage, '-o', out, src], capture_output=True, text=True)
+        if r.returncode:
+            numbered = '\n'.join('%3d %s' % (i + 1, l) for i, l in enumerate(text.split('\n')))
+            sys.exit('fx-spirv: %s shader failed:\n%s%s\n%s' % (stage, r.stdout, r.stderr, numbered))
+        data = open(out, 'rb').read()
+    data += b'\0' * (-len(data) % 4)
+    return [int.from_bytes(data[i:i + 4], 'little') for i in range(0, len(data), 4)]
+
+
 def compile_glsl(text, stage):
+    if DKSH:
+        return compile_dksh(text, stage)
     with tempfile.TemporaryDirectory() as d:
         src, spv = os.path.join(d, 'fx.' + stage), os.path.join(d, 'fx.spv')
         open(src, 'w').write(text)
@@ -89,12 +113,17 @@ def compile_glsl(text, stage):
 
 
 def main():
-    out, paths = sys.argv[1], sys.argv[2:]
+    global DKSH
+    args = sys.argv[1:]
+    if args[0] == '--dksh':
+        DKSH = True
+        args = args[1:]
+    out, paths = args[0], args[1:]
     entries, blobs = [], []
     for name, p in sorted(literals(paths).items()):
         vs, fs = p.get('Vs', ''), p['Fs']
         samplers = len(re.findall(r'^\s*uniform\s+sampler2D\s+\w+\s*;', fs, re.M))
-        if name == 'Card':
+        if name == 'Card' and not DKSH:
             table = uniforms(fs) + FS_PRELUDE_UNIFORMS
             body = strip_decls(fs)
             body = re.sub(r'^\s*varying\s+vec2\s+vP\s*;', 'layout(location = 1) in vec2 vP;', body, flags=re.M)
@@ -121,7 +150,7 @@ def main():
             vert = ('#version 450\nlayout(location = 0) in vec4 aV;\n' + block(table, 1) +
                     VS_PRELUDE_CODE + io(strip_decls(vs), 'out'))
             fbody = re.sub(r'^\s*uniform\s+sampler2D\s+(\w+)\s*;',
-                           r'layout(set = 2, binding = 0) uniform sampler2D \1;', strip_decls(fs), flags=re.M)
+                           (r'layout(binding = 0) uniform sampler2D \1;' if DKSH else r'layout(set = 2, binding = 0) uniform sampler2D \1;'), strip_decls(fs), flags=re.M)
             frag = ('#version 450\nlayout(location = 0) out vec4 fx_FragColor;\n' + block(table, 3) +
                     io(fbody, 'in'))
             vs_words, fs_words = compile_glsl(vert, 'vert'), compile_glsl(frag, 'frag')

@@ -41,6 +41,10 @@ namespace sl::menu::ui {
         QueueArt(Art_Cover, it.app_id);              // lands in a frame or two
         return nullptr;
     }
+    // How many boxes either side keep their scan, for the printed sides and backs.
+    // Turning the camera shows the sides of boxes well away from the selection.
+    static constexpr int kFlowWrapReach = 3;
+
     SDL_Texture *Menu::GameWrap(const MenuItem &it) {
         if (it.kind != ItemKind::Game || it.app_id == 0) return nullptr;
         auto f = m_game_wraps.find(it.app_id);
@@ -162,6 +166,7 @@ namespace sl::menu::ui {
                 continue;
             }
             j.surf = LoadArt(j.kind, j.id, false, j.built);
+            gfx::Gfx::PrepareArt(j.surf);
             std::lock_guard<std::mutex> lk(m->m_art_mx);
             m->m_art_done.push_back(j);
         }
@@ -187,7 +192,7 @@ namespace sl::menu::ui {
                       : j.kind == Art_Wrap  ? m_game_wraps : m_hero_art;
             SDL_Texture *tex = nullptr;
             if (j.surf) {
-                tex = SDL_CreateTextureFromSurface(m_gfx->Renderer(), j.surf);
+                tex = m_gfx->UploadArt(j.surf);
                 SDL_DestroySurface(j.surf);
             }
             auto old = map.find(j.id);
@@ -228,7 +233,10 @@ namespace sl::menu::ui {
     void Menu::FetchArtFor(const MenuItem &it) {
         if (it.kind != ItemKind::Game || it.app_id == 0) return;
         const auto c = m_covers.find(it.app_id);
-        if (c != m_covers.end() && c->second == nullptr) StartCoverFetch(it.app_id, it.name);
+        const auto h = m_hero_art.find(it.app_id);
+        if ((c != m_covers.end() && c->second == nullptr) ||
+            (h != m_hero_art.end() && h->second == nullptr))   // looked for, none on the card
+            StartCoverFetch(it.app_id, it.name);
     }
 
     // A small bar above the hints while box art is being fetched: which game,
@@ -246,7 +254,7 @@ namespace sl::menu::ui {
         }
         const Theme &t = m_theme.Current();
         static const char *kText[] = { "", "Looking up", "Updating the game list", "Downloading box art",
-                                       "Saving", "SteamGridDB", "Screenshots",
+                                       "Saving", "SteamGridDB", "Screenshots", "Nintendo eShop",
                                        "Box art added", "No box art found", "Could not download" };
         const Uint8 A = (Uint8)(255 * a);
         // In the middle of the top bar, which every main layout leaves free:
@@ -465,6 +473,45 @@ namespace sl::menu::ui {
             }
             if (have_wrap && !m->m_cover_force_shots) need_shots = false;
         }
+        // The wide art from Nintendo's own store: keyless, official, already
+        // the 16:9 a wide tile wants, and it has the first-party games no
+        // other source does. Found through the store's public search (the
+        // one nintendo.com itself queries), matched strictly by name, and
+        // fetched resized to 960x540 JPEG by the image host.
+        if (need_hero && !net::ContentFilter::ShouldFilterGameByName(m->m_cover_name)) {
+            m->m_fetch_stage.store((int)FetchStage::Eshop);
+            std::string q;
+            for (unsigned char c : net::SearchName(m->m_cover_name)) {
+                if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
+                else { char b[4]; snprintf(b, sizeof(b), "%%%02X", c); q += b; }
+            }
+            const std::string url =
+                "https://u3b6gr4ua3-dsn.algolia.net/1/indexes/store_game_en_us"
+                "?x-algolia-application-id=U3B6GR4UA3"
+                "&x-algolia-api-key=a29c6927638bfd8cee23993e51e721c9"
+                "&hitsPerPage=8&attributesToRetrieve=title,productImage,platform"
+                "&attributesToHighlight=&attributesToSnippet=&query=" + q;
+            std::string body;
+            long http = 0; int rc = 0;
+            const bool ok = !q.empty() && net::Get(url.c_str(), body, 8, nullptr, &http, &rc);
+            const std::string img = ok ? net::NintendoArtFor(body, m->m_cover_name) : std::string();
+            if (!img.empty()) {
+                const std::string src = "https://assets.nintendo.com/image/upload/"
+                                        "c_fill,w_960,h_540,f_jpg,q_80/" + img;
+                char dst[96];
+                mkdir("sdmc:/slaunch/covers", 0777);
+                snprintf(dst, sizeof(dst), "sdmc:/slaunch/covers/%016llX_hero.jpg",
+                         (unsigned long long)m->m_cover_id);
+                m->m_hero_ok = net::Download(src.c_str(), dst, 20);
+                if (m->m_hero_ok) need_hero = false;
+            }
+            if (FILE *lf = fopen("sdmc:/slaunch/covers.log", "a")) {
+                fprintf(lf, "eshop http=%ld curl=%d match=%s hero=%d name=%s\n", http, rc,
+                        img.empty() ? "none" : "yes", m->m_hero_ok ? 1 : 0, m->m_cover_name.c_str());
+                fclose(lf);
+            }
+        }
+
         // SteamGridDB only when the user turned it on and gave it a key;
         // otherwise only the keyless Steam screenshots remain to look for.
         if (!m->m_sgdb_enabled || m->m_sgdb_key.empty()) { need_cover = false; need_hero = false; }
@@ -673,7 +720,7 @@ namespace sl::menu::ui {
             snprintf(miss, sizeof(miss), "sdmc:/slaunch/covers/%016llX_miss",
                      (unsigned long long)m->m_cover_id);
             if (FILE *f = fopen(miss, "w")) {
-                fprintf(f, "%lld %d\n", (long long)time(nullptr), m->SgdbActive() ? 1 : 0);
+                fprintf(f, "%lld %d 2\n", (long long)time(nullptr), m->SgdbActive() ? 1 : 0);
                 fclose(f);
             }
         }
@@ -706,8 +753,10 @@ namespace sl::menu::ui {
         snprintf(miss, sizeof(miss), "sdmc:/slaunch/covers/%016llX_miss",
                  (unsigned long long)app_id);
         if (FILE *f = fopen(miss, "r")) {
-            long long when = 0; int sgdb = -1;
-            const bool got = fscanf(f, "%lld %d", &when, &sgdb) == 2;
+            // The third number is the set of sources that was tried: a mark
+            // left before the eShop was one of them is looked at again.
+            long long when = 0; int sgdb = -1, ver = 0;
+            const bool got = fscanf(f, "%lld %d %d", &when, &sgdb, &ver) == 3 && ver >= 2;
             fclose(f);
             if (got && sgdb == (SgdbActive() ? 1 : 0) &&
                 time(nullptr) - when < 7 * 24 * 3600)
@@ -829,6 +878,8 @@ namespace sl::menu::ui {
         Menu *m = static_cast<Menu *>(self);
         m->m_shot_surf_a = DecodeCoverSurface(m->m_shot_path_a, kShotTexW, kShotTexH);
         m->m_shot_surf_b = DecodeCoverSurface(m->m_shot_path_b, kShotTexW, kShotTexH);
+        gfx::Gfx::PrepareArt(m->m_shot_surf_a);
+        gfx::Gfx::PrepareArt(m->m_shot_surf_b);
         m->m_shot_done.store(true, std::memory_order_release);
     }
     void Menu::PollShotDecode() {
@@ -839,12 +890,12 @@ namespace sl::menu::ui {
 
         FlowShots s;
         if (m_shot_surf_a) {
-            s.a = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_shot_surf_a);
+            s.a = m_gfx->UploadArt(m_shot_surf_a);
             SDL_DestroySurface(m_shot_surf_a);
             m_shot_surf_a = nullptr;
         }
         if (m_shot_surf_b) {
-            s.b = SDL_CreateTextureFromSurface(m_gfx->Renderer(), m_shot_surf_b);
+            s.b = m_gfx->UploadArt(m_shot_surf_b);
             SDL_DestroySurface(m_shot_surf_b);
             m_shot_surf_b = nullptr;
         }
@@ -1230,10 +1281,17 @@ namespace sl::menu::ui {
         }
 
         // Box scans are big: keep only those of the boxes near the selection.
-        if (m_game_wraps.size() > 8) {
+        if (m_game_wraps.size() > 2 * kFlowWrapReach + 3) {
+            // Around the selection and around where the row is on screen, which
+            // lags behind it mid-scroll. Keeping only the first threw away the scan
+            // of a box the draw loop below was asking for, so it never showed.
             std::unordered_set<u64> keep;
-            for (int d = -2; d <= 2; d++)
+            const int shown = (int)std::lround(m_flow_scroll);
+            for (int d = -kFlowWrapReach; d <= kFlowWrapReach; d++) {
                 keep.insert(m_items[m_flow_items[FlowWrap(sel + d, n)]].app_id);
+                keep.insert(m_items[m_flow_items[FlowWrap(shown + d, n)]].app_id);
+            }
+            if (m_suspended != 0) keep.insert(m_suspended);   // turns by itself, so always shows it
             for (auto w = m_game_wraps.begin(); w != m_game_wraps.end(); ) {
                 if (keep.count(w->first)) { ++w; continue; }
                 if (w->second) m_gfx->FreeImage(w->second);
@@ -1349,7 +1407,7 @@ namespace sl::menu::ui {
             // This game's own box scan, when GameTDB had one: loaded for the
             // boxes by the selection, used from cache for the rest.
             SDL_Texture *gw = nullptr;
-            if (std::abs(p) <= 2.5f) gw = GameWrap(it);
+            if (std::abs(p) <= kFlowWrapReach + 0.5f || it.app_id == m_suspended) gw = GameWrap(it);
             else if (auto g = m_game_wraps.find(it.app_id); g != m_game_wraps.end()) gw = g->second;
             const bool scan_front = gw && TdbFront(it.app_id);
 
@@ -1612,6 +1670,10 @@ namespace sl::menu::ui {
             std::unordered_set<u64> keep_shots;
             for (int i = sel - 2; i <= sel + 2; i++)
                 if (const MenuItem *it2 = row_item(i)) keep_shots.insert(it2->app_id);
+            // The running game turns by itself, so it shows its back from anywhere
+            // in the row. Dropping its panels here while the load pass asked for
+            // them again meant decoding them forever and rarely having them.
+            if (m_suspended != 0) keep_shots.insert(m_suspended);
             for (auto it2 = m_shots.begin(); it2 != m_shots.end(); ) {
                 if (keep_shots.count(it2->first)) { ++it2; continue; }
                 if (it2->second.a) m_gfx->FreeImage(it2->second.a);

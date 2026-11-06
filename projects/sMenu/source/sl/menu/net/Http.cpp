@@ -293,6 +293,24 @@ namespace sl::menu::net {
         return MatchLevel(cand, title) > 0;
     }
 
+    std::string NintendoArtFor(const std::string &json, const std::string &title) {
+        std::string best;
+        int best_score = 0;
+        for (size_t p = json.find('{', 1); p != std::string::npos; p = json.find('{', p + 1)) {
+            const size_t end = json.find('}', p);
+            if (end == std::string::npos) break;
+            const std::string name = JsonField(json, "title", p, end);
+            const std::string img  = JsonField(json, "productImage", p, end);
+            if (name.empty() || img.empty()) continue;
+            // Exact beats an edition; the original console beats Switch 2.
+            const int lvl = MatchLevel(name, title);
+            if (lvl == 0) continue;
+            const int score = lvl * 2 + (JsonField(json, "platform", p, end) == "Nintendo Switch");
+            if (score > best_score) { best_score = score; best = img; }
+        }
+        return best;
+    }
+
     std::string SteamAppFor(const std::string &json, const std::string &title) {
         std::string edition;   // best so far if no exact title turns up
         // One object per result: {"appid":"...","name":"...",...}

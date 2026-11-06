@@ -8,6 +8,12 @@
 #include <unordered_map>
 #include <mutex>
 
+#ifdef SL_LIBNX_MASTER   // see os::GetAppName
+#define SL_NACP_LANG(n) (n).lang_data.lang
+#else
+#define SL_NACP_LANG(n) (n).lang
+#endif
+
 namespace sl::menu::hb {
 
     namespace {
@@ -66,9 +72,9 @@ namespace sl::menu::hb {
                 if (fseek(fp, nro_size + ah.nacp.offset, SEEK_SET) == 0 &&
                     fread(&nacp, sizeof(nacp), 1, fp) == 1) {
                     const NacpLanguageEntry *pick = nullptr;
-                    if (nacp.lang[0].name[0]) pick = &nacp.lang[0];
+                    if (SL_NACP_LANG(nacp)[0].name[0]) pick = &SL_NACP_LANG(nacp)[0];
                     else for (int i = 1; i < 16; i++)
-                        if (nacp.lang[i].name[0]) { pick = &nacp.lang[i]; break; }
+                        if (SL_NACP_LANG(nacp)[i].name[0]) { pick = &SL_NACP_LANG(nacp)[i]; break; }
                     if (pick) {
                         char nm[0x201] = {};
                         memcpy(nm, pick->name, sizeof(pick->name));

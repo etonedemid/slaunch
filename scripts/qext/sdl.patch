@@ -1,0 +1,520 @@
+diff --git a/src/render/deko3d/SDL_render_deko3d_dispatch.h b/src/render/deko3d/SDL_render_deko3d_dispatch.h
+index a9800a076c..2c1a07cc02 100644
+--- a/src/render/deko3d/SDL_render_deko3d_dispatch.h
++++ b/src/render/deko3d/SDL_render_deko3d_dispatch.h
+@@ -31,6 +31,8 @@
+ #define SDL_DEKO3D_FUNCTIONS \
+     SDL_DEKO3D_FN(void, dkCmdBufAddMemory, (DkCmdBuf obj, DkMemBlock mem, uint32_t offset, uint32_t size)) \
+     SDL_DEKO3D_FN(void, dkCmdBufBarrier, (DkCmdBuf obj, DkBarrier mode, uint32_t invalidateFlags)) \
++    SDL_DEKO3D_FN(void, dkCmdBufCopyBufferToImage, (DkCmdBuf obj, DkCopyBuf const* src, DkImageView const* dstView, DkImageRect const* dstRect, uint32_t flags)) \
++    SDL_DEKO3D_FN(void, dkCmdBufPushConstants, (DkCmdBuf obj, DkGpuAddr uboAddr, uint32_t uboSize, uint32_t offset, uint32_t size, const void* data)) \
+     SDL_DEKO3D_FN(void, dkCmdBufBindBlendStates, (DkCmdBuf obj, uint32_t firstId, DkBlendState const states[], uint32_t numStates)) \
+     SDL_DEKO3D_FN(void, dkCmdBufBindColorState, (DkCmdBuf obj, DkColorState const* state)) \
+     SDL_DEKO3D_FN(void, dkCmdBufBindColorWriteState, (DkCmdBuf obj, DkColorWriteState const* state)) \
+diff --git a/src/render/deko3d/SDL_render_switch_deko3d.c b/src/render/deko3d/SDL_render_switch_deko3d.c
+index 67f40cd7ff..db4d77cd87 100644
+--- a/src/render/deko3d/SDL_render_switch_deko3d.c
++++ b/src/render/deko3d/SDL_render_switch_deko3d.c
+@@ -28,6 +28,8 @@
+ #include "../SDL_sysrender.h"
+ 
+ #include <switch.h>
++#include <malloc.h>
++#include <stdlib.h>
+ 
+ #include "SDL_render_deko3d_dispatch.h"
+ 
+@@ -39,8 +41,9 @@
+ #define SWITCH_DEKO3D_FB_NUM    2
+ #define SWITCH_DEKO3D_CODE_SIZE (64 * 1024)
+ #define SWITCH_DEKO3D_CMD_SIZE  (256 * 1024)
+-#define SWITCH_DEKO3D_DESC_SIZE 0x4000
+-#define SWITCH_DEKO3D_MAX_TEX  256
++#define SWITCH_DEKO3D_CMD_EXTRA 16 // more blocks of CMD_SIZE, made if a frame needs them
++#define SWITCH_DEKO3D_DESC_SIZE 0x9000 // MAX_TEX image descriptors, then the sampler
++#define SWITCH_DEKO3D_MAX_TEX  1024
+ #define SWITCH_DEKO3D_VTX_RING (4 * 1024 * 1024)
+ 
+ typedef struct
+@@ -59,6 +62,7 @@ typedef struct
+ typedef struct
+ {
+     DkMemBlock mem;
++    void *storage; // ours, see CreateTexture
+     DkImage img;
+     int slot;
+     int w, h;
+@@ -66,6 +70,7 @@ typedef struct
+     bool rgbadirect;
+     void *shadow;
+     SDL_Rect lockrect;
++    void *nextPending; // waiting for the GPU to finish with it (see DestroyTexture)
+ } SWITCH_DEKO3D_TextureData;
+ 
+ typedef struct
+@@ -77,6 +82,8 @@ typedef struct
+     DkSwapchain swapchain;
+     DkCmdBuf cmdbuf;
+     DkMemBlock cmdMem;
++    DkMemBlock cmdExtra[SWITCH_DEKO3D_CMD_EXTRA];
++    int cmdExtraUsed;
+     DkMemBlock fbMem;
+     DkImage fbs[SWITCH_DEKO3D_FB_NUM];
+     DkMemBlock codeMem;
+@@ -107,6 +114,8 @@ typedef struct
+     SDL_Rect cliprect;
+     bool clip_enabled;
+     bool clip_dirty;
++    SWITCH_DEKO3D_TextureData *target; // NULL = the window
++    SWITCH_DEKO3D_TextureData *pendingFree;
+ } SWITCH_DEKO3D_RenderData;
+ 
+ static bool SWITCH_DEKO3D_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_PropertiesID create_props);
+@@ -153,8 +162,10 @@ static void WriteSamplerDesc(SWITCH_DEKO3D_RenderData *data)
+ {
+     DkSampler sam;
+     dkSamplerDefaults(&sam);
+-    sam.minFilter = DkFilter_Nearest;
+-    sam.magFilter = DkFilter_Nearest;
++    // SDL's default scale mode. Nearest crawls and shimmers on anything scaled or
++    // moving; at 1:1 on whole pixels the two give the same result.
++    sam.minFilter = DkFilter_Linear;
++    sam.magFilter = DkFilter_Linear;
+     sam.wrapMode[0] = DkWrapMode_ClampToEdge;
+     sam.wrapMode[1] = DkWrapMode_ClampToEdge;
+     sam.wrapMode[2] = DkWrapMode_ClampToEdge;
+@@ -196,9 +207,21 @@ static void BindTexSets(SWITCH_DEKO3D_RenderData *data)
+                                  DkInvalidateFlags_L2Cache);
+ }
+ 
++static int TargetW(const SWITCH_DEKO3D_RenderData *data) { return data->target ? data->target->w : data->fbW; }
++static int TargetH(const SWITCH_DEKO3D_RenderData *data) { return data->target ? data->target->h : data->fbH; }
++
++// The vertex shaders map 0..u_res to the viewport, so it follows the viewport.
++// In the command stream: draws already recorded keep the value they were made with.
++static void PushRes(SWITCH_DEKO3D_RenderData *data, float w, float h)
++{
++    const float res[2] = { w, h };
++    data->dk.dkCmdBufPushConstants(data->cmdbuf, data->uboGpu, 16, 0, sizeof(res), res);
++}
++
+ static void ApplyViewportClip(SWITCH_DEKO3D_RenderData *data)
+ {
+     if (data->viewport_dirty) {
++        PushRes(data, (float)data->viewport.w, (float)data->viewport.h);
+         DkViewport vp = {
+             (float)data->viewport.x, (float)data->viewport.y,
+             (float)data->viewport.w, (float)data->viewport.h,
+@@ -218,8 +241,8 @@ static void ApplyViewportClip(SWITCH_DEKO3D_RenderData *data)
+         } else {
+             sc.x = 0;
+             sc.y = 0;
+-            sc.width = (uint32_t)data->fbW;
+-            sc.height = (uint32_t)data->fbH;
++            sc.width = (uint32_t)TargetW(data);
++            sc.height = (uint32_t)TargetH(data);
+         }
+         data->dk.dkCmdBufSetScissors(data->cmdbuf, 0, &sc, 1);
+         data->clip_dirty = false;
+@@ -238,25 +261,30 @@ static void BindBlend(SWITCH_DEKO3D_RenderData *data, SDL_BlendMode blend, DkFac
+     dkColorStateDefaults(&col);
+     if (blend != SDL_BLENDMODE_NONE) {
+         DkBlendFactor srcRgb = DkBlendFactor_SrcAlpha, dstRgb = DkBlendFactor_InvSrcAlpha;
+-        DkBlendFactor srcA = DkBlendFactor_SrcAlpha, dstA = DkBlendFactor_InvSrcAlpha;
++        // SDL's documented factors. The alpha ones only show on a render target,
++        // where SrcAlpha here squared the alpha of every soft edge drawn on clear.
++        DkBlendFactor srcA = DkBlendFactor_One, dstA = DkBlendFactor_InvSrcAlpha;
+         switch (blend) {
++        case SDL_BLENDMODE_BLEND_PREMULTIPLIED:
++            srcRgb = DkBlendFactor_One;
++            break;
+         case SDL_BLENDMODE_ADD:
+             srcRgb = DkBlendFactor_SrcAlpha;
+             dstRgb = DkBlendFactor_One;
+-            srcA = DkBlendFactor_SrcAlpha;
++            srcA = DkBlendFactor_Zero;
+             dstA = DkBlendFactor_One;
+             break;
+         case SDL_BLENDMODE_MOD:
+             srcRgb = DkBlendFactor_Zero;
+             dstRgb = DkBlendFactor_SrcColor;
+             srcA = DkBlendFactor_Zero;
+-            dstA = DkBlendFactor_SrcColor;
++            dstA = DkBlendFactor_One;
+             break;
+         case SDL_BLENDMODE_MUL:
+             srcRgb = DkBlendFactor_DstColor;
+-            dstRgb = DkBlendFactor_Zero;
+-            srcA = DkBlendFactor_DstColor;
+-            dstA = DkBlendFactor_Zero;
++            dstRgb = DkBlendFactor_InvSrcAlpha;
++            srcA = DkBlendFactor_Zero;
++            dstA = DkBlendFactor_One;
+             break;
+         default:
+             break;
+@@ -276,12 +304,48 @@ static void BindBlend(SWITCH_DEKO3D_RenderData *data, SDL_BlendMode blend, DkFac
+     }
+ }
+ 
++static void FreeTextureData(SWITCH_DEKO3D_RenderData *data, SWITCH_DEKO3D_TextureData *tex)
++{
++    TexSlotFree(data, tex->slot);
++    SDL_free(tex->shadow);
++    data->dk.dkMemBlockDestroy(tex->mem);
++    free(tex->storage);
++    SDL_free(tex);
++}
++
+ static void EnsureIdle(SWITCH_DEKO3D_RenderData *data)
+ {
+     if (data->framePending) {
+         data->dk.dkQueueWaitIdle(data->queue);
+         data->framePending = false;
+     }
++    while (data->pendingFree && !data->drawing) {
++        SWITCH_DEKO3D_TextureData *tex = data->pendingFree;
++        data->pendingFree = (SWITCH_DEKO3D_TextureData *)tex->nextPending;
++        FreeTextureData(data, tex);
++    }
++}
++
++// A frame with many state changes outruns one block, and without this deko3d
++// aborts the process with DkResult_OutOfMemory.
++static void CmdAddMem(void *userData, DkCmdBuf cmdbuf, size_t minReqSize)
++{
++    SWITCH_DEKO3D_RenderData *data = (SWITCH_DEKO3D_RenderData *)userData;
++    if (data->cmdExtraUsed >= SWITCH_DEKO3D_CMD_EXTRA || minReqSize > SWITCH_DEKO3D_CMD_SIZE) {
++        return; // deko3d reports it
++    }
++    DkMemBlock *block = &data->cmdExtra[data->cmdExtraUsed];
++    if (!*block) {
++        DkMemBlockMaker mk;
++        dkMemBlockMakerDefaults(&mk, data->device, SWITCH_DEKO3D_CMD_SIZE);
++        mk.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
++        *block = data->dk.dkMemBlockCreate(&mk);
++        if (!*block) {
++            return;
++        }
++    }
++    data->cmdExtraUsed++;
++    data->dk.dkCmdBufAddMemory(cmdbuf, *block, 0, SWITCH_DEKO3D_CMD_SIZE);
+ }
+ 
+ static bool StartDrawing(SWITCH_DEKO3D_RenderData *data)
+@@ -296,7 +360,10 @@ static bool StartDrawing(SWITCH_DEKO3D_RenderData *data)
+         return SDL_SetError("dkQueueAcquireImage failed");
+     }
+     data->dk.dkCmdBufClear(data->cmdbuf);
+-    dkImageViewDefaults(&view, &data->fbs[data->slot]);
++    // Clear rewinds to the last block added, so start each frame on the first again.
++    data->dk.dkCmdBufAddMemory(data->cmdbuf, data->cmdMem, 0, SWITCH_DEKO3D_CMD_SIZE);
++    data->cmdExtraUsed = 0;
++    dkImageViewDefaults(&view, data->target ? &data->target->img : &data->fbs[data->slot]);
+     {
+         const DkImageView *targets[1] = { &view };
+         data->dk.dkCmdBufBindRenderTargets(data->cmdbuf, targets, 1, NULL);
+@@ -462,6 +529,7 @@ static bool SWITCH_DEKO3D_SupportsBlendMode(SDL_Renderer *renderer, SDL_BlendMod
+ {
+     (void)renderer;
+     return blendMode == SDL_BLENDMODE_NONE || blendMode == SDL_BLENDMODE_BLEND ||
++           blendMode == SDL_BLENDMODE_BLEND_PREMULTIPLIED ||
+            blendMode == SDL_BLENDMODE_ADD || blendMode == SDL_BLENDMODE_MOD || blendMode == SDL_BLENDMODE_MUL;
+ }
+ 
+@@ -527,6 +595,60 @@ static void UploadRows(SWITCH_DEKO3D_RenderData *data, SWITCH_DEKO3D_TextureData
+     }
+ }
+ 
++// A BC1 image is block-linear, so the CPU cannot write it: the GPU copies it from a
++// staging block, as part of this frame. That block is freed like a texture, once
++// the frame has run.
++static bool UploadBc1(SWITCH_DEKO3D_RenderData *data, SWITCH_DEKO3D_TextureData *tex, const void *bc1)
++{
++    const uint32_t size = (uint32_t)((tex->w + 3) / 4) * (uint32_t)((tex->h + 3) / 4) * 8;
++    const uint32_t blockSize = (size + 0xFFFu) & ~0xFFFu;
++    SWITCH_DEKO3D_TextureData *staging;
++    DkMemBlockMaker mk;
++    DkImageView view;
++    DkCopyBuf src;
++    DkImageRect rect;
++    if (!StartDrawing(data)) {
++        return false;
++    }
++    staging = (SWITCH_DEKO3D_TextureData *)SDL_calloc(1, sizeof(*staging));
++    if (!staging) {
++        return false;
++    }
++    staging->slot = -1;
++    staging->storage = memalign(DK_MEMBLOCK_ALIGNMENT, blockSize);
++    if (!staging->storage) {
++        SDL_free(staging);
++        return false;
++    }
++    dkMemBlockMakerDefaults(&mk, data->device, blockSize);
++    mk.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
++    mk.storage = staging->storage;
++    staging->mem = data->dk.dkMemBlockCreate(&mk);
++    if (!staging->mem) {
++        free(staging->storage);
++        SDL_free(staging);
++        return false;
++    }
++    SDL_memcpy(data->dk.dkMemBlockGetCpuAddr(staging->mem), bc1, size);
++
++    src.addr = data->dk.dkMemBlockGetGpuAddr(staging->mem);
++    src.rowLength = 0;
++    src.imageHeight = 0;
++    rect.x = rect.y = rect.z = 0;
++    rect.width = (uint32_t)tex->w;
++    rect.height = (uint32_t)tex->h;
++    rect.depth = 1;
++    dkImageViewDefaults(&view, &tex->img);
++    data->dk.dkCmdBufCopyBufferToImage(data->cmdbuf, &src, &view, &rect, 0);
++    // Later draws this frame read it.
++    data->dk.dkCmdBufBarrier(data->cmdbuf, DkBarrier_Full,
++                             DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
++
++    staging->nextPending = data->pendingFree;
++    data->pendingFree = staging;
++    return true;
++}
++
+ static bool SWITCH_DEKO3D_CreateTexture(SDL_Renderer *renderer, SDL_Texture *texture, SDL_PropertiesID create_props)
+ {
+     SWITCH_DEKO3D_RenderData *data = (SWITCH_DEKO3D_RenderData *)renderer->internal;
+@@ -537,11 +659,9 @@ static bool SWITCH_DEKO3D_CreateTexture(SDL_Renderer *renderer, SDL_Texture *tex
+     uint32_t sz, al;
+     DkImageView view;
+     bool direct;
+-    (void)create_props;
++    // A menu's own BC1 data (8 bytes per 4x4 block): 1/8 the memory, for opaque art.
++    const void *bc1 = SDL_GetPointerProperty(create_props, "SDL.texture.create.deko3d.bc1", NULL);
+ 
+-    if (texture->access == SDL_TEXTUREACCESS_TARGET) {
+-        return SDL_Unsupported(); // no render targets yet
+-    }
+     if (!FormatConvertible(texture->format, &direct)) {
+         return SDL_Unsupported();
+     }
+@@ -553,8 +673,8 @@ static bool SWITCH_DEKO3D_CreateTexture(SDL_Renderer *renderer, SDL_Texture *tex
+     tex->slot = -1;
+ 
+     dkImageLayoutMakerDefaults(&lm, data->device);
+-    lm.flags = DkImageFlags_PitchLinear;
+-    lm.format = DkImageFormat_RGBA8_Unorm;
++    lm.flags = bc1 ? 0 : texture->access == SDL_TEXTUREACCESS_TARGET ? DkImageFlags_UsageRender : DkImageFlags_PitchLinear;
++    lm.format = bc1 ? DkImageFormat_RGB_BC1 : DkImageFormat_RGBA8_Unorm;
+     lm.dimensions[0] = (uint32_t)texture->w;
+     lm.dimensions[1] = (uint32_t)texture->h;
+     data->dk.dkImageLayoutInitialize(&lay, &lm);
+@@ -563,21 +683,32 @@ static bool SWITCH_DEKO3D_CreateTexture(SDL_Renderer *renderer, SDL_Texture *tex
+     sz = (sz + al - 1) & ~(al - 1);
+     sz = (sz + 0xFFFu) & ~0xFFFu; // deko3d needs 4K-multiple blocks
+     dkMemBlockMakerDefaults(&mm, data->device, sz);
+-    mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
++    mm.flags = (texture->access == SDL_TEXTUREACCESS_TARGET || bc1 ? 0 : DkMemBlockFlags_CpuUncached) |
++               DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
++    // Allocated here because a release neko3d aborts the process when it cannot
++    // allocate a block itself. This way the caller just goes without that image.
++    tex->storage = memalign(DK_MEMBLOCK_ALIGNMENT, sz);
++    if (!tex->storage) {
++        SDL_free(tex);
++        return SDL_OutOfMemory();
++    }
++    mm.storage = tex->storage;
+     tex->mem = data->dk.dkMemBlockCreate(&mm);
+     if (!tex->mem) {
++        free(tex->storage);
+         SDL_free(tex);
+         return SDL_OutOfMemory();
+     }
+     data->dk.dkImageInitialize(&tex->img, &lay, tex->mem, 0);
+     tex->w = texture->w;
+     tex->h = texture->h;
+-    tex->pitch = texture->h > 0 ? data->dk.dkImageLayoutGetSize(&lay) / (uint32_t)texture->h : 0;
++    tex->pitch = texture->h > 0 && !bc1 ? data->dk.dkImageLayoutGetSize(&lay) / (uint32_t)texture->h : 0;
+     tex->rgbadirect = direct;
+     if (!direct) {
+         tex->shadow = SDL_malloc((size_t)texture->w * (size_t)texture->h * 4);
+         if (!tex->shadow) {
+             data->dk.dkMemBlockDestroy(tex->mem);
++            free(tex->storage);
+             SDL_free(tex);
+             return SDL_OutOfMemory();
+         }
+@@ -587,12 +718,22 @@ static bool SWITCH_DEKO3D_CreateTexture(SDL_Renderer *renderer, SDL_Texture *tex
+     if (tex->slot < 0) {
+         SDL_free(tex->shadow);
+         data->dk.dkMemBlockDestroy(tex->mem);
++        free(tex->storage);
+         SDL_free(tex);
+         return SDL_OutOfMemory();
+     }
+     dkImageViewDefaults(&view, &tex->img);
+     WriteImageDesc(data, tex->slot, &view);
++    if (bc1 && !UploadBc1(data, tex, bc1)) {
++        TexSlotFree(data, tex->slot);
++        data->dk.dkMemBlockDestroy(tex->mem);
++        free(tex->storage);
++        SDL_free(tex);
++        return SDL_OutOfMemory();
++    }
+     texture->internal = tex;
++    // For a menu drawing with its own shaders (see SWITCH_DEKO3D_BeginExternal).
++    SDL_SetNumberProperty(SDL_GetTextureProperties(texture), "SDL.texture.deko3d.slot", tex->slot);
+     return true;
+ }
+ 
+@@ -664,13 +805,43 @@ static void SWITCH_DEKO3D_UnlockTexture(SDL_Renderer *renderer, SDL_Texture *tex
+ 
+ static bool SWITCH_DEKO3D_SetRenderTarget(SDL_Renderer *renderer, SDL_Texture *texture)
+ {
+-    (void)renderer;
+-    if (texture) {
+-        return SDL_Unsupported(); // no render targets yet
++    SWITCH_DEKO3D_RenderData *data = (SWITCH_DEKO3D_RenderData *)renderer->internal;
++    SWITCH_DEKO3D_TextureData *tex = texture ? (SWITCH_DEKO3D_TextureData *)texture->internal : NULL;
++    DkImageView view;
++    if (texture && !tex) {
++        return SDL_SetError("Texture not initialized");
++    }
++    data->target = tex;
++    if (!StartDrawing(data)) { // binds the target when this opens the frame
++        return false;
++    }
++    // What was just drawn may be sampled next, and the GPU renders in tiles.
++    data->dk.dkCmdBufBarrier(data->cmdbuf, DkBarrier_Fragments,
++                             DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
++    dkImageViewDefaults(&view, tex ? &tex->img : &data->fbs[data->slot]);
++    {
++        const DkImageView *targets[1] = { &view };
++        data->dk.dkCmdBufBindRenderTargets(data->cmdbuf, targets, 1, NULL);
+     }
++    data->viewport_dirty = true;
++    data->clip_dirty = true;
+     return true;
+ }
+ 
++// Hands a menu the command buffer to draw into with its own shaders, in order with
++// everything SDL has flushed. The caller flushes first; each SDL draw binds all of
++// its own state again, so there is nothing to restore afterwards.
++static DkCmdBuf SWITCH_DEKO3D_BeginExternal(SDL_Renderer *renderer)
++{
++    SWITCH_DEKO3D_RenderData *data = (SWITCH_DEKO3D_RenderData *)renderer->internal;
++    if (!StartDrawing(data)) {
++        return NULL;
++    }
++    ApplyViewportClip(data);
++    BindTexSets(data);
++    return data->cmdbuf;
++}
++
+ static bool SWITCH_DEKO3D_QueueNoOp(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
+ {
+     (void)renderer;
+@@ -740,7 +911,7 @@ static bool SWITCH_DEKO3D_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderComm
+             DkGpuAddr gpu;
+             SDL_FColor c = cmd->data.color.color;
+             float scale = cmd->data.color.color_scale;
+-            float W = (float)data->fbW, H = (float)data->fbH;
++            float W = (float)TargetW(data), H = (float)TargetH(data);
+             DkScissor full;
+             // draw fullscreen triangle to clear
+             if (!StartDrawing(data)) {
+@@ -762,8 +933,9 @@ static bool SWITCH_DEKO3D_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderComm
+             v[0].color.a = v[1].color.a = v[2].color.a = c.a;
+             full.x = 0;
+             full.y = 0;
+-            full.width = (uint32_t)data->fbW;
+-            full.height = (uint32_t)data->fbH;
++            full.width = (uint32_t)W;
++            full.height = (uint32_t)H;
++            PushRes(data, W, H);
+             data->dk.dkCmdBufSetViewports(data->cmdbuf, 0,
+                                           &(DkViewport){ 0.0f, 0.0f, W, H, 0.0f, 1.0f }, 1);
+             data->viewport_dirty = true; // re-apply the viewport on the next draw
+@@ -865,12 +1037,17 @@ static void SWITCH_DEKO3D_DestroyTexture(SDL_Renderer *renderer, SDL_Texture *te
+     if (!tex) {
+         return;
+     }
+-    data->dk.dkQueueWaitIdle(data->queue);
+-    data->framePending = false;
+-    TexSlotFree(data, tex->slot);
+-    SDL_free(tex->shadow);
+-    data->dk.dkMemBlockDestroy(tex->mem);
+-    SDL_free(tex);
++    if (data->target == tex) {
++        data->target = NULL;
++    }
++    // Draws recorded this frame still use it, and they have not run yet: destroying
++    // it now would pull the memory out from under them.
++    if (data->drawing || data->framePending) {
++        tex->nextPending = data->pendingFree;
++        data->pendingFree = tex;
++    } else {
++        FreeTextureData(data, tex);
++    }
+     texture->internal = NULL;
+ }
+ 
+@@ -880,7 +1057,9 @@ static void SWITCH_DEKO3D_Teardown(SWITCH_DEKO3D_RenderData *data)
+         return;
+     }
+     if (data->queue) {
+-        data->dk.dkQueueWaitIdle(data->queue);
++        data->drawing = false;
++        data->framePending = true;
++        EnsureIdle(data); // also frees what was waiting on the GPU
+         data->dk.dkQueueDestroy(data->queue);
+         data->queue = NULL;
+     }
+@@ -888,6 +1067,12 @@ static void SWITCH_DEKO3D_Teardown(SWITCH_DEKO3D_RenderData *data)
+         data->dk.dkCmdBufDestroy(data->cmdbuf);
+         data->cmdbuf = NULL;
+     }
++    for (int i = 0; i < SWITCH_DEKO3D_CMD_EXTRA; i++) {
++        if (data->cmdExtra[i]) {
++            data->dk.dkMemBlockDestroy(data->cmdExtra[i]);
++            data->cmdExtra[i] = NULL;
++        }
++    }
+     if (data->cmdMem) {
+         data->dk.dkMemBlockDestroy(data->cmdMem);
+         data->cmdMem = NULL;
+@@ -1079,6 +1264,8 @@ static bool SWITCH_DEKO3D_CreateRenderer(SDL_Renderer *renderer, SDL_Window *win
+         goto fail;
+     }
+     dkCmdBufMakerDefaults(&cbMk, data->device);
++    cbMk.userData = data;
++    cbMk.cbAddMem = CmdAddMem;
+     data->cmdbuf = data->dk.dkCmdBufCreate(&cbMk);
+     if (!data->cmdbuf) {
+         SDL_SetError("dkCmdBufCreate failed");
+@@ -1161,6 +1348,7 @@ static bool SWITCH_DEKO3D_CreateRenderer(SDL_Renderer *renderer, SDL_Window *win
+     SDL_AddSupportedTextureFormat(renderer, SDL_PIXELFORMAT_BGRA8888);
+ 
+     SDL_SetPointerProperty(SDL_GetRendererProperties(renderer), SDL_PROP_RENDERER_DEKO3D_NWINDOW_POINTER, nwindow);
++    SDL_SetPointerProperty(SDL_GetRendererProperties(renderer), "SDL.renderer.deko3d.begin_external", (void *)SWITCH_DEKO3D_BeginExternal);
+     SDL_SetPointerProperty(SDL_GetRendererProperties(renderer), SDL_PROP_RENDERER_DEKO3D_DEVICE_POINTER, (void *)data->device);
+     SDL_SetPointerProperty(SDL_GetRendererProperties(renderer), SDL_PROP_RENDERER_DEKO3D_QUEUE_POINTER, (void *)data->queue);
+ 
+diff --git a/src/video/switch/SDL_switchvideo.c b/src/video/switch/SDL_switchvideo.c
+index 9c687af094..306faf11f2 100644
+--- a/src/video/switch/SDL_switchvideo.c
++++ b/src/video/switch/SDL_switchvideo.c
+@@ -421,12 +421,14 @@ static void SWITCH_PumpEvents(SDL_VideoDevice *_this)
+     AppletOperationMode om;
+     Uint64 timestamp = SDL_GetTicksNS();
+ 
++#ifndef SDL_DNRO_BUILD // as a module the host owns the applet messages
+     if (!appletMainLoop()) {
+         SDL_Event ev;
+         ev.type = SDL_EVENT_QUIT;
+         SDL_PushEvent(&ev);
+         return;
+     }
++#endif
+ 
+     // we don't want other inputs overlapping with software keyboard
+     if (!SDL_TextInputActive(switch_window)) {

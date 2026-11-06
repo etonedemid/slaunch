@@ -122,7 +122,7 @@ namespace sl::menu::gfx {
         // sized to m_width/m_height. The worker fills whichever buffer is not
         // the one currently on the GPU, then flips m_ready_buf; Tick() reads
         // it and uploads if it names a buffer newer than what is on-screen.
-        struct Buf { std::vector<uint8_t> y, uv; int y_pitch = 0, uv_pitch = 0; };
+        struct Buf { std::vector<uint8_t> y, uv, rgba; int y_pitch = 0, uv_pitch = 0; };
         Buf m_buf[2];
         std::atomic<int> m_ready_buf{-1};
         int m_shown_buf = -1;

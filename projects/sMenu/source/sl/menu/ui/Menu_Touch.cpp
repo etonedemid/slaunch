@@ -514,6 +514,7 @@ namespace sl::menu::ui {
         if (m_ui_mode == UiMode::XMB)  return XmbItemAt(x, y);
         if (m_ui_mode == UiMode::Flow) return FlowItemAt(x, y);
         if (m_ui_mode == UiMode::Deck) return DeckItemAt(x, y);
+        if (m_ui_mode == UiMode::Metro) return -1;   // buttons only, for now
         if (m_ui_mode == UiMode::Line) {
             const int idx = (int)lroundf(m_scroll_pos +
                                          (float)(x - gfx::Gfx::Width / 2) / (float)kLinePitch);

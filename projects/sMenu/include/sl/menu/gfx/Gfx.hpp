@@ -1,5 +1,8 @@
 #pragma once
 #include <SDL3/SDL.h>
+#ifdef SL_QEXT
+#include <switch.h>
+#endif
 #include <vector>
 #include <SDL3_ttf/SDL_ttf.h>
 #include <string>
@@ -19,6 +22,15 @@ namespace sl::menu::gfx {
         static constexpr int Width  = 1280;
         static constexpr int Height = 720;
 
+#ifdef SL_QEXT
+        static void SetNWindow(NWindow *win);   // call before Init
+#endif
+        // Opaque art, in two steps so the slow one stays off the render thread:
+        // PrepareArt on the worker compresses the surface and keeps the result on
+        // it; UploadArt on the main thread makes the texture, from that if it is
+        // there. Without compressed textures it is a plain upload.
+        static void PrepareArt(SDL_Surface *surf);
+        SDL_Texture *UploadArt(SDL_Surface *surf);
         bool Init();
         void Exit();
 
@@ -158,6 +170,23 @@ namespace sl::menu::gfx {
         void ClearContentFont();                // revert to system font
         bool HasContentFont() const { return m_altLoaded; }
         void UseDefaultFont(bool v) { m_useDefault = v; }
+
+        // ---- extra faces ----------------------------------------------------
+        // A typeface at any point size, outside the four FontSize slots, for a
+        // layout defined by its type (Metro draws in Selawik, the open stand-in
+        // for Segoe). Opened once per (path, size) and kept until Exit. The
+        // system font backs it for anything it has no glyph for, so a Japanese
+        // game name still renders. nullptr if the file will not open: draw
+        // with a FontSize instead.
+        TTF_Font *Face(const char *path, int pt);
+        int  TextWidth(TTF_Font *f, const char *text);
+        int  LineHeight(TTF_Font *f);
+        void Text(TTF_Font *f, int x, int y, SDL_Color c, const char *text);
+        // Turned a quarter clockwise, reading top to bottom from (x, y): the
+        // left edge of the box it fills is x, its top is y.
+        void TextDown(TTF_Font *f, int x, int y, SDL_Color c, const char *text);
+        // An image filling w x h, cropped to that shape rather than stretched.
+        void DrawImageCrop(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha = 255);
 
         // ---- supersampling (desktop simulator only) -------------------------
         // Render the same 1280x720 layout into a surface N times larger, for
@@ -342,6 +371,13 @@ namespace sl::menu::gfx {
         std::vector<TTF_Text *> m_textRetired;    // destroyed in Present, see below
         std::vector<TTF_Font *> m_fontRetired;    // closed after them
         std::unordered_map<std::string, int> m_widthCache;   // TextWidth memo
+        // Face(): the faces, their system-font fallbacks (closed after them),
+        // and TextDown's rasterised labels. All live until Exit.
+        std::unordered_map<std::string, TTF_Font *> m_faces;
+        std::vector<TTF_Font *> m_faceFallbacks;
+        std::unordered_map<std::string, SDL_Texture *> m_downText;
+        const void *m_plFontAddr = nullptr;
+        size_t      m_plFontSize = 0;
         uint64_t m_textClock = 0;
         // Accounting, for the debug overlay and the sim: `creates` counts
         // layouts made since start and should go flat once a list has been
@@ -361,7 +397,7 @@ namespace sl::menu::gfx {
         // That is the crash; SDL only flushes its own pending command queue on
         // destroy, which does not cover a binding Mesa is still holding.
         std::vector<SDL_Texture *> m_textGraveyard;
-        TTF_Text *GetText(FontSize s, const char *text);
+        TTF_Text *GetText(TTF_Font *font, const char *text);
         void EvictText(size_t count);       // retire least-recently-used entries
         void ReapTextures();                // destroy the retired ones (Present only)
         void ClearTextCache();

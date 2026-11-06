@@ -4,6 +4,7 @@
 #include <SDL3_image/SDL_image.h>
 #include <curl/curl.h>
 #include <minizip/unzip.h>
+#include "Upgrade.hpp"
 #include <dirent.h>
 #include <sys/stat.h>
 #include <cstdio>
@@ -288,6 +289,10 @@ static bool DeleteTree(const std::string &path) {
     return ok;
 }
 
+static bool QextPayload() {
+    return upgrade::Exists("romfs:/payload/qlaunch-ext/menus/menu.dnro");
+}
+
 static constexpr const char *kQlaunchLive     = "sdmc:/atmosphere/contents/0100000000001000";
 static constexpr const char *kQlaunchDisabled = "sdmc:/slaunch/backup/0100000000001000.disabled";
 
@@ -339,6 +344,12 @@ static bool RemoveEverything() {
         if (!DeleteTree(kQlaunchLive)) ok = false;
     if (stat("sdmc:/slaunch", &st) == 0)
         if (!DeleteTree("sdmc:/slaunch")) ok = false;
+    // The qlaunch-ext build. lib/ may hold other homebrew's modules, so only ours.
+    if (stat("sdmc:/qlaunch-ext", &st) == 0)
+        if (!DeleteTree("sdmc:/qlaunch-ext")) ok = false;
+    for (const char *m : { "neko3d", "sdl3", "ffmpeg", "miniini", "json", "xxhash" })
+        remove((std::string("sdmc:/lib/") + m + ".dnro").c_str());
+    rmdir("sdmc:/lib");   // only if that left it empty
     return ok;
 }
 
@@ -469,7 +480,11 @@ static bool HttpDownload(const char *url, const char *path) {
 }
 
 // ---- unzip the release payload onto the SD (preserving user data) -----------
+static bool ExtractZipPass(const char *zipPath, bool boot_files);
 static bool ExtractZip(const char *zipPath) {
+    return ExtractZipPass(zipPath, false) && ExtractZipPass(zipPath, true);
+}
+static bool ExtractZipPass(const char *zipPath, bool boot_files) {
     unzFile uf = unzOpen64(zipPath);
     if (!uf) return false;
     unz_global_info64 gi;
@@ -487,6 +502,8 @@ static bool ExtractZip(const char *zipPath) {
         struct stat es;
         if (len && (name[len - 1] == '/' || name[len - 1] == '\\')) {
             Mkdirs(dst);                                   // directory entry
+        } else if (upgrade::IsBootEntry(name) != boot_files) {
+            // the other pass's
         } else if (IsUserData(dst) && stat(dst.c_str(), &es) == 0) {
             // keep the user's existing settings/wallpapers/music - skip
         } else {
@@ -716,6 +733,8 @@ int main() {
 
     bool installed = IsInstalled();
     bool disabled  = IsDisabled();   // present on the SD, just not the active HOME menu
+    // This installer carries the qlaunch-ext build and the card has the old daemon.
+    bool upgrading = QextPayload() && upgrade::HasOldInstall("sdmc:");
     bool rebootAfter = false;   // Done came from an install/update (offer reboot)
 
     // Fixed row of actions. Toggle/Remove only join once there is something to
@@ -725,8 +744,10 @@ int main() {
     int  tileCount  = 2;
     int  instCursor = 0;
     auto buildMenu = [&]() {
-        tiles[0] = { installed ? "Re-install" : "Install",
-                     installed ? "Copy this build over the installed one"
+        upgrading = QextPayload() && upgrade::HasOldInstall("sdmc:");
+        tiles[0] = { upgrading ? "Upgrade" : installed ? "Re-install" : "Install",
+                     upgrading ? "Replace the old sSystem version. Your settings are kept"
+                     : installed ? "Copy this build over the installed one"
                                : "Copy sLaunch to your SD card",
                      Act::Install, icInstall };
         tiles[1] = { "Update", "Check GitHub for a newer release", Act::Update, icUpdate };
@@ -891,6 +912,11 @@ int main() {
 
         } else if (screen == Screen::ConfirmInstall) {
             // The dialog paints the whole screen, so nothing is drawn behind it.
+            if (upgrading)
+                DrawConfirmDialog("Upgrade sLaunch?",
+                                  "Replaces the old sSystem version. Your settings are kept.",
+                                  dialogCursor, false);
+            else
             DrawConfirmDialog(installed ? "Re-install sLaunch?" : "Install sLaunch?",
                 "This will copy files to your SD card.", dialogCursor, false);
 
@@ -960,13 +986,24 @@ int main() {
         if (screen == Screen::Installing && g_total == 0) {
             CountTree("romfs:/payload");
             if (g_total == 0) g_total = 1;
-            ok = CopyTree("romfs:/payload", "sdmc:", [&]() {
+            const auto tick = [&]() {
                 char cnt[64];
                 snprintf(cnt, sizeof(cnt), "%d / %d files", g_done, g_total);
                 DrawProgress("Installing sLaunch...",
                              (double)g_done / (double)g_total, cnt, installAnim);
                 SDL_RenderPresent(g_ren);
-            });
+            };
+            // atmosphere/ last: it holds what the console boots, so if anything
+            // before it fails, the install it replaces still works.
+            ok = true;
+            for (const char *dir : { "lib", "qlaunch-ext", "slaunch", "switch", "atmosphere" }) {
+                const std::string from = std::string("romfs:/payload/") + dir;
+                if (upgrade::Exists(from) && !CopyTree(from, std::string("sdmc:/") + dir, tick)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) upgrade::RemoveLeftovers("sdmc:");
             // Splash last, and never fatal: a console whose package3 is not the
             // size or shape we expect still gets a working sLaunch, just with
             // the stock boot logo.
@@ -1031,6 +1068,7 @@ int main() {
 
             ok = ExtractZip("sdmc:/slaunch_update.zip");
             remove("sdmc:/slaunch_update.zip");
+            if (ok) upgrade::RemoveLeftovers("sdmc:");
 
             // A failed update returns to the main menu, where Install/Re-install
             // still needs romfs:/payload. Restore the mount in that case.
