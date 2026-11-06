@@ -88,6 +88,8 @@ assets: hbloader
 	@# nx-hbloader exefs served via ECS for the Homebrew menu (loads hbmenu.nro).
 	@# Applet variant (application_type=2) runs homebrew as a library applet.
 	@cp -f assets/hbloader/main assets/hbloader/main.npdm SdOut/slaunch/bin/hbloader/ 2>/dev/null || true
+	@# The qext build's stand-in for atmosphere/hbl.nsp during an applet launch.
+	@cp -f projects/hbloader/hbl.nsp SdOut/slaunch/bin/hbloader/
 	@# Application variant: same loader, npdm with application_type=1 so the donor
 	@# process is a real application (am grants an application proxy -> full RAM).
 	@cp -f assets/hbloader/main SdOut/slaunch/bin/hbloader_app/main 2>/dev/null || true

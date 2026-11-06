@@ -687,6 +687,8 @@ namespace sl::menu::ui {
             { false, "The album, profile and Mii edit close the menu while they run, so they have the memory they need" },
             { false, "Choosing a cover offers to enter your SteamGridDB key when it is missing or rejected" },
             { false, "Backing out of the SteamGridDB key keyboard returns to Theming" },
+            { false, "Homebrew launches again: applet mode runs the app you chose and closes the menu to give it the memory" },
+            { false, "Running homebrew under a donor game works again, as the selected user" },
             { true,  "v2.0.0" },
             { false, "The menu is instant now: it stays loaded, so leaving a game or applet drops you straight back into it" },
             { false, "Rebuilt on qlaunch-ext: one HOME Menu process instead of a daemon and a separate menu" },

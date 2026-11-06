@@ -1110,7 +1110,7 @@ static void CaptureHomeFrame() {
 }
 
 // The browser does not fit in the applet pool next to the menu, and the album,
-// profile and Mii edit get the same room, so for these the menu goes away completely and starts
+// profile, Mii edit and applet homebrew get the same room, so for these the menu goes away completely and starts
 // again from nothing when they end.
 static bool g_Unloaded = false;
 static void UnloadForApplet() {
@@ -1210,8 +1210,8 @@ void onOpen(void) {
     // Asked for while a game had the screen: sSystem ignores that case too, and
     // restarting the moment the user comes back would be a surprise.
     remove(smi::MenuRestartRequestPath);
+    menu::qext::OnBackInMenu();   // also when unloaded: the loop then reloads the menu
     if (!g_Run) return;
-    menu::qext::OnBackInMenu();
     g_Run->suspended_id  = qext_suspended_title();
     g_Run->has_suspended = g_Run->suspended_id != 0;
     if (g_Run->has_suspended) g_UI->SetSuspendedApp(g_Run->suspended_id);

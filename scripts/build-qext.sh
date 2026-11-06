@@ -92,7 +92,7 @@ if [ -n "${QEXT_FORWARDER:-}" ]; then
 fi
 # The menu's assets and hbloader, as the applet build ships them.
 cp -r "$ROOT"/SdOut/slaunch/* "$OUT/slaunch/"
-rm -rf "$OUT/slaunch/bin/sMenu" "$OUT/slaunch/bin/sMenu-vk" "$OUT/slaunch/bin/hbloader_app"
+rm -rf "$OUT/slaunch/bin/sMenu" "$OUT/slaunch/bin/sMenu-vk"
 # sLaunch Control, for the installer and the zip.
 if [ -d "$ROOT/SdOut/switch/.packages" ]; then
     mkdir -p "$OUT/switch"

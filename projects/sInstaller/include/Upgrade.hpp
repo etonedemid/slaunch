@@ -53,7 +53,6 @@ namespace upgrade {
         RemoveTree(c + "/exefs.sslaunch");       // a test build's manual step
         RemoveTree(root + "/slaunch/bin/sMenu");
         RemoveTree(root + "/slaunch/bin/sMenu-vk");
-        RemoveTree(root + "/slaunch/bin/hbloader_app");
         // The daemon's mailboxes: the menu reads these differently or not at all.
         RemoveTree(root + "/slaunch/hbtarget.txt");
         RemoveTree(root + "/slaunch/config/restart_menu.request");

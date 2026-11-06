@@ -44,12 +44,13 @@ int main() {
     Touch(sd + kMenu);
     assert(!HasOldInstall(sd));
     RemoveLeftovers(sd);
-    for (const char *f : { "/slaunch/bin/sMenu", "/slaunch/bin/sMenu-vk", "/slaunch/bin/hbloader_app",
+    for (const char *f : { "/slaunch/bin/sMenu", "/slaunch/bin/sMenu-vk",
                            "/slaunch/hbtarget.txt", "/slaunch/config/menu_crashes",
                            "/slaunch/config/restart_menu.request" })
         assert(!Exists(sd + f));
     assert(!Exists(c + "/exefs.nsp") && !Exists(c + "/exefs/main.bak") && !Exists(c + "/exefs.sslaunch"));
     assert(Exists(c + "/exefs/main"));
+    assert(Exists(sd + "/slaunch/bin/hbloader_app"));   // the donor launch needs it
     for (const char *f : { "/slaunch/config/users/a/settings.txt", "/slaunch/config/hb_donor.txt",
                            "/slaunch/themes/mine.jpg", "/slaunch/music/mine.ogg", "/slaunch/cache/applist.txt",
                            "/slaunch/bin/hbloader/main", "/slaunch/bin/sMenu-sdl2-main.bak" })

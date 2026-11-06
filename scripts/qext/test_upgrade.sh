@@ -20,7 +20,7 @@ cmp "$C/exefs/main.npdm" "$LAYOUT/atmosphere/contents/0100000000001000/exefs/mai
 [ "$(cat "$SD/slaunch/config/users/x/settings.txt")" = keep ]
 [ ! -e "$SD/qlaunch-ext/plugins/ForwarderPlugin.dnro" ]    # donor is game-specific
 for f in neko3d sdl3 ffmpeg miniini json xxhash; do [ -f "$SD/lib/$f.dnro" ]; done
-for f in qlaunch-ext/menus/menu.dnro qlaunch-ext/bin/nroloader.nsp slaunch/bin/hbloader/main; do [ -f "$SD/$f" ]; done
+for f in qlaunch-ext/menus/menu.dnro qlaunch-ext/bin/nroloader.nsp slaunch/bin/hbloader/main slaunch/bin/hbloader/hbl.nsp slaunch/bin/hbloader_app/main slaunch/bin/hbloader_app/main.npdm; do [ -f "$SD/$f" ]; done
 # The loader, not sSystem: this name is in its npdm.
 strings "$C/exefs/main.npdm" | grep -q qlaunch-ext-ldr
 echo "upgrade ok"

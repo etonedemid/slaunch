@@ -27,9 +27,6 @@ namespace la {
     Result Start(AppletId id, s32 version);
     Result Start(AppletId id, s32 version, const void *a, size_t na);
 }
-namespace nro {
-    Result Launch(u64 donor, const char *nro_path, const char *argv_or_null);
-}
 
 // LaunchQueue.cpp logs through this; in sSystem it is daemon.log.
 void DaemonLog(const char *fmt, ...) {
@@ -53,13 +50,17 @@ namespace {
     constexpr const char *kAlbumDir    = "sdmc:/atmosphere/contents/010000000000100D";
     constexpr const char *kAlbumExefs  = "sdmc:/atmosphere/contents/010000000000100D/exefs";
     constexpr const char *kAlbumMarker = "sdmc:/atmosphere/contents/010000000000100D/.slaunch-hb";
+    constexpr const char *kAtmoHbl     = "sdmc:/atmosphere/hbl.nsp";
+    constexpr const char *kAtmoHblSaved = "sdmc:/atmosphere/hbl.nsp.slaunch";
+    constexpr const char *kOurHbl      = "sdmc:/slaunch/bin/hbloader/hbl.nsp";
+    constexpr const char *kDonorArmed  = "sdmc:/slaunch/hb_donor_armed.txt";
     constexpr const char *kHbTarget    = "sdmc:/slaunch/hbtarget.txt";
     constexpr const char *kAskUserPath = "sdmc:/slaunch/config/ask_user";
     constexpr const char *kDonorPath   = "sdmc:/slaunch/config/hb_donor.txt";
 
     AccountUid g_User = {};
     bool g_Restart = false;
-    enum class Heavy { None, Web, Album, UserPage, MiiEdit };
+    enum class Heavy { None, Web, Album, UserPage, MiiEdit, Homebrew };
     Heavy g_Heavy = Heavy::None;   // waiting for the menu to unload
 
     bool Exists(const char *path) { struct stat st; return stat(path, &st) == 0; }
@@ -85,10 +86,18 @@ namespace {
 
     // Applet-mode homebrew runs in the album slot. sSystem serves hbloader there
     // through ECS, which needs libstratosphere and has to outlive the launch, so
-    // here it is an ordinary content override that exists only for the launch.
-    // ponytail: a file override rather than ECS, so a crash mid-launch leaves it
-    // on the SD until the next boot's CleanUpLeftovers. ECS if that ever bites.
+    // here it is ordinary files that exist only for the launch. Which ones count
+    // depends on the console: Atmosphere's default config marks the album as hbl
+    // unless R is held, and then it loads atmosphere/hbl.nsp and ignores any content
+    // override (fs_code.cpp), so stock hbl booted hbmenu instead of the chosen nro.
+    // Both are put in place. Our loader boots hbmenu with no target, so one left
+    // behind by a crash behaves like the stock one until CleanUpLeftovers.
+    // ponytail: assumes hbl_config's default path; a custom one still gets hbmenu.
     void DisarmAlbum() {
+        if (Exists(kAtmoHblSaved)) {
+            remove(kAtmoHbl);
+            rename(kAtmoHblSaved, kAtmoHbl);
+        }
         if (!Exists(kAlbumMarker)) return;
         char p[128];
         snprintf(p, sizeof(p), "%s/main", kAlbumExefs);       remove(p);
@@ -114,6 +123,9 @@ namespace {
         bool ok = CopyFile("sdmc:/slaunch/bin/hbloader/main", to);
         snprintf(to, sizeof(to), "%s/main.npdm", kAlbumExefs);
         ok = ok && CopyFile("sdmc:/slaunch/bin/hbloader/main.npdm", to);
+        // Saved first and never overwritten, so the stock file survives a crash here.
+        if (ok && Exists(kAtmoHbl) && !Exists(kAtmoHblSaved)) ok = rename(kAtmoHbl, kAtmoHblSaved) == 0;
+        if (ok) { remove(kAtmoHbl); ok = CopyFile(kOurHbl, kAtmoHbl); }
         Result rc = ok ? la::Start(AppletId_LibraryAppletPhotoViewer, 0)
                        : MAKERESULT(Module_Libnx, LibnxError_IoError);
         DaemonLog("qext: hbloader in the album slot rc=0x%x", rc);
@@ -121,18 +133,49 @@ namespace {
         return rc;
     }
 
+    // hbloader reads this on start: the .nro, and on a second line its argv.
+    Result WriteHbTarget(const char *nro, const char *argv) {
+        char buf[FS_MAX_PATH + 600];
+        const int n = snprintf(buf, sizeof(buf), (argv && argv[0]) ? "%s\n%s\n" : "%s\n", nro, argv);
+        FILE *fp = n > 0 && n < (int)sizeof(buf) ? fopen(kHbTarget, "w") : nullptr;
+        if (!fp) return MAKERESULT(Module_Libnx, LibnxError_IoError);
+        const bool ok = fwrite(buf, 1, n, fp) == (size_t)n;
+        return fclose(fp) == 0 && ok ? 0 : MAKERESULT(Module_Libnx, LibnxError_IoError);
+    }
+
+    // Starts once the menu has unloaded, which is what gives the homebrew its memory.
     Result OpenHomebrewApplet(const char *nro, const char *argv) {
         if (nro) {
-            char buf[FS_MAX_PATH + 600];
-            const int n = snprintf(buf, sizeof(buf), (argv && argv[0]) ? "%s\n%s\n" : "%s\n", nro, argv);
-            FILE *fp = n > 0 && n < (int)sizeof(buf) ? fopen(kHbTarget, "w") : nullptr;
-            if (!fp) return MAKERESULT(Module_Libnx, LibnxError_IoError);
-            fwrite(buf, 1, n, fp);
-            fclose(fp);
+            const Result rc = WriteHbTarget(nro, argv);
+            if (R_FAILED(rc)) { Fail("Could not start the homebrew loader"); return rc; }
         } else {
             remove(kHbTarget);   // no target: hbloader boots hbmenu.nro
         }
-        return StartHbloader();
+        g_Heavy = Heavy::Homebrew;
+        return 0;
+    }
+
+    void DonorDir(u64 donor, char *out, size_t cap, const char *sub) {
+        snprintf(out, cap, "sdmc:/atmosphere/contents/%016llX%s", (unsigned long long)donor, sub);
+    }
+
+    // The donor's redirect, gone again as soon as the menu is back: the code is
+    // loaded by then, and from then on the game has to boot as itself.
+    void DisarmDonor() {
+        FILE *fp = fopen(kDonorArmed, "r");
+        if (!fp) return;
+        char line[32] = {};
+        const u64 donor = fgets(line, sizeof(line), fp) ? strtoull(line, nullptr, 16) : 0;
+        fclose(fp);
+        if (donor) {
+            char p[128];
+            DonorDir(donor, p, sizeof(p), "/exefs/main");      remove(p);
+            DonorDir(donor, p, sizeof(p), "/exefs/main.npdm"); remove(p);
+            DonorDir(donor, p, sizeof(p), "/exefs");           rmdir(p);
+            DonorDir(donor, p, sizeof(p), "");                 rmdir(p);
+        }
+        remove(kDonorArmed);
+        remove(kHbTarget);
     }
 
     // The loader's message pump is not running while this waits, so the sleep
@@ -175,6 +218,7 @@ namespace {
     }
 
     Result LaunchApp(u64 id) {
+        DisarmDonor();
         // A plugin's virtual title: the loader knows how it boots, and whose it is.
         if (qext_title_is_virtual(id)) {
             const Result rc = qext_launch_title(id);
@@ -191,10 +235,34 @@ namespace {
         return rc;
     }
 
+    // The same hbloader_app that ran under sSystem, as a content override instead of
+    // ECS, and started like any game so it runs as the selected user.
     Result LaunchHomebrewApp(u64 donor, const char *nro, const char *argv) {
-        Result rc = nro::Launch(donor, nro, argv);
+        DisarmDonor();
+        char dir[128];
+        DonorDir(donor, dir, sizeof(dir), "/exefs");
+        if (Exists(dir)) {   // somebody else's mod of that game is not ours to touch
+            Fail("That game already has an override on the SD card, so it cannot be the donor");
+            return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+        }
+        Result rc = WriteHbTarget(nro, argv);
+        if (R_SUCCEEDED(rc)) {
+            // Written first, so a crash during the copy is still cleaned up.
+            if (FILE *fp = fopen(kDonorArmed, "w")) { fprintf(fp, "%016llX\n", (unsigned long long)donor); fclose(fp); }
+            char p[128];
+            mkdir("sdmc:/atmosphere/contents", 0777);
+            DonorDir(donor, p, sizeof(p), ""); mkdir(p, 0777);
+            mkdir(dir, 0777);
+            DonorDir(donor, p, sizeof(p), "/exefs/main");
+            bool ok = CopyFile("sdmc:/slaunch/bin/hbloader_app/main", p);
+            DonorDir(donor, p, sizeof(p), "/exefs/main.npdm");
+            ok = ok && CopyFile("sdmc:/slaunch/bin/hbloader_app/main.npdm", p);
+            AccountUid player = g_User;
+            if (!accountUidIsValid(&player)) accountGetLastOpenedUser(&player);
+            rc = ok ? qext_launch_title_as(donor, player) : MAKERESULT(Module_Libnx, LibnxError_IoError);
+        }
         DaemonLog("qext: nro %s under 0x%016lx rc=0x%x", nro, donor, rc);
-        if (R_FAILED(rc)) Fail("The homebrew could not be started");
+        if (R_FAILED(rc)) { DisarmDonor(); Fail("The homebrew could not be started"); }
         return rc;
     }
 
@@ -212,6 +280,7 @@ namespace {
 
 void CleanUpLeftovers() {
     DisarmAlbum();
+    DisarmDonor();
     // Also what an upgrade from sSystem can leave: a queued homebrew it never got to,
     // which would otherwise launch the first time this returns to the menu, and a
     // crash count that would start the new menu in safe mode.
@@ -221,6 +290,7 @@ void CleanUpLeftovers() {
 
 void OnBackInMenu() {
     DisarmAlbum();
+    DisarmDonor();
     hb::Request req;
     if (!hb::LaunchQueue::Take(req)) return;
     const u64 donor = req.mode == sl::sys::hb::LaunchMode::App
@@ -262,6 +332,7 @@ void StartUnloadedApplet(unsigned heap_mb_left) {
     const Heavy heavy = g_Heavy;
     g_Heavy = Heavy::None;
     if (heavy == Heavy::Web) { StartWeb(heap_mb_left); return; }
+    if (heavy == Heavy::Homebrew) { StartHbloader(); return; }   // reports its own failure
     Result rc;
     const char *fail;
     switch (heavy) {

@@ -52,7 +52,8 @@ namespace sl::menu::qext {
     void OnBackInMenu();
     // A RestartMenu command is pending. Clears it.
     bool TakeRestart();
-    // The browser, album, profile or Mii edit was asked for: they need the menu's memory.
+    // The browser, album, profile, Mii edit or applet homebrew was asked for: they need
+    // the menu's memory.
     bool WantsUnload();
     // Starts it, once the menu is gone.
     void StartUnloadedApplet(unsigned heap_mb_left);
