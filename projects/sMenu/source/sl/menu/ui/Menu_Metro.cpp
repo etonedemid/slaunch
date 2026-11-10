@@ -196,6 +196,9 @@ namespace sl::menu::ui {
                 kindTile(354, 0,     kMtCW, kMtRH, ItemKind::UserPage,    "Friends");
                 kindTile(354, R,     kMtCW, kMtRH, ItemKind::MiiEdit,     "Avatar");
                 kindTile(354, 2 * R, kMtCW, kMtRH, ItemKind::Controllers, "Controllers");
+#ifdef SL_QEXT
+                kindTile(354 + C, 0, kMtCW, 2 * kMtRH + kMtGap, ItemKind::Discord, "Discord");
+#endif
                 break;
 
             case MP_Games: {
