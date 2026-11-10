@@ -172,7 +172,7 @@ namespace sl::menu::ui {
             return s;
         }
 
-        enum HitKind { HRail, HList, HMedia, HInput, HPlus, HSend, HText, HCancel, HEmoji, HEmojiBtn, HSendDraft };
+        enum HitKind { HRail, HList, HMedia, HInput, HPlus, HSend, HText, HCancel, HEmoji, HEmojiBtn, HSendDraft, HAudio };
 
         // The picker's emoji: what goes in the message, and its Twemoji file name.
         struct EmoEntry { const char *text, *name; };
@@ -277,7 +277,7 @@ namespace sl::menu::ui {
         struct Row { Snowflake id = 0; std::string text, avatar; bool category = false, voice = false, unread = false; int mentions = 0; };
         struct Piece { std::string text; int emoji = -1, x = 0; };   // emoji: index into urls
         struct ChatRow {
-            enum Kind { Head, Text, Media, Reply } kind = Text;   // Reply: text = who, time = what they said
+            enum Kind { Head, Text, Media, Reply, Audio } kind = Text;   // Reply: text = who, time = what they said. Audio: url = clip, text = name
             std::vector<Piece> pieces;      // Text; Head uses text for the name
             std::string text, time, url, alt;   // Head: name, time, avatar. Media: the picture (alt: a still)
             std::string full;                   // Media: a bigger still for the viewer
@@ -411,7 +411,11 @@ namespace sl::menu::ui {
             m_dc->ban_avatar = a.avatarUrl;
             m_dc->ban_chat = a.channelId;
             m_dc->ban_until = armGetSystemTick() + armGetSystemTickFreq() * 5;
+            m_sfx.Play(audio::Sfx::Notify);   // the toast's sound (drop notify.wav/.mp3 in slaunch/sounds)
         }
+        // A sound clip the trusted sender posted, or one the user tapped to play.
+        std::string clip;
+        if (m_dc->svc.takeSound(clip)) m_sfx.PlayClip(clip.c_str());
     }
 
     // A notification in the style of the layout it shows over: Metro gets the
@@ -1043,6 +1047,14 @@ namespace sl::menu::ui {
                 m.h = m.ph + 10;
                 if (!m.url.empty()) d.chat_rows.push_back(std::move(m));
             }
+            for (const auto &au : l.audio) {
+                DiscordUi::ChatRow m;
+                m.kind = DiscordUi::ChatRow::Audio;
+                m.url = au.url;
+                m.text = au.name;
+                m.h = kDcChatLineH + 10;
+                d.chat_rows.push_back(std::move(m));
+            }
         }
     }
 
@@ -1166,6 +1178,19 @@ namespace sl::menu::ui {
                         m_gfx->FillRect(kDcTextX, y + 4, r.w, r.ph, WithAlpha(t.fg, 24));
                     hit(kDcTextX, std::max(y + 4, top), r.w, std::min(y + 4 + r.ph, kDcInputY - 4) - std::max(y + 4, top), HMedia, i);
                     if (d.vis_media < 0 && y + 4 >= top && y + 4 + r.ph <= kDcInputY - 4) d.vis_media = i;
+                } else if (r.kind == DiscordUi::ChatRow::Audio) {
+                    // A pill with a play triangle and the file name; tap to play.
+                    const int pw = std::min(360, 70 + m_gfx->TextWidth(FontSize::Small, r.text.c_str()));
+                    const int px = kDcTextX, py = y + 6, ph = r.h - 12;
+                    gfx::Gfx::CardStyle cs; cs.radius = ph / 2.0f; cs.shadow = 0.0f;
+                    cs.fill = WithAlpha(t.fg, 24);
+                    if (!m_gfx->Card(nullptr, px, py, pw, ph, cs, 255))
+                        m_gfx->FillRect(px, py, pw, ph, WithAlpha(t.fg, 24));
+                    const int cxp = px + ph / 2, cyp = py + ph / 2, tr = ph / 5;
+                    m_gfx->FillTriangle(cxp - tr / 2, cyp - tr, cxp - tr / 2, cyp + tr, cxp + tr, cyp, t.accent);
+                    DiscordText(FontSize::Small, px + ph, py + (ph - m_gfx->LineHeight(FontSize::Small)) / 2,
+                                t.fg, r.text, pw - ph - 12);
+                    hit(px, std::max(py, top), pw, std::min(py + ph, kDcInputY - 4) - std::max(py, top), HAudio, i);
                 } else {
                     const int ty = y + (r.h - m_gfx->LineHeight(FontSize::Small)) / 2;
                     for (const DiscordUi::Piece &p : r.pieces) {
@@ -1482,6 +1507,10 @@ namespace sl::menu::ui {
                 case HText:   OnButtonDiscord(Btn::Y); break;
                 case HCancel: OnButtonDiscord(Btn::B); break;
                 case HMedia:  ViewOpen(d, m_gfx, h.idx); break;
+                case HAudio:  if (h.idx >= 0 && h.idx < (int)d.chat_rows.size())
+                                  m_dc->svc.requestSound(d.chat_rows[h.idx].url);
+                              SetStatus("Playing sound...");
+                              break;
                 case HInput:  OnButtonDiscord(Btn::A); break;
                 case HPlus:   OnButtonDiscord(Btn::X); break;
                 case HEmojiBtn: d.picker = !d.picker; break;

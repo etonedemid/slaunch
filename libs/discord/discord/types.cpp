@@ -54,6 +54,13 @@ bool Attachment::IsVideo() const {
     return Str::EndsWith(f, ".mp4") || Str::EndsWith(f, ".webm") || Str::EndsWith(f, ".mov");
 }
 
+bool Attachment::IsAudio() const {
+    if (Str::StartsWith(contentType, "audio/")) return true;
+    std::string f = Str::Lower(filename);
+    return Str::EndsWith(f, ".mp3") || Str::EndsWith(f, ".wav") || Str::EndsWith(f, ".ogg") ||
+           Str::EndsWith(f, ".opus") || Str::EndsWith(f, ".flac") || Str::EndsWith(f, ".m4a");
+}
+
 std::string Reaction::Key() const { return emojiId ? emojiName + ":" + Str::Id(emojiId) : emojiName; }
 
 std::string Reaction::UrlParam() const { return Str::UrlEncode(Key()); }

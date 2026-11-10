@@ -81,7 +81,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 2.1.2
+APP_VERSION := 2.1.3
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE

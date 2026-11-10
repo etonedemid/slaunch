@@ -25,6 +25,7 @@ namespace sl::menu::audio {
         Back,       // leaving a screen
         Move,       // the cursor moved
         Explode,    // ZL+ZR layout explosion
+        Notify,     // a Discord notification arrived (achievement toast etc.)
         Count
     };
 
@@ -36,6 +37,9 @@ namespace sl::menu::audio {
         void Init(bool audio_ok, const char *pack = nullptr);
         void Exit();                // free them (before the mixer is closed)
         void Play(Sfx s);
+        // Play an arbitrary audio file (a Discord clip). Loads it, plays it on a
+        // track of its own, and frees the clip played before. No-op if audio is off.
+        void PlayClip(const char *path);
         void SetVolume(int vol);    // 0..100
 
     private:
@@ -50,6 +54,9 @@ namespace sl::menu::audio {
         // would otherwise stack a copy per step on the shared ones.
         MIX_Track *m_move_voice = nullptr;
         int        m_next = 0;
+        // A played sound clip and its track, kept alive until the next clip.
+        MIX_Audio *m_clip = nullptr;
+        MIX_Track *m_clip_voice = nullptr;
     };
 
 } // namespace sl::menu::audio

@@ -28,6 +28,7 @@ namespace sl::menu::audio {
             { "sdmc:/slaunch/sounds/back.wav",       "sdmc:/slaunch/sounds/back.mp3",       nullptr },
             { "sdmc:/slaunch/sounds/move.wav",       "sdmc:/slaunch/sounds/move.mp3",       nullptr },
             { "sdmc:/slaunch/sounds/explode.wav",    "sdmc:/slaunch/sounds/explode.mp3",    nullptr },
+            { "sdmc:/slaunch/sounds/notify.wav",     "sdmc:/slaunch/sounds/notify.mp3",     nullptr },
         };
     }
 
@@ -63,6 +64,8 @@ namespace sl::menu::audio {
         for (auto &v : m_voice) { if (v) MIX_DestroyTrack(v); v = nullptr; }
         if (m_move_voice) { MIX_DestroyTrack(m_move_voice); m_move_voice = nullptr; }
         for (auto &a : m_sfx) { if (a) MIX_DestroyAudio(a); a = nullptr; }
+        if (m_clip_voice) { MIX_DestroyTrack(m_clip_voice); m_clip_voice = nullptr; }
+        if (m_clip) { MIX_DestroyAudio(m_clip); m_clip = nullptr; }
         m_ok = false;
     }
 
@@ -78,6 +81,22 @@ namespace sl::menu::audio {
         if (!t) return;
         MIX_SetTrackAudio(t, m_sfx[i]);
         MIX_PlayTrack(t, 0);
+    }
+
+    void Sound::PlayClip(const char *path) {
+        if (!m_ok || !path || !*path) return;
+        MIX_Mixer *mixer = Mixer();
+        if (!mixer) return;
+        if (!m_clip_voice) m_clip_voice = MIX_CreateTrack(mixer);
+        if (!m_clip_voice) return;
+        MIX_Audio *clip = MIX_LoadAudio(mixer, path, true);
+        if (!clip) return;               // an unsupported format: just stays silent
+        MIX_StopTrack(m_clip_voice, 0);
+        MIX_SetTrackAudio(m_clip_voice, clip);
+        MIX_SetTrackGain(m_clip_voice, m_volume / 100.0f);
+        MIX_PlayTrack(m_clip_voice, 0);
+        if (m_clip) MIX_DestroyAudio(m_clip);   // free the previous clip now it is off the track
+        m_clip = clip;
     }
 
     void Sound::SetVolume(int vol) {

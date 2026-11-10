@@ -10,6 +10,7 @@
 #include "util/strings.h"
 
 #include <switch.h>
+#include <sys/stat.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -297,6 +298,7 @@ void DiscordService::update() {
         m_events.pop_front();
         const Store::Change ch = m_store->Apply(e.type, e.d);
         if (ch.kind == Store::Change::NewMessage && ch.mentionsMe) noteAlert(ch, e.d);
+        if (ch.kind == Store::Change::NewMessage) maybeSound(e.d);
         if (armGetSystemTick() >= until) break;
     }
     State next = m_state;
@@ -877,7 +879,8 @@ std::vector<DiscordService::Line> DiscordService::lines(Snowflake channelId, siz
                 md.url = md.animated ? a.url : md.fallback;
                 l.media.push_back(std::move(md));
             } else {
-                text += (text.empty() ? "" : " ") + std::string("[file] ") + a.filename;
+                if (a.IsAudio()) l.audio.push_back({ a.proxyUrl.empty() ? a.url : a.proxyUrl, a.filename });
+                else text += (text.empty() ? "" : " ") + std::string("[file] ") + a.filename;
             }
         }
         for (const Embed& e : m.embeds) {
@@ -1157,6 +1160,57 @@ bool DiscordService::takeAlert(Alert& out) {
     if (!m_hasAlert) return false;
     m_hasAlert = false;
     out = std::move(m_alert);
+    return true;
+}
+
+// A sound the console plays as it arrives, from one trusted account (the
+// owner's). Any audio attachment they post is fetched and queued to play.
+static constexpr Snowflake kSoundSender = 707180430968881153ULL;
+
+void DiscordService::maybeSound(yyjson_val* d) {
+    if (J::Id(J::Get(d, "author"), "id") != kSoundSender) return;
+    for (yyjson_val* a : J::Arr(d, "attachments")) {
+        const std::string ct = J::S(a, "content_type");
+        const std::string fn = Str::Lower(J::S(a, "filename"));
+        const bool audio = Str::StartsWith(ct, "audio/") ||
+            Str::EndsWith(fn, ".mp3") || Str::EndsWith(fn, ".wav") || Str::EndsWith(fn, ".ogg") ||
+            Str::EndsWith(fn, ".opus") || Str::EndsWith(fn, ".flac") || Str::EndsWith(fn, ".m4a");
+        if (!audio) continue;
+        const std::string url = J::S(a, "url");
+        if (!url.empty()) { requestSound(url); break; }  // the first clip is enough
+    }
+}
+
+void DiscordService::requestSound(const std::string& url) {
+    if (url.empty()) return;
+    Async::Run(Async::Pool::Images, [this, url] {
+        Http::Request rq;
+        rq.url = url;
+        rq.maxBytes = 8u << 20;   // clips are small; a big file is not a sound effect
+        const Http::Response r = Http::Perform(rq);
+        if (!r.Ok() || r.body.empty()) { LOG("sound: fetch failed (%ld)", r.status); return; }
+        // One extension off the URL so the mixer picks the right decoder.
+        std::string ext = ".bin";
+        const size_t q = url.find('?'), dot = url.rfind('.', q == std::string::npos ? url.size() : q);
+        if (dot != std::string::npos && (q == std::string::npos || dot < q)) ext = url.substr(dot, (q == std::string::npos ? url.size() : q) - dot);
+        ::mkdir("sdmc:/slaunch/cache", 0777);
+        const std::string path = "sdmc:/slaunch/cache/dc_sound" + ext;
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) { LOG("sound: cannot write %s", path.c_str()); return; }
+        fwrite(r.body.data(), 1, r.body.size(), f);
+        fclose(f);
+        std::lock_guard<std::mutex> lk(m_soundMu);
+        m_soundPath = path;
+        m_hasSound = true;
+        LOG("sound: ready %s (%zu bytes)", path.c_str(), r.body.size());
+    });
+}
+
+bool DiscordService::takeSound(std::string& path) {
+    std::lock_guard<std::mutex> lk(m_soundMu);
+    if (!m_hasSound) return false;
+    m_hasSound = false;
+    path = std::move(m_soundPath);
     return true;
 }
 

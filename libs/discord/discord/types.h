@@ -122,6 +122,7 @@ struct Attachment {
 
     bool IsImage() const;
     bool IsVideo() const;
+    bool IsAudio() const;
     bool Spoiler() const { return filename.rfind("SPOILER_", 0) == 0; }
 };
 

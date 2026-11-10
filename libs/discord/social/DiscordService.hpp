@@ -67,6 +67,8 @@ public:
             bool animated = false;
         };
         std::vector<Media> media; // images and GIFs under the text
+        struct Audio { std::string url, name; };
+        std::vector<Audio> audio; // playable sound clips attached to the message
     };
 
     DiscordService();
@@ -139,6 +141,11 @@ public:
         std::string chat, chatAvatar;       // the chat, as the panel titles it
     };
     bool takeAlert(Alert& out);
+    // A sound to play: a file downloaded to the SD card, path handed over once.
+    // Fed by an audio clip from the trusted sender (auto), or requestSound().
+    bool takeSound(std::string& path);
+    // Fetch an audio clip to the SD card on a worker, then queue it for takeSound.
+    void requestSound(const std::string& url);
     // Unicode emoji in any text (a channel or user name) as U+F0000 + i marks,
     // urls[i] being the Twemoji picture: what lines() does to message text.
     static std::string emojiMarks(const std::string& s, std::vector<std::string>& urls);
@@ -171,6 +178,10 @@ private:
     void rememberMe();
     std::string plainText(const std::string& content, std::vector<std::string>* emojis = nullptr) const;
     void noteAlert(const Store::Change& ch, yyjson_val* d);
+    void maybeSound(yyjson_val* d);        // auto-play an audio clip from the trusted sender
+    std::mutex m_soundMu;
+    std::string m_soundPath;
+    bool m_hasSound = false;
 
     std::unique_ptr<Store> m_store;
     std::unique_ptr<Gateway> m_gateway;
