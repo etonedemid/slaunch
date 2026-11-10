@@ -81,7 +81,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sMenu
 APP_AUTHOR  := etonedemid
-APP_VERSION := 2.1.3
+APP_VERSION := 2.1.4
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
@@ -144,6 +144,8 @@ endif
 # Network libs first (curl -> mbedtls -> z), then FFmpeg (avformat -> avcodec
 # -> avutil), then SDL, then libnx once more: SDL3's flags end with Mesa's
 # libdrm_nouveau, which calls into libnx, so libnx resolves everything last.
+# The SDL stage dirs ahead of portlibs: its libwebp (1.5) replaces portlibs' 1.0.2.
+LDFLAGS  += $(filter -L%,$(SDL_LIBS))
 LIBS     := $(CURL_LIBS) $(FFMPEG_LIBS) $(SDL_LIBS) -lnx
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX) $(FFMPEG_PREFIX)

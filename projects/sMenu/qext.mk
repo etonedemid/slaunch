@@ -25,7 +25,7 @@ ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC
 # to one faults (it took the menu down in sol2's first state, on hardware).
 # SDL-dlink's headers first; the satellite libraries' from the stage prefix.
 FLAGS := -idirafter ../../libs/discord -g -O2 -Wall -ffunction-sections -fdata-sections -fvisibility=default $(ARCH) \
-    -D__SWITCH__ -DSL_QEXT=1 -DSL_LIBNX_MASTER -DSL_VERSION=\"2.1.3\" -DSL_HAS_VIDEO=1 -DSL_HAS_NVTEGRA=1 \
+    -D__SWITCH__ -DSL_QEXT=1 -DSL_LIBNX_MASTER -DSL_VERSION=\"2.1.4\" -DSL_HAS_VIDEO=1 -DSL_HAS_NVTEGRA=1 \
     -D_longjmp=longjmp -D_setjmp=setjmp -DLUAI_MAXSTACK=1000000 -DLUA_32BITS -DLUAI_FUNC=extern \
     -I$(SDLDIR)/include -I$(SDL3_PREFIX)/include -I$(FFDIR)/include \
     -I$(LIBNX)/include -I$(PORTLIBS)/include -I$(SDLDIR)/extern/neko3d/include -I$(BUILD) \
@@ -58,7 +58,7 @@ OBJS := $(patsubst %,$(BUILD)/o/%.o,$(subst ../,up/,$(subst $(QEXT_DIR)/,qext/,$
         $(BUILD)/o/crt0.o
 
 LIBS := -L$(SDL3_PREFIX)/lib -L$(PORTLIBS)/lib \
-    -lSDL3_ttf -lharfbuzz -lfreetype -lbz2 -lSDL3_image -lpng16 -lSDL3_mixer \
+    -lSDL3_ttf -lharfbuzz -lfreetype -lbz2 -lSDL3_image -lwebpdemux -lwebpmux -lwebp -lsharpyuv -lpng16 -lSDL3_mixer \
     -lopusfile -lopus -logg -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lgcc
 
 $(OUT).dnro: $(OUT).elf
