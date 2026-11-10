@@ -126,6 +126,23 @@ namespace sl::menu::gfx {
         // per possible colour.
         void         DrawImageTinted(SDL_Texture *tex, int x, int y, int w, int h,
                                      SDL_Color c, Uint8 alpha = 255);
+        // Part of a texture (src in its own pixels) into dst, colour-modulated by c.
+        void         DrawRegion(SDL_Texture *tex, const SDL_FRect &src, const SDL_FRect &dst,
+                                SDL_Color c = { 255, 255, 255, 255 }, Uint8 alpha = 255);
+        // A band between two curves, in ONE draw call: n samples in order along
+        // it, each a left and a right x at a height, with the texture's u at
+        // both (0..1) and its v. For shapes that bend - a blade bowed along its
+        // stack, the face between two stacks - which drawn as rows of
+        // DrawRegion cost a call a row, a couple of thousand a frame.
+        // tex null = flat colour.
+        struct BandPt { float xl, xr, y, ul, ur, v; };
+        void         DrawBand(SDL_Texture *tex, const BandPt *pts, int n,
+                              SDL_Color c = { 255, 255, 255, 255 }, Uint8 alpha = 255);
+        // Nine-slice: the corners keep their size (border px of the texture),
+        // the edges stretch one way and the middle both, so a framed panel
+        // image fits any box without its corners smearing.
+        void         Draw9(SDL_Texture *tex, int x, int y, int w, int h, int border,
+                           SDL_Color c = { 255, 255, 255, 255 }, Uint8 alpha = 255);
 
         // ---- 3D quads (coverflow) -----------------------------------------
         // Camera sits at the origin looking down +z with y up; a quad is given
@@ -184,7 +201,7 @@ namespace sl::menu::gfx {
         void Text(TTF_Font *f, int x, int y, SDL_Color c, const char *text);
         // Turned a quarter clockwise, reading top to bottom from (x, y): the
         // left edge of the box it fills is x, its top is y.
-        void TextDown(TTF_Font *f, int x, int y, SDL_Color c, const char *text);
+        void TextDown(TTF_Font *f, int x, int y, SDL_Color c, const char *text, bool up = false);
         // An image filling w x h, cropped to that shape rather than stretched.
         void DrawImageCrop(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha = 255);
 
@@ -340,6 +357,7 @@ namespace sl::menu::gfx {
         // Scratch for DrawQuad3D's subdivision. A member so a face split into
         // a few hundred cells does not allocate every frame.
         std::vector<SDL_Vertex> m_geom;
+        std::vector<int>        m_geomIdx;   // DrawBand's triangles
         std::vector<SDL_FRect>  m_frects;   // FillRects' conversion scratch
         const char   *m_title      = "sLaunch";
 

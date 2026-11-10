@@ -45,6 +45,11 @@ namespace sl::menu::ui {
         constexpr int kMtPanelGap = 164, kMtSlotW = 820;
         constexpr int kMtTabsX = 78, kMtTabsY = 108, kMtTabPt = 34, kMtTabGap = 38;
         constexpr int kMtHintY = 652;
+        // A settings list: its first row, row pitch and rows to a page.
+        constexpr int kMtListY = 118, kMtListRH = 50, kMtListRows = 10;
+        inline float MtListTop(float scroll, int n) {
+            return std::clamp(scroll - kMtListRows / 2 + 1, 0.0f, (float)std::max(0, n - kMtListRows));
+        }
         constexpr Uint8 kMtPeek = 105;   // neighbouring panels, faded
 
         // "my games"
@@ -62,13 +67,16 @@ namespace sl::menu::ui {
 
     // ---- type ---------------------------------------------------------------
     void Menu::MText(int face, int pt, int x, int y, SDL_Color c, const char *s) {
-        if (TTF_Font *f = m_gfx->Face(kMtFace[face], pt)) { m_gfx->Text(f, x, y, c, s); return; }
+        // Blades and NXE take the skin's font, when it has one.
+        const char *path = (XboxOld() && !m_xb_font.empty()) ? m_xb_font.c_str() : kMtFace[face];
+        if (TTF_Font *f = m_gfx->Face(path, pt)) { m_gfx->Text(f, x, y, c, s); return; }
         const FontSize fs = pt <= 18 ? FontSize::Small : pt <= 24 ? FontSize::Normal
                           : pt <= 36 ? FontSize::Large : FontSize::Title;
         m_gfx->Text(fs, x, y, c, s);
     }
     int Menu::MWidth(int face, int pt, const char *s) {
-        if (TTF_Font *f = m_gfx->Face(kMtFace[face], pt)) return m_gfx->TextWidth(f, s);
+        const char *path = (XboxOld() && !m_xb_font.empty()) ? m_xb_font.c_str() : kMtFace[face];
+        if (TTF_Font *f = m_gfx->Face(path, pt)) return m_gfx->TextWidth(f, s);
         const FontSize fs = pt <= 18 ? FontSize::Small : pt <= 24 ? FontSize::Normal
                           : pt <= 36 ? FontSize::Large : FontSize::Title;
         return m_gfx->TextWidth(fs, s);
@@ -733,8 +741,8 @@ namespace sl::menu::ui {
         scroll_pos += (cursor - scroll_pos) * 0.30f;
         if (std::abs(cursor - scroll_pos) < 0.01f) scroll_pos = (float)cursor;
 
-        constexpr int X = kMtGX, W = 818, Y0 = 118, RH = 50, Rows = 10;
-        const float top = std::clamp(scroll_pos - Rows / 2 + 1, 0.0f, (float)std::max(0, n - Rows));
+        constexpr int X = kMtGX, W = 818, Y0 = kMtListY, RH = kMtListRH, Rows = kMtListRows;
+        const float top = MtListTop(scroll_pos, n);
         for (int i = std::max(0, (int)top - 1); i < n && i <= (int)top + Rows; i++) {
             const int y = Y0 + (int)lroundf((i - top) * RH);
             if (y < Y0 - RH / 2 || y > Y0 + (Rows - 1) * RH + RH / 2) continue;
@@ -760,10 +768,28 @@ namespace sl::menu::ui {
     // discs, anything else as its usual glyph in the text colour.
     void Menu::MetroHintSegs(std::initializer_list<HintSeg> segs) {
         MetroPalette();
-        int x = 120;
-        const int y = kMtHintY;
+        int x = 120, y = kMtHintY;
+        bool flip = false;
+        if (XboxOld()) {   // the 360's own legend, on Blades' colours or the theme's
+            const bool main = m_screen == Screen::Main && !m_options_open && m_dialog == Dialog::None;
+            m_mt_fg = (main && m_ui_mode == UiMode::Blades) ? kMtWhite : m_theme.Current().fg;
+            if (main) x = m_xb_hint_x;
+            if (m_xb_hint_y) {   // a legend its screen places by hand, pop-up over it or not
+                x = m_xb_hint_x; y = m_xb_hint_y; flip = m_xb_hint_flip;
+            } else if (BladesUi()) {   // any other Blades screen: one row in the legend band
+                int left, right;
+                BladesSpan(left, right);
+                x = left; y = BladesHintY();
+            }
+        }
         constexpr int r = 11;
         for (const HintSeg &seg : segs) {
+            if (flip) {   // right-aligned: the word, then its buttons
+                const char *label = T(seg.label);
+                x -= MWidth(MF_Semi, 19, label) + 6 + (int)seg.icons.size() * (2 * r + 3) - 3;
+                MText(MF_Semi, 19, x, y, m_mt_fg, label);
+                x += MWidth(MF_Semi, 19, label) + 6;
+            }
             for (const char *icon : seg.icons) {
                 SDL_Color c{};
                 const char k = (icon[0] && !icon[1]) ? icon[0] : 0;
@@ -774,7 +800,10 @@ namespace sl::menu::ui {
                     case 'y': c = { 238, 186,  18, 255 }; break;
                     default: break;
                 }
-                if (c.a) {
+                SDL_Texture *glyph = (c.a && XboxOld()) ? SkinButton(k) : nullptr;
+                if (glyph) {
+                    m_gfx->DrawImage(glyph, x, y + 2, 2 * r, 2 * r);   // the skin's own button
+                } else if (c.a) {
                     gfx::Gfx::CardStyle cs;
                     cs.radius = (float)r; cs.shadow = 0.0f; cs.fill = c;
                     if (!m_gfx->Card(nullptr, (float)x, (float)(y + 2), 2.0f * r, 2.0f * r, cs, 255))
@@ -809,10 +838,32 @@ namespace sl::menu::ui {
                 }
                 x += 2 * r + 3;
             }
+            if (flip) continue;
             const char *label = T(seg.label);
             MText(MF_Semi, 19, x + 4, y, m_mt_fg, label);
             x += 4 + MWidth(MF_Semi, 19, label) + 22;
         }
+    }
+
+    int Menu::MetroListRowAt(int y, float scroll, int rows) const {
+        return (int)floorf(MtListTop(scroll, rows) + (float)(y - kMtListY) / (float)kMtListRH);
+    }
+
+    // Metro in the 360's own colours, on a screen that takes them (setup and
+    // the splash keep the theme's).
+    bool Menu::MetroUi() const {
+        return m_ui_mode == UiMode::Metro && !m_metro_themed &&
+               m_screen != Screen::Oobe && m_screen != Screen::Welcome;
+    }
+    // What the screens Metro does not draw itself use for colours while it is
+    // up: white on charcoal with the dashboard's green, in place of a theme
+    // that was picked against some other background.
+    void Menu::MetroTheme(Theme &t) const {
+        t.bg_top    = SDL_Color{ 52, 53, 57, 255 };
+        t.bg_bottom = SDL_Color{ 34, 35, 38, 255 };
+        t.fg = t.title = t.icon_fg = kMtWhite;
+        t.dim    = SDL_Color{ 200, 202, 207, 255 };
+        t.accent = SDL_Color{ 136, 214, 88, 255 };   // the tile green, lightened to read as text
     }
 
     // Pop-ups as the dashboard drew them: a dark band right across the screen,

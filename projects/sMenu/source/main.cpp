@@ -31,6 +31,9 @@
 #include <SDL3_mixer/SDL_mixer.h>
 #include <sl/menu/audio/Music.hpp>
 #include <sl/menu/smi/QextBackend.hpp>
+#ifdef SL_QEXT
+#include <sl/menu/qext/GameToast.hpp>
+#endif
 #endif
 
 using namespace sl;
@@ -405,7 +408,13 @@ static void OnAppListChanged() { g_NeedAppReload = true; }
 // SleepFinished must not leave the menu frozen). Presenting while vi and
 // nvservices power down is what took vi down on wake (issue #13).
 static bool g_Asleep = false;
-static void OnSleepRequested() { g_Asleep = true; BootLog("applet: sleep requested, presenting paused"); }
+static void OnSleepRequested() {
+    g_Asleep = true;
+    BootLog("applet: sleep requested, presenting paused");
+#ifdef SL_QEXT
+    menu::qext::toast::Hold();   // a pop-up over a game draws on a thread of its own
+#endif
+}
 static void OnSleepFinished()  { if (g_Asleep) BootLog("applet: woke up, presenting again"); g_Asleep = false; }
 static void OnAppletHook(AppletHookType hook, void *) {
     if (hook == AppletHookType_OnResume) OnSleepFinished();

@@ -224,7 +224,7 @@ namespace sl::menu::ui {
         const bool prev = (b == Btn::Left || b == Btn::Up);
         const bool next = (b == Btn::Right || b == Btn::Down);
         if (m_oobe_step == 1 && (prev || next)) {          // layout gallery
-            const int n = (int)UiMode::Count;
+            const int n = kUiModeChoices;
             m_ui_mode = (UiMode)(((int)m_ui_mode + (next ? 1 : n - 1)) % n);
             RebuildItems();   // the list contents depend on the mode
         }
@@ -1244,13 +1244,15 @@ namespace sl::menu::ui {
         }
         auto cycleUiMode = [&]() {
             const int dir = (b == Btn::Right) ? +1 : -1;
-            const int n = (int)UiMode::Count;
+            const int n = kUiModeChoices;
             m_ui_mode = (UiMode)(((int)m_ui_mode + dir + n) % n);
             // The item list itself depends on the mode now: XMB carries the full
             // scanned-homebrew category, the other layouts only pinned homebrew.
             // Rebuild before syncing the bar, so the bar points into the list it
             // is actually going to draw.
             RebuildItems();
+            XboxSkinDrop();       // the other layout's skin, or none
+            XboxSoundsReload();
             // A deliberate switch into XMB keeps the entry you were on, rather
             // than resetting the bar to its Games default.
             XmbSyncFromCursor(); m_xmb_placed = true;
@@ -1377,6 +1379,31 @@ namespace sl::menu::ui {
 #ifdef SL_QEXT
             m_dc_tried = false;   // on: connect now, not at the next start
 #endif
+            SaveSettings();
+        }
+        if (m_theming_cursor == TH_DiscordGame && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_discord_game_alerts = !m_discord_game_alerts;
+            SaveSettings();
+        }
+        if (m_theming_cursor == TH_DiscordSound && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            // "" (the built-in sound), "off", then every file in the folder.
+            std::vector<std::string> opts = { "", "off" };
+            if (DIR *dir = opendir(kNotifySoundDir)) {
+                std::vector<std::string> files;
+                while (struct dirent *e = readdir(dir)) {
+                    const char *dot = strrchr(e->d_name, '.');
+                    if (e->d_name[0] != '.' && dot && (!strcasecmp(dot, ".wav") || !strcasecmp(dot, ".mp3")))
+                        files.push_back(e->d_name);
+                }
+                closedir(dir);
+                std::sort(files.begin(), files.end());
+                opts.insert(opts.end(), files.begin(), files.end());
+            }
+            int i = (int)(std::find(opts.begin(), opts.end(), m_discord_sound) - opts.begin());
+            const int n = (int)opts.size();
+            i = b == Btn::Left ? (i + n - 1) % n : (i + 1) % n;   // a missing file lands on Default
+            m_discord_sound = opts[i];
+            PlayNotifySound();   // a preview
             SaveSettings();
         }
         if (m_theming_cursor == TH_DiscordRpc && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
@@ -2005,7 +2032,7 @@ namespace sl::menu::ui {
     // screenshots (sdmc:/slaunch/previews, shipped with the menu), because a
     // layout is something you choose by looking at it.
     static const char *kLayoutFiles[] = { "list", "line", "grid", "cover",
-                                          "shelf", "xmb", "flow", "deck", "metro" };
+                                          "shelf", "xmb", "flow", "deck", "metro", "blades", "nxe" };
     static_assert(sizeof(kLayoutFiles) / sizeof(kLayoutFiles[0]) == (size_t)UiMode::Count,
                   "one preview per layout");
 
@@ -2055,13 +2082,15 @@ namespace sl::menu::ui {
         const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
 
         static const char *kLayoutNames[] = { "List", "Line", "Grid", "Cover",
-                                              "Shelf", "XMB", "Flow", "Deck", "Metro" };
+                                              "Shelf", "XMB", "Flow", "Deck", "Metro", "Blades", "NXE" };
         static const char *kLayoutDesc[] = {
             "A simple scrolling list", "A carousel of covers",
             "A wall of tiles", "One big cover at a time",
             "A shelf of covers with details", "The PlayStation cross-media bar",
             "3D game cases on a mirrored floor", "Steam Deck: hero, covers and news",
-            "The Xbox 360 dashboard: tabs of tiles and the Guide" };
+            "The Xbox 360 dashboard: tabs of tiles and the Guide",
+            "The first Xbox 360 dashboard: a curved blade per category",
+            "The New Xbox Experience: channels and a row of cards" };
 
         struct Page { const char *title, *sub; };
         const Page pages[kOobeSteps] = {
@@ -2112,7 +2141,7 @@ namespace sl::menu::ui {
                 break;
             }
             case 1: {   // layout gallery
-                const int n = (int)UiMode::Count, cur = (int)m_ui_mode;
+                const int n = kUiModeChoices, cur = (int)m_ui_mode;
                 // Chase the choice the short way round, so wrapping from Deck
                 // to List slides one step instead of across the whole gallery.
                 float target = (float)cur;
@@ -2296,8 +2325,9 @@ namespace sl::menu::ui {
             // The wall shape is only meaningful where there is a wall.
             if ((i == TH_TileCols || i == TH_TileRows) && m_ui_mode != UiMode::Grid) continue;
 #ifndef SL_QEXT
-            if (i == TH_DiscordAlerts || i == TH_DiscordRpc) continue;   // no Discord outside the qext build
+            if (i == TH_DiscordAlerts || i == TH_DiscordGame || i == TH_DiscordSound || i == TH_DiscordRpc) continue;   // no Discord outside the qext build
 #endif
+            if (i == TH_DiscordGame && !m_discord_alerts) continue;   // a part of notifications
             v.push_back(i);
         }
         return v;
@@ -2322,8 +2352,9 @@ namespace sl::menu::ui {
     }
     void Menu::DrawTheming() {
         DrawTopBar("Theming");
-        const char *modes[9]  = { T("List"), T("Line"), T("Grid"), T("Cover"),
-                                  T("Shelf"), T("XMB"), T("Flow"), T("Deck"), T("Metro") };
+        const char *modes[(int)UiMode::Count] = { T("List"), T("Line"), T("Grid"), T("Cover"),
+                                  T("Shelf"), T("XMB"), T("Flow"), T("Deck"), T("Metro"),
+                                  T("Blades"), T("NXE") };
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
@@ -2336,7 +2367,7 @@ namespace sl::menu::ui {
             T("Music"), T("Widgets"),
             T("Menu entries"),
             T("Screen timeout"), T("Screen timeout (TV)"), T("Ask who's playing"), T("Start as user"),
-            T("Welcome screen"), T("Check for updates"), T("Online count"), T("Nextendo players"), T("Discord notifications"), T("Discord game status"), T("USB file transfer"),
+            T("Welcome screen"), T("Check for updates"), T("Online count"), T("Nextendo players"), T("Discord notifications"), T("Discord in games"), T("Discord sound"), T("Discord game status"), T("USB file transfer"),
             T("About"), T("Back")
         };
         std::vector<std::string> values(labels.size());
@@ -2381,7 +2412,11 @@ namespace sl::menu::ui {
         values[TH_Online]      = m_online_count ? T("On") : T("Off");
         values[TH_Players]     = m_nextendo_players ? T("On") : T("Off");
         values[TH_DiscordAlerts] = m_discord_alerts ? T("On") : T("Off");
+        values[TH_DiscordGame]   = m_discord_game_alerts ? T("On") : T("Off");
         values[TH_DiscordRpc]    = m_discord_rpc ? T("On") : T("Off");
+        values[TH_DiscordSound]  = m_discord_sound.empty() ? T("Default")
+                                 : m_discord_sound == "off" ? T("Off")
+                                 : m_discord_sound.substr(0, m_discord_sound.rfind('.'));
         values[TH_Usb]         = m_usb_mtp ? T("On") : T("Off");
         values[TH_About]       = m_upd_available ? T("Update available") : std::string("v") + SL_VERSION;
         {
@@ -3643,6 +3678,7 @@ namespace sl::menu::ui {
     }
     void Menu::DrawDialog() {
         if (m_ui_mode == UiMode::Metro) { DrawMetroDialog(); return; }
+        if (BladesUi()) { DrawBladesDialog(); return; }
         const Theme &t = m_theme.Current();
         // Dim the whole screen, then draw a centered box.
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0,0,0,150});
@@ -3828,4 +3864,11 @@ namespace sl::menu::ui {
     // why this layout keeps a row index of its own instead of reusing the flat
     // cursor the 1-D layouts share. The selection itself is still m_cursor, so
     // launching, options, favourites and the move mode all work here untouched.
+
+    void Menu::PlayNotifySound() {
+        if (m_discord_sound == "off") return;
+        if (m_discord_sound.empty()) { m_sfx.Play(audio::Sfx::Notify); return; }
+        m_sfx.PlayClip((std::string(kNotifySoundDir) + "/" + m_discord_sound).c_str());
+    }
+
 } // namespace sl::menu::ui

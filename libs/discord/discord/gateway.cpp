@@ -130,6 +130,13 @@ std::vector<Gateway::Event> Gateway::Drain() {
     return out;
 }
 
+std::vector<Gateway::Event> Gateway::DrainPaused() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<Event> out(std::make_move_iterator(pausedIn_.begin()), std::make_move_iterator(pausedIn_.end()));
+    pausedIn_.clear();
+    return out;
+}
+
 std::string Gateway::LastError() const {
     std::lock_guard<std::mutex> lk(mu_);
     return error_;
@@ -323,7 +330,17 @@ Gateway::After Gateway::Session(const std::string& url) {
                         SetError("");
                         LOG("gateway: resumed");
                     }
-                    if (paused_) { missed_ = true; break; }
+                    if (paused_) {
+                        missed_ = true;
+                        // READY too: a game launched before it came has an empty
+                        // store, and every message would be from an unknown chat.
+                        if (t == "MESSAGE_CREATE" || t == "READY") {
+                            std::lock_guard<std::mutex> lk(mu_);
+                            if (pausedIn_.size() >= 8) pausedIn_.pop_front();
+                            pausedIn_.push_back(Event{std::move(t), doc, d});
+                        }
+                        break;
+                    }
                     std::lock_guard<std::mutex> lk(mu_);
                     in_.push_back(Event{std::move(t), doc, d});
                     break;

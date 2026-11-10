@@ -32,8 +32,13 @@ public:
     void Send(std::string payload);  // raw JSON, queued until the session is ready
     std::vector<Event> Drain();
     // While a game runs nobody drains: dispatches are dropped instead of piling up,
-    // and TakeMissed() then says the store needs a fresh session.
-    void SetPaused(bool p) { paused_ = p; }
+    // and TakeMissed() then says the store needs a fresh session. New messages
+    // alone are kept, the last few, for DrainPaused (pop-ups over the game).
+    void SetPaused(bool p) {
+        paused_ = p;
+        if (!p) { std::lock_guard<std::mutex> lk(mu_); pausedIn_.clear(); }
+    }
+    std::vector<Event> DrainPaused();
     bool TakeMissed() { return missed_.exchange(false); }
     // The presence "d" object (status, activities); identify sends it too, so it
     // survives a reconnect.
@@ -60,6 +65,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> done_{true};
     std::atomic<bool> paused_{false}, missed_{false};
+    std::deque<Event> pausedIn_;  // under mu_
     std::string presence_;  // under mu_
     std::atomic<State> state_{State::Idle};
 

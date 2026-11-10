@@ -1063,6 +1063,7 @@ void DiscordService::pauseForGame() {
 bool DiscordService::resumeFromGame() {
     if (!m_paused) return false;
     m_paused = false;
+    m_gameAlerts.clear();
     if (!m_gateway) return false;
     m_gateway->SetPaused(false);
     if (!m_gateway->TakeMissed()) return false;
@@ -1134,15 +1135,21 @@ void DiscordService::sendFile(Snowflake channelId, const std::string& path, cons
 }
 
 void DiscordService::noteAlert(const Store::Change& ch, yyjson_val* d) {
-    const Channel* c = m_store->FindChannel(ch.channelId);
+    Alert a;
+    if (!makeAlert(ch.channelId, d, a)) return;
+    LOG("[discord] alert for HOME");
+    m_alert = std::move(a);
+    m_hasAlert = true;
+}
+
+bool DiscordService::makeAlert(Snowflake channelId, yyjson_val* d, Alert& a) const {
+    const Channel* c = m_store->FindChannel(channelId);
     if (myStatus() == "dnd" || !c || m_store->ChannelMuted(*c)) {
         LOG("[discord] alert skipped (%s)", !c ? "unknown chat" : myStatus() == "dnd" ? "do not disturb" : "muted");
-        return;
+        return false;
     }
-    LOG("[discord] alert for HOME");
     const Message m = Parse::MessageObj(d);
-    Alert a;
-    a.channelId = ch.channelId;
+    a.channelId = channelId;
     a.guildId = c->IsDM() ? 0 : c->guildId;
     a.title = m_store->AuthorName(m);
     a.chat = c->IsDM() ? m_store->ChannelName(*c) : c->name;
@@ -1152,8 +1159,31 @@ void DiscordService::noteAlert(const Store::Change& ch, yyjson_val* d) {
     a.avatarUrl = m.author.AvatarUrl(64);
     a.text = Str::Trim(stripMarkdown(plainText(m.content)));
     if (a.text.empty()) a.text = !m.stickers.empty() ? "Sent a sticker" : !m.attachments.empty() ? "Sent a picture" : "Sent a message";
-    m_alert = std::move(a);
-    m_hasAlert = true;
+    return true;
+}
+
+bool DiscordService::takeGameAlert(Alert& out) {
+    if (!m_paused || !m_gateway || !m_store) return false;
+    for (Gateway::Event& e : m_gateway->DrainPaused()) {
+        // Connected after the game started. The menu thread is parked until the
+        // game ends (and reconnects then), so the store is ours to fill.
+        if (e.type == "READY") { m_store->Apply(e.type, e.d); continue; }
+        // What Store::Apply would decide, without changing the store.
+        Message m = Parse::MessageObj(e.d);
+        const Channel* c = m_store->FindChannel(m.channelId);
+        if (!m.guildId && c) m.guildId = c->guildId;
+        if (m.author.id == m_store->me.id) continue;
+        if (!m_store->MentionsMe(m) && !(c && c->IsDM())) continue;
+        Alert a;
+        if (!makeAlert(m.channelId, e.d, a)) continue;
+        LOG("[discord] alert over the game");
+        if (m_gameAlerts.size() >= 3) m_gameAlerts.pop_front();
+        m_gameAlerts.push_back(std::move(a));
+    }
+    if (m_gameAlerts.empty()) return false;
+    out = std::move(m_gameAlerts.front());
+    m_gameAlerts.pop_front();
+    return true;
 }
 
 bool DiscordService::takeAlert(Alert& out) {

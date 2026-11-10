@@ -430,8 +430,9 @@ namespace sl::menu::ui {
     // returns a height, it does not accept a limit.
     void Menu::DrawWidgetTile(const TileRect &r, const MenuItem &it, Uint8 a) {
         const int wi = WidgetIndexByName(it.name);
-        if (wi < 0) return;
-        widgets::IWidget *w = m_widgets.At(wi);
+        if (wi >= 0) DrawWidgetIn(m_widgets.At(wi), r, a);
+    }
+    void Menu::DrawWidgetIn(widgets::IWidget *w, const TileRect &r, Uint8 a) {
         SDL_Renderer *ren = m_gfx->Renderer();
         if (!w || !ren) return;
 

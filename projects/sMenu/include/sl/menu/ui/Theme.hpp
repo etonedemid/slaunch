@@ -121,7 +121,10 @@ namespace sl::menu::ui {
         int          CustomCount() const { return (int)m_custom.size(); }
         int          CurrentIndex() const { return m_current; }
         int          AppliedIndex() const { return m_applied; }   // saved, not just previewed
-        const Theme &Current() const { return At(m_current); }
+        // What the screens draw in: the chosen theme, unless a layout that brings
+        // its own colours (Blades) has put them in its place for this frame.
+        const Theme &Current() const { return m_override ? *m_override : At(m_current); }
+        void         Override(const Theme *t) { m_override = t; }   // not saved; null = the theme itself
         const Theme &At(int i) const;
         bool         IsCustom(int i) const { return i >= BuiltinThemeCount && i < Count(); }
 
@@ -143,6 +146,7 @@ namespace sl::menu::ui {
         // Save() is const (it only writes to disk) but still needs to record
         // that m_current is now the applied theme, hence mutable.
         mutable int m_applied = 2; // last theme actually confirmed (Save()'d) - what AddCustom() should copy
+        const Theme *m_override = nullptr;
 
         void InitBuiltins();
     };

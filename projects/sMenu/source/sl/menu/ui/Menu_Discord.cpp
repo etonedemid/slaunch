@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include "Menu_Internal.hpp"
+#include <sl/menu/qext/GameToast.hpp>
 #include "social/DiscordService.hpp"
 #include "net/async.h"
 #include "net/http.h"
@@ -306,7 +307,9 @@ namespace sl::menu::ui {
         // The notification banner.
         std::string ban_title, ban_text, ban_avatar;
         Snowflake ban_chat = 0;
+        std::string ban_name;           // the chat, as the panel titles it
         u64 ban_until = 0;
+        int ban_x = 0, ban_y = 0, ban_w = 0, ban_h = 0;   // where it was last drawn
         int chat_up = 0;                // rows scrolled up from the newest
         float chat_pos = 0, list_pos = 0, rail_pos = 0;   // the same, eased
         bool reopen = false;            // a fresh session: open the chat again
@@ -410,8 +413,9 @@ namespace sl::menu::ui {
             m_dc->ban_text = a.text;
             m_dc->ban_avatar = a.avatarUrl;
             m_dc->ban_chat = a.channelId;
+            m_dc->ban_name = a.chat;
             m_dc->ban_until = armGetSystemTick() + armGetSystemTickFreq() * 5;
-            m_sfx.Play(audio::Sfx::Notify);   // the toast's sound (drop notify.wav/.mp3 in slaunch/sounds)
+            PlayNotifySound();
         }
         // A sound clip the trusted sender posted, or one the user tapped to play.
         std::string clip;
@@ -448,7 +452,7 @@ namespace sl::menu::ui {
             return av != nullptr;
         };
 
-        if (m_ui_mode == UiMode::Metro) {
+        if (m_ui_mode == UiMode::Metro || XboxOld()) {
             // The achievement: a disc pops up, the dark pill unrolls from it,
             // then the words; all of it backwards on the way out.
             const float in = std::min(e, left);                         // symmetric out
@@ -457,12 +461,13 @@ namespace sl::menu::ui {
             const float h = 84.0f, full = 600.0f;
             const float pw = h + (full - h) * grow;
             const float px = (W - pw) / 2.0f, py = H - 150.0f;
+            d.ban_x = (int)px; d.ban_y = (int)py; d.ban_w = (int)pw; d.ban_h = (int)h;
             if (grow > 0.0f)
                 card(nullptr, px, py, pw, h, h / 2, 16.0f, SDL_Color{ 38, 38, 40, 240 }, 255);
             const float ds = h * (0.6f + 0.4f * pop), dx = px + (h - ds) / 2, dy = py + (h - ds) / 2;
             if (pop > 0.0f) {
                 card(nullptr, dx, dy, ds, ds, ds / 2, grow > 0.0f ? 0.0f : 12.0f,
-                     WithAlpha(m_mt_accent, 255), (Uint8)(255 * pop));
+                     WithAlpha(XboxOld() ? SDL_Color{ 104, 176, 38, 255 } : m_mt_accent, 255), (Uint8)(255 * pop));
                 const float in_s = ds - 12.0f;
                 if (!avatar(dx + 6, dy + 6, in_s, (Uint8)(255 * pop)))
                     if (SDL_Texture *ic = SystemIcon(ItemKind::Discord))
@@ -483,6 +488,7 @@ namespace sl::menu::ui {
             // The PS3's: a small smoked box at the top right that slides in.
             const int bw = 420, bh = 70;
             const float x = W - bw - 30 + (1.0f - ease(e / 0.3f)) * (bw + 40), y = 40;
+            d.ban_x = (int)x; d.ban_y = (int)y; d.ban_w = bw; d.ban_h = bh;
             card(nullptr, x, y, bw, bh, 6.0f, 10.0f, SDL_Color{ 20, 20, 24, 215 }, a);
             m_gfx->FillRect((int)x + 6, (int)y, bw - 12, 1, SDL_Color{ 255, 255, 255, (Uint8)(60 * a / 255) });
             int tx = (int)x + 16;
@@ -496,6 +502,7 @@ namespace sl::menu::ui {
         // Every other layout: a card in the theme's colours, dropping in from the top.
         const int bw = 480, bh = 82;
         const float x = W - bw - 24, y = 20 - (1.0f - ease(e / 0.3f)) * (bh + 40);
+        d.ban_x = (int)x; d.ban_y = (int)y; d.ban_w = bw; d.ban_h = bh;
         const SDL_Color fill{ (Uint8)((t.bg_top.r + t.bg_bottom.r) / 2), (Uint8)((t.bg_top.g + t.bg_bottom.g) / 2),
                              (Uint8)((t.bg_top.b + t.bg_bottom.b) / 2), 245 };
         card(nullptr, x, y, bw, bh, 14.0f, 18.0f, fill, a);
@@ -505,6 +512,26 @@ namespace sl::menu::ui {
         const int tw = (int)x + bw - tx - 18;
         DiscordText(FontSize::Small, tx, (int)y + 12, WithAlpha(t.title, a), d.ban_title, tw);
         DiscordText(FontSize::Small, tx, (int)y + 44, WithAlpha(t.dim, a), d.ban_text, tw);
+    }
+
+    bool Menu::DiscordBannerTouch(int x, int y) {
+        if (!m_dc || !m_dc->ban_until || !m_dc->ban_chat) return false;
+        DiscordUi &d = *m_dc;
+        if (x < d.ban_x || x >= d.ban_x + d.ban_w || y < d.ban_y || y >= d.ban_y + d.ban_h) return false;
+        const Snowflake chat = d.ban_chat;
+        d.ban_until = 0;
+        m_options_open = false;
+        OpenDiscord();
+        d.view = false;
+        d.rail = false;
+        d.chat = chat;
+        d.chat_name = d.ban_name;
+        d.chat_up = 0;
+        d.chat_pos = 0;
+        d.chat_built = ~0ull;
+        d.in_chat = true;
+        d.svc.openChannel(chat);
+        return true;
     }
 
     void Menu::DiscordAttach(const std::string &path) {
@@ -549,15 +576,57 @@ namespace sl::menu::ui {
         const u64 g = game ? game : m_suspended;
         // Still connecting is fine: the presence goes out with the identify.
         const auto st = m_dc->svc.state();
-        if (m_discord_rpc && g && (st == DiscordService::State::Ready || st == DiscordService::State::Connecting)) {
-            DiscordSetGame(g);
-            m_dc->svc.pauseForGame();   // the gateway alone, so "Playing" stays
+        const bool live = st == DiscordService::State::Ready || st == DiscordService::State::Connecting;
+        // The gateway alone keeps going, for "Playing" and for pop-ups over the game.
+        const bool toasts = m_discord_alerts && m_discord_game_alerts;
+        if (g && live && (m_discord_rpc || toasts)) {
+            if (m_discord_rpc) DiscordSetGame(g);
+            m_dc->svc.pauseForGame();
+#ifdef SL_QEXT
+            if (toasts) GameToastStart();
+#endif
             return;
         }
         m_dc->svc.beginShutdown();
     }
 
+#ifdef SL_QEXT
+    // Pop-ups over the game, in the style of the layout's banner (DrawDiscordBanner).
+    // The callbacks run on the pop-up thread while the menu is stopped, and
+    // toast::Stop() joins it before the menu runs again.
+    void Menu::GameToastStart() {
+        qext::toast::Look look;
+        if (m_ui_mode == UiMode::Metro || XboxOld()) {
+            look.style = qext::toast::Look::Achievement;
+            look.disc = XboxOld() ? SDL_Color{ 104, 176, 38, 255 } : WithAlpha(m_mt_accent, 255);
+        } else if (m_ui_mode == UiMode::XMB) {
+            look.style = qext::toast::Look::Xmb;
+        } else {
+            const Theme &t = m_theme.Current();
+            look.fill = SDL_Color{ (Uint8)((t.bg_top.r + t.bg_bottom.r) / 2), (Uint8)((t.bg_top.g + t.bg_bottom.g) / 2),
+                                   (Uint8)((t.bg_top.b + t.bg_bottom.b) / 2), 245 };
+            look.accent = t.accent;
+            look.title = t.title;
+            look.dim = t.dim;
+        }
+        DiscordUi *dc = m_dc;
+        qext::toast::Start(look,
+            [dc](qext::toast::Item &it) {
+                DiscordService::Alert a;
+                if (!dc->svc.takeGameAlert(a)) return false;
+                it.title = a.title;
+                it.text = a.text;
+                it.avatarUrl = a.avatarUrl;
+                return true;
+            },
+            [this] { PlayNotifySound(); });
+    }
+#endif
+
     void Menu::DiscordResume() {
+#ifdef SL_QEXT
+        qext::toast::Stop();   // before the service it reads from changes
+#endif
         if (!m_dc) return;
         if (m_dc->svc.resumeFromGame()) {   // missed messages: a fresh session
             m_dc->reopen = m_dc->in_chat;
@@ -568,6 +637,9 @@ namespace sl::menu::ui {
     }
 
     void Menu::DiscordExit() {
+#ifdef SL_QEXT
+        qext::toast::Stop();
+#endif
         if (!m_dc) return;
         *m_dc->alive = false;
         m_dc->svc.shutdown();     // also runs before the sockets go (see UnloadForApplet)

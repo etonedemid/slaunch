@@ -191,7 +191,8 @@ namespace sl::menu::ui {
         // ~1.4 MB of WAV off the SD. Metro has a set of its own if the card
         // holds one (sdmc:/slaunch/sounds/metro), read at start like the rest.
         m->m_sfx.Init(m->m_deferred_audio,
-                      m->m_ui_mode == UiMode::Metro ? kMetroSoundDir : nullptr);
+                      m->XboxOld() ? m->XboxSoundPack().c_str()
+                      : m->m_ui_mode == UiMode::Metro ? kMetroSoundDir : nullptr);
         m->m_deferred_flag.store(true, std::memory_order_release);
     }
     void Menu::InitDeferred() {
@@ -441,7 +442,7 @@ namespace sl::menu::ui {
         // after the user's own folders so their indices never move.
         m_colls.erase(std::remove_if(m_colls.begin(), m_colls.end(),
                       [](const Collection &c) { return c.playlist; }), m_colls.end());
-        if (m_retroarch && m_ui_mode != UiMode::XMB) {
+        if (m_retroarch && !XmbModel()) {
             StartHbScan();
             for (const auto &sc : m_shortcuts) {     // sorted by category already
                 if (sc.category.empty()) continue;   // stays loose on the top level
@@ -480,7 +481,7 @@ namespace sl::menu::ui {
         // thread-creation failure path calls RebuildItems back, but it sets
         // m_hb_scanned first, so the re-entry returns here immediately and the
         // recursion is one level deep at most.
-        if (m_ui_mode == UiMode::XMB) {
+        if (XmbModel()) {
             StartHbScan();
             for (const auto &h : m_hb) {
                 if (IsHbPinned(h.path)) continue;   // already added above
@@ -985,7 +986,7 @@ namespace sl::menu::ui {
                 m_align = (TextAlign)v;
             else if (sscanf(line, "ui_mode=%d", &v) == 1 &&
                      v >= 0 && v < (int)UiMode::Count)
-                m_ui_mode = (UiMode)v;
+                m_ui_mode = v < kUiModeChoices ? (UiMode)v : UiMode::Blades;   // NXE is shelved
             else if (sscanf(line, "antialias=%d", &v) == 1)
                 m_antialias = (v != 0);
             else if (sscanf(line, "tile_cols=%d", &v) == 1)
@@ -1025,6 +1026,19 @@ namespace sl::menu::ui {
                 m_nextendo_players = (v != 0);
             else if (sscanf(line, "discord_alerts=%d", &v) == 1)
                 m_discord_alerts = (v != 0);
+            else if (sscanf(line, "discord_game_alerts=%d", &v) == 1)
+                m_discord_game_alerts = (v != 0);
+            else if (strncmp(line, "skin_blades=", 12) == 0 || strncmp(line, "skin_nxe=", 9) == 0) {
+                std::string &dst = line[5] == 'b' ? m_skin_blades : m_skin_nxe;
+                dst = strchr(line, '=') + 1;
+                while (!dst.empty() && (dst.back() == '\n' || dst.back() == '\r')) dst.pop_back();
+                if (dst.find('/') != std::string::npos || dst == "..") dst.clear();   // a folder name, nothing more
+            }
+            else if (strncmp(line, "discord_sound=", 14) == 0) {
+                m_discord_sound = line + 14;
+                while (!m_discord_sound.empty() && (m_discord_sound.back() == '\n' || m_discord_sound.back() == '\r'))
+                    m_discord_sound.pop_back();
+            }
             else if (sscanf(line, "discord_rpc=%d", &v) == 1)
                 m_discord_rpc = (v != 0);
             else if (sscanf(line, "usb_mtp=%d", &v) == 1)
@@ -1081,7 +1095,11 @@ namespace sl::menu::ui {
         fprintf(fp, "online_count=%d\n", m_online_count ? 1 : 0);
         fprintf(fp, "nextendo_text=%d\n", m_nextendo_players ? 1 : 0);
         fprintf(fp, "discord_alerts=%d\n", m_discord_alerts ? 1 : 0);
+        fprintf(fp, "discord_game_alerts=%d\n", m_discord_game_alerts ? 1 : 0);
         fprintf(fp, "discord_rpc=%d\n", m_discord_rpc ? 1 : 0);
+        fprintf(fp, "discord_sound=%s\n", m_discord_sound.c_str());
+        fprintf(fp, "skin_blades=%s\n", m_skin_blades.c_str());
+        fprintf(fp, "skin_nxe=%s\n", m_skin_nxe.c_str());
         fprintf(fp, "usb_mtp=%d\n", m_usb_mtp ? 1 : 0);
         fprintf(fp, "tdb_region=%d\n", m_tdb_region);
         fprintf(fp, "sgdb=%d\n", m_sgdb_enabled ? 1 : 0);
@@ -1547,7 +1565,11 @@ namespace sl::menu::ui {
                 m_music.SetEnabled(!m_music.Enabled());
                 return Action::None;
             }
-        } else if (m_ui_mode == UiMode::XMB) {
+        } else if (XmbModel()) {
+            // NXE is the same bar on its side: channels run down, cards across.
+            if (m_ui_mode == UiMode::NXE)
+                b = b == Btn::Up ? Btn::Left : b == Btn::Down ? Btn::Right
+                  : b == Btn::Left ? Btn::Up : b == Btn::Right ? Btn::Down : b;
             // Y searches, B clears an active search. A thousand-entry column is
             // not something you scroll to the end of, and the letter jump only
             // helps if you know the first letter.
@@ -2409,7 +2431,21 @@ namespace sl::menu::ui {
         // Metro in its own colours has its own backdrop on every screen.
         if (m_ui_mode == UiMode::Metro) {
             MetroPalette();
-            if (!m_metro_themed) { MetroDrawBackdrop(); return; }
+            if (!m_metro_themed) {
+                MetroDrawBackdrop();
+                // Off the dashboard itself the lit floor dims to charcoal, as its
+                // settings pages were, so whatever a screen sets on it reads.
+                if (MetroUi() && m_screen != Screen::Main && m_screen != Screen::MetroGames)
+                    m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{ 18, 19, 22, 150 });
+                return;
+            }
+        }
+        // Blades stands every screen in its frame. The main screen draws its
+        // own once the bar has moved for the frame - unless there is nothing
+        // to show, when the empty-library notice still needs something behind it.
+        if (BladesUi()) {
+            if (m_screen != Screen::Main || m_items.empty() || m_xmb_cols.empty()) DrawBladesFrame();
+            return;
         }
         m_gfx->GradientV(t.bg_top, t.bg_bottom);
 
@@ -2513,6 +2549,10 @@ namespace sl::menu::ui {
             DrawMetroHeader((center_title && *center_title) ? T(center_title) : "");
             return;
         }
+        if (BladesUi()) {
+            DrawBladesHeader((center_title && *center_title) ? T(center_title) : "");
+            return;
+        }
 
         time_t now = time(nullptr);
         struct tm tm_now;
@@ -2561,7 +2601,7 @@ namespace sl::menu::ui {
     // to know its total width without laying it out once first.
     void Menu::DrawHint(std::initializer_list<HintSeg> segs) {
         if (!m_show_hints) return;
-        if (m_ui_mode == UiMode::Metro) { MetroHintSegs(segs); return; }
+        if (m_ui_mode == UiMode::Metro || XboxOld()) { MetroHintSegs(segs); return; }
         const Theme &t = m_theme.Current();
         constexpr int kIcon = 22, kIconGap = 2, kLabelGap = 7, kSegGap = 26;
         const FontSize fs = FontSize::Small;
@@ -2604,11 +2644,34 @@ namespace sl::menu::ui {
     // function by hand, and OnTouch's hit-test reads the exact same
     // kBackTap* box, so the two can never drift apart. See the constants'
     // own comment for why this ignores m_show_hints.
+    void Menu::LayoutThemeSync() {
+        m_theme.Override(nullptr);
+        const bool blades = BladesUi(), metro = MetroUi();
+        if (!blades && !metro) return;
+        m_layout_theme = m_theme.Current();   // its wallpaper, icon plates and the rest stay
+        if (blades) BladesTheme(m_layout_theme);
+        else        MetroTheme(m_layout_theme);
+        m_theme.Override(&m_layout_theme);
+    }
+    void Menu::BackTapBox(int &x, int &y) const {
+        x = kBackTapX; y = kBackTapY;
+        // Metro: the far end of its hint row (y 652), clear of the hints themselves.
+        if (m_ui_mode == UiMode::Metro) { x = gfx::Gfx::Width - 224; y = 652 + 13 - kBackTapH / 2; }
+        // Blades keeps it at the far end of its legend band: the bottom-left
+        // corner there belongs to the stack of blades.
+        if (BladesUi()) {
+            int left, right;
+            BladesSpan(left, right);
+            x = right - 104; y = BladesHintY() + 13 - kBackTapH / 2;
+        }
+    }
     void Menu::DrawBackTap() {
         const Theme &t = m_theme.Current();
         const int icon = 22;
-        const int cy = kBackTapY + kBackTapH / 2;
-        const int ix = kBackTapX + 4;
+        int bx, by;
+        BackTapBox(bx, by);
+        const int cy = by + kBackTapH / 2;
+        const int ix = bx + 4;
         if (SDL_Texture *tex = HintIcon("b"))
             m_gfx->DrawImageTinted(tex, ix, cy - icon / 2, icon, icon, t.dim, 200);
         m_gfx->Text(FontSize::Small, ix + icon + 6, cy - m_gfx->LineHeight(FontSize::Small) / 2,
@@ -2694,6 +2757,10 @@ namespace sl::menu::ui {
             DrawCarouselMetro(labels, values, cursor, scroll_pos);
             return;
         }
+        if (BladesUi()) {
+            DrawCarouselBlades(labels, values, cursor, scroll_pos);
+            return;
+        }
 
         scroll_pos += (cursor - scroll_pos) * 0.30f;
         if (std::abs(cursor - scroll_pos) < 0.01f) scroll_pos = (float)cursor;
@@ -2754,6 +2821,8 @@ namespace sl::menu::ui {
                 a.max = TileMaxScroll();
                 break;
             case UiMode::XMB:
+            case UiMode::Blades:
+            case UiMode::NXE:
                 if (m_xmb_col >= 0 && m_xmb_col < (int)m_xmb_cols.size()) {
                     a.pos = &m_xmb_item_scroll;
                     a.max = (int)m_xmb_cols[m_xmb_col].items.size() - 1;
@@ -2796,6 +2865,8 @@ namespace sl::menu::ui {
                 break;
             }
             case UiMode::XMB:
+            case UiMode::Blades:
+            case UiMode::NXE:
                 m_xmb_item = (int)lroundf(m_xmb_item_scroll);
                 XmbApplyCursor();
                 break;
@@ -3066,6 +3137,7 @@ namespace sl::menu::ui {
         if (DrawBoom()) { m_gfx->Present(); return; }
 
         Phase("pre-frame");
+        LayoutThemeSync();   // Blades' or Metro's own colours, or back to the theme's
         DrawBackground();
         Phase("background");
         switch (m_screen) {
@@ -3318,6 +3390,8 @@ namespace sl::menu::ui {
             case UiMode::Flow:    DrawMainFlow();    break;
             case UiMode::Deck:    DrawMainDeck();    break;
             case UiMode::Metro:   DrawMainMetro();   break;
+            case UiMode::Blades:  DrawMainBlades();  break;
+            case UiMode::NXE:     DrawMainNxe();     break;
             default:              DrawMainList();    break;
         }
 
@@ -3325,8 +3399,7 @@ namespace sl::menu::ui {
         // Nothing to draw until the deferred worker has finished building them.
         // Deck is the exception: it gives the widgets a row of cards of their
         // own, and the floating copies would land on top of it.
-        if (m_deferred_joined && m_widgets.AnyEnabled() && m_ui_mode != UiMode::Deck &&
-            m_ui_mode != UiMode::Metro) {
+        if (WidgetsFloat()) {
             const Theme &t = m_theme.Current();
             m_widgets.Render(m_gfx, t, m_ui_mode == UiMode::Grid);
 
@@ -3483,6 +3556,7 @@ namespace sl::menu::ui {
         const int n = (int)m_options.size();
         if (n == 0) return;
         if (m_ui_mode == UiMode::Metro) { DrawMetroOptions(); return; }
+        if (BladesUi()) { DrawBladesOptions(); return; }
 
         // Dim the menu behind the panel.
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0, 0, 0, 150});

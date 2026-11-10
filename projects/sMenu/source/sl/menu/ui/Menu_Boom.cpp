@@ -235,7 +235,7 @@ namespace sl::menu::ui {
             // the horizontal ones just blow up what is on screen.
             m_boom_dir = Btn::Down;
             m_boom_scroll_done = !(m_ui_mode == UiMode::List || m_ui_mode == UiMode::Grid ||
-                                   m_ui_mode == UiMode::XMB);
+                                   m_ui_mode == UiMode::XMB || m_ui_mode == UiMode::Blades);
             return;
         }
         if (m_boom_state != Flying) return;

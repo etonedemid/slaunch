@@ -618,7 +618,7 @@ namespace sl::menu::gfx {
         return f;
     }
 
-    void Gfx::TextDown(TTF_Font *f, int x, int y, SDL_Color c, const char *text) {
+    void Gfx::TextDown(TTF_Font *f, int x, int y, SDL_Color c, const char *text, bool up) {
         FxClose();
         if (!f || !text || !text[0] || c.a == 0) return;
         std::string key((const char *)&f, sizeof(f));
@@ -647,7 +647,7 @@ namespace sl::menu::gfx {
         const SDL_FRect dst{ cx - tw * 0.5f, cy - th * 0.5f, tw, th };
         SDL_SetTextureColorMod(tex, c.r, c.g, c.b);
         SDL_SetTextureAlphaMod(tex, c.a);
-        SDL_RenderTextureRotated(m_renderer, tex, nullptr, &dst, 90.0, nullptr, SDL_FLIP_NONE);
+        SDL_RenderTextureRotated(m_renderer, tex, nullptr, &dst, up ? -90.0 : 90.0, nullptr, SDL_FLIP_NONE);   // up: reads bottom to top
     }
 
     void Gfx::DrawImageCrop(SDL_Texture *tex, int x, int y, int w, int h, Uint8 alpha) {
@@ -2553,6 +2553,63 @@ void main() {
         SDL_RenderTexture(m_renderer, tex, nullptr, &dst);
         SDL_SetTextureColorMod(tex, 255, 255, 255);
         SDL_SetTextureAlphaMod(tex, 255); // don't leak either mod to other blits
+    }
+
+    void Gfx::DrawRegion(SDL_Texture *tex, const SDL_FRect &src, const SDL_FRect &dst,
+                         SDL_Color c, Uint8 alpha) {
+        FxClose();
+        if (!tex || dst.w <= 0 || dst.h <= 0 || src.w <= 0 || src.h <= 0) return;
+        Record(dst.x, dst.y, dst.w, dst.h, (u64)(uintptr_t)tex, true);
+        SDL_SetTextureColorMod(tex, c.r, c.g, c.b);
+        SDL_SetTextureAlphaMod(tex, (Uint8)((int)c.a * alpha / 255));
+        SDL_RenderTexture(m_renderer, tex, &src, &dst);
+        SDL_SetTextureColorMod(tex, 255, 255, 255);
+        SDL_SetTextureAlphaMod(tex, 255);
+    }
+
+    void Gfx::DrawBand(SDL_Texture *tex, const BandPt *pts, int n, SDL_Color c, Uint8 alpha) {
+        FxClose();   // an open GPU pass must end before SDL draws again
+        if (!pts || n < 2 || alpha == 0 || c.a == 0) return;
+        // Flat colour goes through the white pixel: untextured geometry does
+        // not appear on the console's backend (see DrawQuad3D).
+        if (!tex) tex = WhiteTexture();
+        if (!tex) return;
+        float x0 = pts[0].xl, x1 = pts[0].xr, y0 = pts[0].y, y1 = pts[0].y;
+        const SDL_FColor col{ c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, (c.a / 255.0f) * (alpha / 255.0f) };
+        m_geom.clear();
+        m_geomIdx.clear();
+        m_geom.reserve((size_t)n * 2);
+        m_geomIdx.reserve((size_t)(n - 1) * 6);
+        for (int i = 0; i < n; i++) {
+            const BandPt &p = pts[i];
+            m_geom.push_back(SDL_Vertex{ SDL_FPoint{ p.xl, p.y }, col, SDL_FPoint{ p.ul, p.v } });
+            m_geom.push_back(SDL_Vertex{ SDL_FPoint{ p.xr, p.y }, col, SDL_FPoint{ p.ur, p.v } });
+            x0 = std::min(x0, p.xl); x1 = std::max(x1, p.xr);
+            y0 = std::min(y0, p.y);  y1 = std::max(y1, p.y);
+            if (i + 1 < n) {
+                const int a = 2 * i;   // this sample's pair, then the next one's
+                for (int k : { a, a + 1, a + 3, a, a + 3, a + 2 }) m_geomIdx.push_back(k);
+            }
+        }
+        Record(x0, y0, x1 - x0, y1 - y0, (u64)(uintptr_t)tex, true);
+        SDL_RenderGeometry(m_renderer, tex, m_geom.data(), (int)m_geom.size(),
+                           m_geomIdx.data(), (int)m_geomIdx.size());
+    }
+
+    void Gfx::Draw9(SDL_Texture *tex, int x, int y, int w, int h, int border, SDL_Color c, Uint8 alpha) {
+        if (!tex || w <= 0 || h <= 0) return;
+        float tw = 0, th = 0;
+        SDL_GetTextureSize(tex, &tw, &th);
+        // The corners never overlap, in the texture or on screen.
+        const float b  = std::min({ (float)std::max(0, border), tw / 2.0f, th / 2.0f });
+        const float db = std::min({ b, w / 2.0f, h / 2.0f });
+        const float sx[4] = { 0, b, tw - b, tw }, sy[4] = { 0, b, th - b, th };
+        const float dx[4] = { (float)x, x + db, x + w - db, (float)(x + w) };
+        const float dy[4] = { (float)y, y + db, y + h - db, (float)(y + h) };
+        for (int r = 0; r < 3; r++)
+            for (int q = 0; q < 3; q++)
+                DrawRegion(tex, SDL_FRect{ sx[q], sy[r], sx[q + 1] - sx[q], sy[r + 1] - sy[r] },
+                           SDL_FRect{ dx[q], dy[r], dx[q + 1] - dx[q], dy[r + 1] - dy[r] }, c, alpha);
     }
 
     void Gfx::DrawCover(SDL_Texture *tex, Uint8 alpha) {

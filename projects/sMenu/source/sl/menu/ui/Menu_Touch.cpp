@@ -58,14 +58,24 @@ namespace sl::menu::ui {
         out_app_id = 0;
         if (m_sd_removed) return Action::None;   // frozen: awaiting reboot
         if (m_boom_state != 0) { if (phase == 0) BoomReassemble(); return Action::None; }
+#ifdef SL_QEXT
+        // The notification banner sits over every screen: a tap opens its chat.
+        if (phase == 0 && m_dialog == Dialog::None && m_screen != Screen::Keyboard && DiscordBannerTouch(x, y))
+            m_ban_swallow = true;
+        if (m_ban_swallow) {
+            if (phase == 2) m_ban_swallow = false;
+            return Action::None;
+        }
+#endif
 
         // ---- universal "go back" corner, ahead of every screen-specific
         // branch below so it works the same on all of them, including the
         // ones (CoverPicker, Network) whose own touch handling - or lack of
         // one - has no other way out. Mirrors DrawBackTap's box exactly. ----
         if (m_screen != Screen::Main && !m_options_open && m_dialog == Dialog::None) {
-            if (phase == 0 && x >= kBackTapX && x < kBackTapX + kBackTapW &&
-                y >= kBackTapY && y < kBackTapY + kBackTapH) {
+            int bx, by;
+            BackTapBox(bx, by);
+            if (phase == 0 && x >= bx && x < bx + kBackTapW && y >= by && y < by + kBackTapH) {
                 return DispatchButton(Btn::B, out_app_id);
             }
         }
@@ -204,6 +214,9 @@ namespace sl::menu::ui {
                 // position maps to the visible list, not to the raw row ids.
                 const float off = (float)(y - kListCenterY) / (float)kListSpacing;
                 int target = (int)lroundf(scroll + off);
+                // Blades and Metro show a page of rows, not a carousel round the middle.
+                if (BladesUi()) target = BladesListRowAt(y, scroll, rows);
+                else if (m_ui_mode == UiMode::Metro) target = MetroListRowAt(y, scroll, rows);
                 if (m_screen == Screen::ThemeEditor) {
                     const Theme *c = m_theme.IsCustom(m_editing_theme)
                                    ? &m_theme.CustomAt(m_editing_theme) : nullptr;
@@ -327,6 +340,16 @@ namespace sl::menu::ui {
                             XmbApplyCursor();
                         }
                         break;
+                    case UiMode::Blades:    // the open blade's list
+                    case UiMode::NXE:       // the open channel's row of cards
+                        if (m_xmb_col >= 0 && m_xmb_col < (int)m_xmb_cols.size()) {
+                            const int lastc = (int)m_xmb_cols[m_xmb_col].items.size() - 1;
+                            m_xmb_item_scroll = clamped(dragged(m_ui_mode == UiMode::NXE ? dx : dy,
+                                                                XboxItemPitch()), lastc);
+                            m_xmb_item = (int)lroundf(m_xmb_item_scroll);
+                            XmbApplyCursor();
+                        }
+                        break;
                     case UiMode::Grid:      // scrolls by whole rows
                         m_grid_scroll = clamped(dragged(dy, TilePitch()),
                                                 TileMaxScroll());
@@ -375,8 +398,9 @@ namespace sl::menu::ui {
 
             if (!was_widget_drag && !was_scroll) {
                 // XMB: a tap on the bar opens that category outright.
-                if (m_ui_mode == UiMode::XMB) {
-                    const int c = XmbColAt(x, y);
+                if (XmbModel()) {
+                    const int c = m_ui_mode == UiMode::Blades ? BladesColAt(x, y)
+                                : m_ui_mode == UiMode::NXE    ? NxeColAt(x, y) : XmbColAt(x, y);
                     if (c >= 0) {
                         if (c != m_xmb_col) {
                             m_xmb_col = c; m_xmb_item = 0; m_xmb_item_scroll = 0.0f;
@@ -400,7 +424,7 @@ namespace sl::menu::ui {
                 if (idx >= 0 && idx < (int)m_items.size()) {
                     if (idx == m_cursor) return DispatchButton(Btn::A, out_app_id);
                     m_cursor = idx;
-                    if (m_ui_mode == UiMode::XMB) XmbSyncFromCursor();
+                    if (XmbModel()) XmbSyncFromCursor();
                 }
             }
 
@@ -424,13 +448,12 @@ namespace sl::menu::ui {
         // so touching the shelf yanked it to wherever List or Shelf had last
         // been left, almost always the first cover.
         m_touch_scroll_start = (m_ui_mode == UiMode::Grid) ? m_grid_scroll
-                             : (m_ui_mode == UiMode::XMB)  ? m_xmb_item_scroll
+                             : XmbModel()                  ? m_xmb_item_scroll
                              : (m_ui_mode == UiMode::Flow) ? m_flow_scroll
                                                            : m_scroll_pos;
 
         // Check for widget hit first.
-        m_touch_widget = (m_deferred_joined && m_widgets.AnyEnabled())
-                       ? m_widgets.HitTest(x, y) : -1;
+        m_touch_widget = WidgetsFloat() ? m_widgets.HitTest(x, y) : -1;   // only where they are drawn
         if (m_touch_widget >= 0) {
             m_drag_active = true; m_drag_widget = m_touch_widget;
             return Action::None;
@@ -518,6 +541,8 @@ namespace sl::menu::ui {
         const int last = (int)m_items.size() - 1;
         if (m_ui_mode == UiMode::Grid) return GridItemAt(x, y);
         if (m_ui_mode == UiMode::XMB)  return XmbItemAt(x, y);
+        if (m_ui_mode == UiMode::Blades) return BladesItemAt(x, y);
+        if (m_ui_mode == UiMode::NXE)  return NxeItemAt(x, y);
         if (m_ui_mode == UiMode::Flow) return FlowItemAt(x, y);
         if (m_ui_mode == UiMode::Deck) return DeckItemAt(x, y);
         if (m_ui_mode == UiMode::Metro) return -1;   // buttons only, for now

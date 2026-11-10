@@ -24,6 +24,9 @@ namespace sl::menu::ui {
     // Metro's own sound set, if the card has one: same file names as the
     // default set in sdmc:/slaunch/sounds.
     inline constexpr const char *kMetroSoundDir = "sdmc:/slaunch/sounds/metro";
+    inline constexpr const char *kSkinDir = "sdmc:/slaunch/skins";   // <blades|nxe>/<name>/
+    // Any .wav/.mp3 here can be picked as the Discord notification sound.
+    inline constexpr const char *kNotifySoundDir = "sdmc:/slaunch/sounds/notifications";
 
     // ---- submenu row ids ---------------------------------------------------
     // Declared up here rather than beside each screen's handler because the
@@ -37,7 +40,7 @@ namespace sl::menu::ui {
            TH_Language, TH_Music,
            TH_Widgets, TH_Entries,
            TH_Sleep, TH_SleepTv, TH_AskUser, TH_AutoUser,
-           TH_Welcome, TH_Updates, TH_Online, TH_Players, TH_DiscordAlerts, TH_DiscordRpc, TH_Usb,
+           TH_Welcome, TH_Updates, TH_Online, TH_Players, TH_DiscordAlerts, TH_DiscordGame, TH_DiscordSound, TH_DiscordRpc, TH_Usb,
            TH_About, TH_Back, TH_Count };
 
     enum { EF_Background = 0, EF_Wallpaper, EF_WallpaperDim, EF_WallpaperBlur,
@@ -686,6 +689,13 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.2.0" },
+            { false, "New layout: Blades, after the first Xbox 360 dashboard - a curved blade per category, with its own look on every screen" },
+            { false, "Blades shows your account picture on its gamer card, and the widgets you switched on in its bottom band" },
+            { false, "Discord notifications show over a running game (Theming > Discord in games turns that off)" },
+            { false, "Tap a Discord notification to open that chat" },
+            { false, "Theming > Discord sound picks the notification sound - put your own in slaunch/sounds/notifications" },
+            { false, "Metro: every screen is in the dashboard's own colours on a darker backdrop, so About, Files and Music are easy to read" },
             { true,  "v2.1.4" },
             { false, "Discord GIFs play again (Discord's GIF picker sends them as animated WebP)" },
             { false, "New achievement sound for Discord notifications" },

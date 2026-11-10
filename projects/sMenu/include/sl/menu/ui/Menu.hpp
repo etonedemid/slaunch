@@ -92,7 +92,10 @@ namespace sl::menu::ui {
     // one button away. Appended like every mode before it - the active one is
     // persisted by number. Metro is the Xbox 360's last dashboard: pivot tabs
     // over panels of tiles, a card view of the library and the Guide on HOME.
-    enum class UiMode { List, Line, Grid, Cover, Shelf, XMB, Flow, Deck, Metro, Count };
+    enum class UiMode { List, Line, Grid, Cover, Shelf, XMB, Flow, Deck, Metro, Blades, NXE, Count };
+    // NXE is shelved for now: its code stays, but it is not offered anywhere,
+    // and a saved choice of it opens Blades. The layouts before it can be chosen.
+    constexpr int kUiModeChoices = (int)UiMode::NXE;
 
     struct MenuItem {
         ItemKind    kind;
@@ -425,7 +428,11 @@ namespace sl::menu::ui {
         u64    m_players_tick = 0;
         bool   m_nextendo_players = false; // setting (persisted): contacts nextendo.network, so opt-in
         bool   m_discord_alerts = true;    // setting (persisted): connect at start for DM/mention banners
+        bool   m_discord_game_alerts = true; // setting (persisted): those banners over a running game too
         bool   m_discord_rpc = true;       // setting (persisted): "Playing <game>" on Discord
+        // setting (persisted): "" = notify.wav/.mp3, "off", else a file in kNotifySoundDir
+        std::string m_discord_sound;
+        void PlayNotifySound();
         bool   m_fm_pick = false;          // Files is choosing a file to send on Discord
         std::map<u64, int> m_players, m_players_result;
 #ifdef SL_QEXT
@@ -449,6 +456,8 @@ namespace sl::menu::ui {
         // returns the width drawn. Everything Discord names goes through it.
         int    DiscordText(gfx::FontSize fs, int x, int y, SDL_Color c, const std::string &text, int maxw = 0);
         void   DrawDiscordBanner();                      // a DM or mention, over any screen
+        bool   DiscordBannerTouch(int x, int y);         // a tap on it opens that chat
+        bool   m_ban_swallow = false;                    // the rest of that touch goes nowhere
         bool   m_dc_tried = false;                       // the background connect for alerts
         u64    m_rpc_id = 0;                             // the game in the Rich Presence
         void   DiscordSetGame(u64 app_id);
@@ -456,6 +465,7 @@ namespace sl::menu::ui {
         void   DiscordSuspend(u64 game = 0);   // a game (its id) or applet is taking over
         void   DiscordResume();                // the menu is on screen again
     private:
+        void   GameToastStart();               // pop-ups over the game (qext/GameToast)
 #endif
         bool   m_usb_mtp = true;          // setting (persisted): USB file transfer (MTP)
         Action OnButtonThemes(Btn b);
@@ -537,6 +547,14 @@ namespace sl::menu::ui {
         void FreeWidgetTileTextures();
         int  WidgetIndexByName(const std::string &n);
         void DrawWidgetTile(const TileRect &r, const MenuItem &it, Uint8 a);
+        // Any widget, scaled to fit a box (the wall's tiles, Blades' legend band).
+        void DrawWidgetIn(widgets::IWidget *w, const TileRect &r, Uint8 a);
+        // The layouts where widgets float over the home screen, dragged about by
+        // touch. Deck, Metro and Blades place them themselves, or not at all.
+        bool WidgetsFloat() const {
+            return m_deferred_joined && m_widgets.AnyEnabled() && m_ui_mode != UiMode::Deck &&
+                   m_ui_mode != UiMode::Metro && m_ui_mode != UiMode::Blades;
+        }
         void AddWidgetTile(int widget_index);
         // By value: it rebuilds the entry list, which is where the caller's
         // reference would have been living.
@@ -671,6 +689,7 @@ namespace sl::menu::ui {
         // Tappable "go back" corner, drawn on every non-Main screen; see the
         // definition and the kBackTap* constants for why it exists.
         void DrawBackTap();
+        void BackTapBox(int &x, int &y) const;   // its corner: drawn and hit-tested from here
         void DrawStatusHint(std::initializer_list<HintSeg> segs); // fresh status line (if any) + hint
         // Shared main-menu-style carousel used by the sub-screens too. Each row
         // is a label plus an optional right-hand value string.
@@ -693,6 +712,63 @@ namespace sl::menu::ui {
         void DrawMainShelf();       // Xbox-360-style uniform cover row
         void DrawMainShelfPs();     // PS4-style flat tile row (Shelf's default)
         void DrawMainXmb();          // PSP/PS3 cross-media bar
+        // The Xbox 360's first two dashboards, both views of XMB's bar (Menu_Xbox.cpp).
+        void DrawMainBlades();
+        void DrawMainNxe();
+        bool XboxStep();                              // eases the bar; false = nothing to draw
+        std::string XboxInfo(const MenuItem &sel);    // play time, running, update
+        int  BladesColAt(int x, int y) const;
+        int  BladesItemAt(int x, int y) const;
+        int  NxeColAt(int x, int y) const;
+        int  NxeItemAt(int x, int y) const;
+        int  XboxItemPitch() const;                   // finger travel per entry
+        int  m_xb_hint_x = 120;                       // where the main screen's button legend starts
+        int  m_xb_hint_y = 0;                         // its line, 0 = the usual one
+        bool m_xb_hint_flip = false;                  // word first, button last, ending at m_xb_hint_x
+        // Skins: a folder of the user's own images in sdmc:/slaunch/skins/<blades|nxe>/<name>
+        // that Blades and NXE draw from in place of their built-in look. See SKINS.md.
+        struct XboxSkin;
+        XboxSkin   *m_xskin = nullptr;                // the loaded one (current layout's)
+        std::string m_skin_blades, m_skin_nxe;        // setting (persisted): folder name, "" = built-in
+        std::string m_xb_font;                        // the skin's font.ttf, "" = Selawik
+        XboxSkin   &Skin();                           // the current layout's, loaded on first use
+        void        XboxSkinDrop();                   // free it; the next Skin() reloads
+        void        XboxSoundsReload();               // the layout's sounds, after a skin or layout change
+        std::string XboxSoundPack() const;            // where the Xbox layouts' sounds come from
+        std::string &XboxSkinName() { return m_ui_mode == UiMode::NXE ? m_skin_nxe : m_skin_blades; }
+        SDL_Texture *SkinButton(char k);              // the skin's A/B/X/Y glyph, or null
+        // Builds skins/<layout>/dashboard from the .xzp packages the user put in
+        // skins/import/<blades|nxe>. Returns how many skins it made (0: nothing there).
+        int         XboxSkinImport(std::string *made_names = nullptr);
+        bool        m_xb_imported = false;            // looked for packages this session
+        // The layouts that browse m_xmb_cols.
+        bool XmbModel() const { return m_ui_mode == UiMode::XMB || m_ui_mode == UiMode::Blades || m_ui_mode == UiMode::NXE; }
+        bool XboxOld() const  { return m_ui_mode == UiMode::Blades || m_ui_mode == UiMode::NXE; }
+        // Blades carries its look across every screen: the same frame, header,
+        // lists and pop-ups, in the colour of the blade that is open.
+        bool BladesUi() const;                        // the Blades look applies to this screen
+        bool BladesWide() const;                      // ...as one blade across the whole screen
+        void BladesSpan(int &left, int &right) const; // where a screen's contents go
+        int  BladesTitleY() const;                    // the header's text line
+        int  BladesHintY() const;                     // the legend's
+        SDL_Color BladesColorOf(int col);             // a blade's colour: the skin's, or its own
+        // Blades and Metro bring their own colours. Every screen reads its
+        // colours from the theme, so theirs stand in for it while their look applies.
+        void LayoutThemeSync();
+        void BladesTheme(Theme &t);
+        void MetroTheme(Theme &t) const;
+        bool MetroUi() const;                         // Metro in its own colours, on this screen
+        int  MetroListRowAt(int y, float scroll, int rows) const;   // the row under a finger
+        Theme m_layout_theme{};
+        void XbCard(float x, float y, float w, float h, float r, float shadow, SDL_Color fill, Uint8 a = 255);
+        void DrawBladesFrame();
+        void DrawBladesHeader(const char *title);
+        void DrawCarouselBlades(const std::vector<std::string> &labels,
+                                const std::vector<std::string> &values, int cursor, float &scroll_pos);
+        int  BladesListRowAt(int y, float scroll, int rows) const;   // the row under a finger
+        int  BladesPopup(int cw, int ch, const std::string &title);  // dim, card, title bar; returns its x
+        void DrawBladesOptions();
+        void DrawBladesDialog();
         void DrawMainFlow();         // WiiFlow-style 3D coverflow
         int  FlowItemAt(int px, int py) const;  // box under a touch, or -1
         float m_rstick_x = 0.0f, m_rstick_y = 0.0f;

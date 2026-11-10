@@ -141,6 +141,11 @@ public:
         std::string chat, chatAvatar;       // the chat, as the panel titles it
     };
     bool takeAlert(Alert& out);
+    // While paused for a game: the next message worth a pop-up over it, judged
+    // against what the store knew when the game started (it is not updated
+    // meanwhile). For a thread of its own while the menu is not running; that
+    // thread must have stopped before resumeFromGame().
+    bool takeGameAlert(Alert& out);
     // A sound to play: a file downloaded to the SD card, path handed over once.
     // Fed by an audio clip from the trusted sender (auto), or requestSound().
     bool takeSound(std::string& path);
@@ -178,6 +183,7 @@ private:
     void rememberMe();
     std::string plainText(const std::string& content, std::vector<std::string>* emojis = nullptr) const;
     void noteAlert(const Store::Change& ch, yyjson_val* d);
+    bool makeAlert(Snowflake channelId, yyjson_val* d, Alert& out) const;
     void maybeSound(yyjson_val* d);        // auto-play an audio clip from the trusted sender
     std::mutex m_soundMu;
     std::string m_soundPath;
@@ -202,6 +208,7 @@ private:
     bool m_lingering = false;
     Alert m_alert;
     bool m_hasAlert = false;
+    std::deque<Alert> m_gameAlerts; // takeGameAlert's, waiting their turn
     std::deque<Gateway::Event> m_events; // waiting to be applied (a few ms of them per frame)
     std::string m_savedLists;    // what discord_lists.json holds
     uint64_t m_listsNextTick = 0;

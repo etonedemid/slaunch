@@ -148,7 +148,7 @@ index 0000000..c49bdb5
 +
 +} // namespace arena
 diff --git a/loader/src/main.cpp b/loader/src/main.cpp
-index 30c988c..ee22857 100644
+index 30c988c..9be1e78 100644
 --- a/loader/src/main.cpp
 +++ b/loader/src/main.cpp
 @@ -5,6 +5,7 @@
@@ -363,7 +363,18 @@ index 30c988c..ee22857 100644
  #define FB_W 1280
  #define FB_H 720
  
-@@ -599,6 +797,10 @@ static void reopen_menu(const char *source)
+@@ -112,6 +310,10 @@ static bool g_vi = false;
+ static bool g_layerLive = false;
+ static bool g_winLive = false;
+ 
++/* The open display, for a menu that draws layers of its own (opening "Default"
++   again on the same vi session fails). */
++extern "C" ViDisplay *qext_vi_display(void) { return g_vi ? &g_display : nullptr; }
++
+ /* Pointers to dynamic libraries */
+ static void *g_neko;
+ static void *g_sdl;
+@@ -599,6 +801,10 @@ static void reopen_menu(const char *source)
                       (unsigned long long)now_ms());
  }
  
@@ -374,7 +385,7 @@ index 30c988c..ee22857 100644
  static void do_home(const char *source)
  {
      logging::LogLine("[qlaunch-ext] Home request (%s) t=%llu", source,
-@@ -609,6 +811,8 @@ static void do_home(const char *source)
+@@ -609,6 +815,8 @@ static void do_home(const char *source)
          return;
      }
      if (app::IsActive() && app::HasForeground()) {
@@ -383,7 +394,7 @@ index 30c988c..ee22857 100644
          Result rc = sys::SetForeground();
          logging::LogLine("[qlaunch-ext] fg request rc=0x%X", rc);
          if (R_SUCCEEDED(rc)) {
-@@ -626,6 +830,9 @@ static void do_sleep(const char *source)
+@@ -626,6 +834,9 @@ static void do_sleep(const char *source)
      logging::LogLine("[qlaunch-ext] sleep request (%s) t=%llu", source,
                       (unsigned long long)now_ms());
      plugins::PowerAll();

@@ -26,6 +26,30 @@ If you'd like to support development:
 * **System Localization:** Fully translatable UI using custom `.txt` files. Automatically reads the console's shared font for native CJK (Chinese, Japanese, Korean) rendering, with an included Noto Sans CJK font for fallback.
 * **Diagnostic Logging:** Writes detailed boot, ECS, and daemon logs directly to the SD card to troubleshoot bring-up issues without a debugger.
 
+## Blades skins
+
+The Blades layout has its own built-in look. It can also take pictures from an
+Xbox 360 dashboard package you have. sLaunch ships none of that art; it only
+reads files you copied to the card.
+
+1. Copy the dashboard's resource packages, `res.xzp` and `shrdres.xzp`, off
+   your Xbox 360 (a modded console's file manager or FTP can do it), or out
+   of a dashboard folder you already have on your PC.
+2. Copy them to the Switch SD card, into `sdmc:/slaunch/skins/import/blades/`.
+3. Switch to Blades in Theming > UI mode. sLaunch builds a skin called
+   `dashboard` from the packages, selects it, and renames them to `.xzp.done`.
+   To import again, put fresh copies in the folder and restart the menu.
+
+The import takes the button glyphs, list panel, highlight and detail panel.
+A community Blades skin package (one `.xzp` holding a `fond1.png` frame) can go
+in `import/blades/` the same way: sLaunch cuts one blade tab out of its frame,
+wipes the name off it, and uses it for every blade. That skin is named after
+the file and selected at once.
+Sounds and fonts are not converted; add `sounds/*.wav` or `font.ttf` to
+`sdmc:/slaunch/skins/blades/<skin>/` yourself. Every file a skin can hold
+is listed in `sdmc:/slaunch/skins/README.txt`. To go back to the built-in
+look, delete the skin's folder.
+
 ## Build Instructions
 
 1. **Install devkitPro and Dependencies:**

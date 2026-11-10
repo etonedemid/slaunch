@@ -65,6 +65,11 @@ assets: hbloader
 	@# Screenshots of each layout, for the setup wizard's layout gallery.
 	@mkdir -p SdOut/slaunch/previews
 	@cp -f assets/previews/*.jpg SdOut/slaunch/previews/ 2>/dev/null || true
+	@mkdir -p SdOut/slaunch/skins/blades SdOut/slaunch/skins/nxe
+	@cp -f assets/skins/README.txt SdOut/slaunch/skins/
+	@# The Blades layout's baked blades and lighting (scripts/gen-blades-art.py).
+	@mkdir -p SdOut/slaunch/ui/blades
+	@cp -f assets/UI/blades/*.png SdOut/slaunch/ui/blades/
 	@# Black/white icons for the system menu entries (List + Grid modes).
 	@mkdir -p SdOut/slaunch/icons
 	@cp -f assets/theming.png assets/controllers.png assets/album.png assets/user.png \
@@ -98,7 +103,7 @@ assets: hbloader
 	@cp -f assets/hbloader/main SdOut/slaunch/bin/hbloader_app/main 2>/dev/null || true
 	@cp -f assets/hbloader/main_app.npdm SdOut/slaunch/bin/hbloader_app/main.npdm 2>/dev/null || true
 	@# Background music tracks + UI sound effects (welcome / page turn).
-	@mkdir -p SdOut/slaunch/music SdOut/slaunch/sounds
+	@mkdir -p SdOut/slaunch/music SdOut/slaunch/sounds SdOut/slaunch/sounds/notifications
 	@cp -f assets/music/*.mp3 assets/music/*.ogg assets/music/*.flac SdOut/slaunch/music/ 2>/dev/null || true
 	@cp -f assets/UI/*.wav SdOut/slaunch/sounds/ 2>/dev/null || true
 	@# Box wrap for the coverflow. Fetched cover art lands in this directory too,
