@@ -293,14 +293,14 @@ namespace sl::menu::net {
         return MatchLevel(cand, title) > 0;
     }
 
-    std::string NintendoArtFor(const std::string &json, const std::string &title) {
+    std::string NintendoArtFor(const std::string &json, const std::string &title, const char *field) {
         std::string best;
         int best_score = 0;
         for (size_t p = json.find('{', 1); p != std::string::npos; p = json.find('{', p + 1)) {
             const size_t end = json.find('}', p);
             if (end == std::string::npos) break;
             const std::string name = JsonField(json, "title", p, end);
-            const std::string img  = JsonField(json, "productImage", p, end);
+            const std::string img  = JsonField(json, field, p, end);
             if (name.empty() || img.empty()) continue;
             // Exact beats an edition; the original console beats Switch 2.
             const int lvl = MatchLevel(name, title);
@@ -309,6 +309,31 @@ namespace sl::menu::net {
             if (score > best_score) { best_score = score; best = img; }
         }
         return best;
+    }
+
+    std::string EshopIcon(const std::string &title, int w) {
+        std::string q;
+        for (unsigned char c : SearchName(title)) {
+            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
+            else { char b[4]; snprintf(b, sizeof(b), "%%%02X", c); q += b; }
+        }
+        if (q.empty()) return "";
+        const std::string url =
+            "https://u3b6gr4ua3-dsn.algolia.net/1/indexes/store_game_en_us"
+            "?x-algolia-application-id=U3B6GR4UA3"
+            "&x-algolia-api-key=a29c6927638bfd8cee23993e51e721c9"
+            "&hitsPerPage=8&attributesToRetrieve=title,productImageSquare,platform"
+            "&attributesToHighlight=&attributesToSnippet=&query=" + q;
+        std::string body;
+        if (!Get(url.c_str(), body, 8)) return "";
+        // "https://assets.nintendo.com/image/fetch/q_auto/f_auto/<source>": the
+        // source again, resized to a square JPEG (f_auto may answer WebP).
+        const std::string sq = NintendoArtFor(body, title, "productImageSquare");
+        const size_t src = sq.rfind("https://");
+        if (src == std::string::npos || src == 0) return "";
+        char fx[96];
+        snprintf(fx, sizeof(fx), "https://assets.nintendo.com/image/fetch/c_fill,w_%d,h_%d,f_jpg,q_90/", w, w);
+        return fx + sq.substr(src);
     }
 
     std::string SteamAppFor(const std::string &json, const std::string &title) {

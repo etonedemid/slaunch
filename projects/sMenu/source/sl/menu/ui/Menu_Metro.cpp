@@ -1045,6 +1045,9 @@ namespace sl::menu::ui {
                 out.push_back({ T("Album"), GA_Kind, (int)ItemKind::Album });
                 out.push_back({ T("Music"), GA_Kind, (int)ItemKind::MusicPlayer });
                 out.push_back({ T("Web Browser"), GA_Kind, (int)ItemKind::WebBrowser });
+#ifdef SL_QEXT
+                out.push_back({ T("Discord"), GA_Kind, (int)ItemKind::Discord });
+#endif
                 out.push_back({ T("Files"), GA_Kind, (int)ItemKind::FileManager });
                 break;
             default:

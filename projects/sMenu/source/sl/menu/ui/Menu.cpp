@@ -57,6 +57,20 @@ namespace sl::menu::ui {
         m_suspended = suspended_app_id;
         ForgetUnmatchedSteamArt();
         m_icons.Init(gfx);
+        if (DIR *d = opendir("sdmc:/slaunch/icons_custom")) {
+            while (dirent *e = readdir(d)) {
+                const char *dot = strrchr(e->d_name, '.');
+                if (dot && !strcmp(dot, ".jpg"))
+                    m_custom_icons.insert(strtoull(e->d_name, nullptr, 16));
+            }
+            closedir(d);
+        }
+        m_icons.SetPathFn([this](u64 id) {
+            if (!m_custom_icons.count(id)) return std::string();
+            char p[64];
+            snprintf(p, sizeof(p), "sdmc:/slaunch/icons_custom/%016llX.jpg", (unsigned long long)id);
+            return std::string(p);
+        });
         m_hb_icons.Init(gfx, hb::IconDir);
         // Shortcut art is RetroArch's thumbnail folder, not anything sLaunch
         // extracted, so those keys resolve to a path of their own. Any other
@@ -252,6 +266,14 @@ namespace sl::menu::ui {
             threadClose(&m_ping_thread);
             m_ping_running = false;
         }
+        if (m_players_running) {
+            threadWaitForExit(&m_players_thread);
+            threadClose(&m_players_thread);
+            m_players_running = false;
+        }
+#ifdef SL_QEXT
+        DiscordExit();
+#endif
         if (m_play_running) {
             threadWaitForExit(&m_play_thread);
             threadClose(&m_play_thread);
@@ -505,6 +527,9 @@ namespace sl::menu::ui {
         add(ItemKind::MusicPlayer,  T("Music"));
         add(ItemKind::UserPage,     T("User Page"));
         add(ItemKind::WebBrowser,   T("Web Browser"));
+#ifdef SL_QEXT
+        add(ItemKind::Discord,      T("Discord"));
+#endif
         add(ItemKind::MiiEdit,      T("Mii Edit"));
         add(ItemKind::Wifi,         T("Network"));
         add(ItemKind::Bluetooth,    T("Bluetooth"));
@@ -588,11 +613,14 @@ namespace sl::menu::ui {
         // Folders: count each one's members and keep the first four for its
         // face, then take the members off the top level - a game filed in a
         // folder lives in the folder. A search still finds them.
+        std::unordered_map<std::string, std::vector<std::string>> was_peek;
         for (auto f = m_folder_art.begin(); f != m_folder_art.end(); ) {
             if (!shown(CollIndex(f->first))) {
                 if (f->second.tex) m_gfx->FreeImage(f->second.tex);
                 f = m_folder_art.erase(f);
             } else {
+                auto &w = was_peek[f->first];
+                for (const auto &m : f->second.peek) w.push_back(ItemKey(m));
                 f->second.peek.clear(); f->second.count = 0; ++f;
             }
         }
@@ -610,6 +638,14 @@ namespace sl::menu::ui {
                     fa.count++;
                     if (fa.peek.size() < 4) fa.peek.push_back(it);
                 }
+            }
+            // A new front four (play order changed, a game added or removed)
+            // redraws the face; otherwise ItemArt only redraws as icons arrive.
+            for (auto &[name, fa] : m_folder_art) {
+                std::vector<std::string> now;
+                for (const auto &m : fa.peek) now.push_back(ItemKey(m));
+                if (now != was_peek[name]) fa.have = 0;
+                if (now.empty() && fa.tex) { m_gfx->FreeImage(fa.tex); fa.tex = nullptr; }
             }
             if (m_coll_open.empty() && m_search.empty())
                 m_items.erase(std::remove_if(m_items.begin(), m_items.end(),
@@ -984,6 +1020,13 @@ namespace sl::menu::ui {
                 m_check_updates = (v != 0);
             else if (sscanf(line, "online_count=%d", &v) == 1)
                 m_online_count = (v != 0);
+            else if (sscanf(line, "nextendo_text=%d", &v) == 1 ||
+                     sscanf(line, "nextendo_players=%d", &v) == 1)   // the name the first build saved
+                m_nextendo_players = (v != 0);
+            else if (sscanf(line, "discord_alerts=%d", &v) == 1)
+                m_discord_alerts = (v != 0);
+            else if (sscanf(line, "discord_rpc=%d", &v) == 1)
+                m_discord_rpc = (v != 0);
             else if (sscanf(line, "usb_mtp=%d", &v) == 1)
                 m_usb_mtp = (v != 0);
             else if (sscanf(line, "welcome=%d", &v) == 1)
@@ -1036,6 +1079,9 @@ namespace sl::menu::ui {
         fprintf(fp, "retroarch=%d\n", m_retroarch ? 1 : 0);
         fprintf(fp, "check_updates=%d\n", m_check_updates ? 1 : 0);
         fprintf(fp, "online_count=%d\n", m_online_count ? 1 : 0);
+        fprintf(fp, "nextendo_text=%d\n", m_nextendo_players ? 1 : 0);
+        fprintf(fp, "discord_alerts=%d\n", m_discord_alerts ? 1 : 0);
+        fprintf(fp, "discord_rpc=%d\n", m_discord_rpc ? 1 : 0);
         fprintf(fp, "usb_mtp=%d\n", m_usb_mtp ? 1 : 0);
         fprintf(fp, "tdb_region=%d\n", m_tdb_region);
         fprintf(fp, "sgdb=%d\n", m_sgdb_enabled ? 1 : 0);
@@ -1237,6 +1283,9 @@ namespace sl::menu::ui {
             case Screen::Homebrew:      a = OnButtonHomebrew(b);      break;
             case Screen::Album:         a = OnButtonAlbum(b);         break;
             case Screen::Files:         a = OnButtonFiles(b);         break;
+#ifdef SL_QEXT
+            case Screen::Discord:       a = OnButtonDiscord(b);       break;
+#endif
             case Screen::FlowMenu:      a = OnButtonFlowMenu(b, out_app_id); break;
             case Screen::DeckMenu:      a = OnButtonDeckMenu(b, out_app_id); break;
             case Screen::DeckLibrary:   a = OnButtonDeckLibrary(b, out_app_id); break;
@@ -1366,6 +1415,9 @@ namespace sl::menu::ui {
             case ItemKind::MusicPlayer:  OpenMusicPlayer(false); return Action::None;
             case ItemKind::UserPage:     return Action::OpenUserPage;
             case ItemKind::WebBrowser:   return Action::OpenWebBrowser;
+#ifdef SL_QEXT
+            case ItemKind::Discord:      OpenDiscord(); return Action::None;
+#endif
             case ItemKind::MiiEdit:      return Action::OpenMiiEdit;
             case ItemKind::Controllers:  return Action::OpenControllers;
             case ItemKind::HomebrewMenu: OpenHomebrewBrowser(); return Action::None;
@@ -1707,6 +1759,9 @@ namespace sl::menu::ui {
                                                          : T("Add to Favourites"), OptFav });
             m_options.push_back({ T("Rename"), OptRename });
             m_options.push_back({ T("Choose cover"), OptPickCover });
+            m_options.push_back({ T("Choose icon"), OptPickIcon });
+            if (m_custom_icons.count(it.app_id))
+                m_options.push_back({ T("Restore icon"), OptResetIcon });
             m_options.push_back({ m_hb_donor == it.app_id ? T("Homebrew donor (set)")
                                                           : T("Use as homebrew donor"), OptSetDonor });
         }
@@ -1835,12 +1890,26 @@ namespace sl::menu::ui {
                     m_options_cursor = (int)m_options.size() - 1;
                 return Action::None;
             case OptPickCover:
+            case OptPickIcon:
                 m_options_open = false;
                 // Opened from Flow's own menu, B should return there, not to the
                 // shelf - the same rule every screen reached that way follows.
                 m_from_flow_menu = (m_screen != Screen::Main);
-                EnterCoverPicker();
+                EnterCoverPicker(m_options[m_options_cursor].action == OptPickIcon);
                 return Action::None;
+            case OptResetIcon: {
+                m_options_open = false;
+                const u64 id = m_items[m_cursor].app_id;
+                char p[64];
+                snprintf(p, sizeof(p), "sdmc:/slaunch/icons_custom/%016llX.jpg", (unsigned long long)id);
+                remove(p);
+                snprintf(p, sizeof(p), "sdmc:/slaunch/icons_custom/%016llX.url", (unsigned long long)id);
+                remove(p);
+                m_custom_icons.erase(id);
+                m_icons.Drop(id);
+                SetStatus(T("Icon restored"));
+                return Action::None;
+            }
             case OptCloseGame:
                 m_options_open = false;
                 return Action::TerminateApp;
@@ -2024,6 +2093,69 @@ namespace sl::menu::ui {
             threadStart(&m_ping_thread);
             m_ping_running = true;
         }
+    }
+    void Menu::PlayersTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        static const char *kBase = "https://nextendo.network";
+        m->m_players_result.clear();
+        std::string body;
+        char url[96];
+        for (const char *path : { "/api/online-counts", "/service-catalog/v1/online-counts" }) {
+            snprintf(url, sizeof(url), "%s%s", kBase, path);
+            if (net::Get(url, body, 10))
+                play::ParseNextendoCounts(body, m->m_players_result, path[1] == 's');
+        }
+        for (const auto &g : play::kNextendoGames) {
+            snprintf(url, sizeof(url), "%s%s", kBase, g.path);
+            if (!net::Get(url, body, 10)) continue;
+            const int n = play::ParseNextendoGameStats(body, g.needs_online);
+            if (n >= 0) m->m_players_result[g.id] = std::max(n, m->m_players_result[g.id]);
+        }
+        int online = 0;
+        for (const auto &kv : m->m_players_result) online += kv.second > 0;
+        if (FILE *fp = fopen("sdmc:/slaunch/boot.log", "a")) {
+            fprintf(fp, "players: %zu titles, %d with players\n", m->m_players_result.size(), online);
+            fclose(fp);
+        }
+        m->m_players_done.store(true, std::memory_order_release);
+    }
+    void Menu::PollPlayers() {
+#ifdef SL_SIMULATOR
+#endif
+        if (m_players_running) {
+            if (!m_players_done.load(std::memory_order_acquire)) return;
+            threadWaitForExit(&m_players_thread);
+            threadClose(&m_players_thread);
+            m_players_running = false;
+            // A failed round keeps the last numbers rather than blanking them.
+            if (m_nextendo_players && !m_players_result.empty()) m_players.swap(m_players_result);
+        }
+        if (!m_nextendo_players || !m_deferred_done) return;
+        const u64 now = armGetSystemTick();
+        constexpr u64 kPlayersEveryS = 180;   // each round is several connections
+        if (m_players_tick && now - m_players_tick < kPlayersEveryS * armGetSystemTickFreq()) return;
+        m_players_tick = now;
+        m_players_done.store(false, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_players_thread, &Menu::PlayersTrampoline, this,
+                                     nullptr, 0x8000, 0x3B, -2))) {
+            threadStart(&m_players_thread);
+            m_players_running = true;
+        }
+    }
+    // The selected game's count, in every layout.
+    void Menu::DrawPlayersPill() {
+        if (!m_nextendo_players || m_items.empty() || m_cursor >= (int)m_items.size()) return;
+        const MenuItem &it = m_items[m_cursor];
+        if (it.kind != ItemKind::Game) return;
+        const auto p = m_players.find(it.app_id);
+        if (p == m_players.end() || p->second < 0) return;   // 0 still shows: it is tracked
+        char text[32];
+        snprintf(text, sizeof(text), "%d %s", p->second, T("online"));
+        const int w = m_gfx->TextWidth(gfx::FontSize::Small, text);
+        const int x = 40, y = 76;
+        m_gfx->FillRect(x, y, w + 42, 32, SDL_Color{ 0, 0, 0, 150 });
+        m_gfx->FillRect(x + 10, y + 10, 12, 12, SDL_Color{ 67, 181, 129, 255 });
+        m_gfx->Text(gfx::FontSize::Small, x + 30, y + 3, SDL_Color{ 255, 255, 255, 255 }, text);
     }
     void Menu::PollUpdateCheck() {
         if (m_upd_running && m_upd_done.load(std::memory_order_acquire)) {
@@ -2812,8 +2944,9 @@ namespace sl::menu::ui {
         if (m_screen == Screen::Keyboard) {
             SwkbdOptions opt{};
             opt.initialText = m_kb_text.c_str();
-            opt.maxLength = 120;
-            char out[128];
+            // A Discord message gets room to say something; everything else is a name.
+            opt.maxLength = m_kb_purpose == sl::smi::Kb_DiscordMessage ? 500 : 120;
+            char out[2048];
             const int n = qext_swkbd_show_ex(&opt, out, sizeof(out));
             if (n >= 0) { m_kb_text = out; OnButtonKeyboard(Btn::Plus); }
             else        { OnButtonKeyboard(Btn::B); }
@@ -2824,6 +2957,10 @@ namespace sl::menu::ui {
         PollResolvePins();  // fold in pinned-homebrew names/icons when its worker finishes
         PollUpdateCheck();  // join the update-check worker when it finishes
         PollPing();         // anonymous online count heartbeat
+        PollPlayers();      // Nextendo's players per game
+#ifdef SL_QEXT
+        PollDiscord();
+#endif
         PollPlayStats();    // start/collect the pdm play-time query
 
         // SD card pulled while powered on: nothing else matters, show the warning
@@ -2933,7 +3070,7 @@ namespace sl::menu::ui {
         Phase("background");
         switch (m_screen) {
             case Screen::Oobe:        DrawOobe();   break;
-            case Screen::Main:        DrawMain();   break;
+            case Screen::Main:        DrawMain(); DrawPlayersPill(); break;
             case Screen::Theming:     DrawTheming(); break;
             case Screen::Themes:      DrawThemes(); break;
             case Screen::ThemeEditor: DrawEditor(); break;
@@ -2946,11 +3083,14 @@ namespace sl::menu::ui {
             case Screen::Homebrew:    DrawHomebrew(); break;
             case Screen::Album:       DrawAlbum();    break;
             case Screen::Files:       DrawFiles();    break;
+#ifdef SL_QEXT
+            case Screen::Discord:     DrawDiscord();  break;
+#endif
             case Screen::FlowMenu:    DrawFlowMenu(); break;
             case Screen::DeckMenu:    DrawDeckMenu(); break;
-            case Screen::DeckLibrary: DrawDeckLibrary(); break;
+            case Screen::DeckLibrary: DrawDeckLibrary(); DrawPlayersPill(); break;
             case Screen::DeckNews:    DrawDeckNews(); break;
-            case Screen::MetroGames:  DrawMetroGames(); break;
+            case Screen::MetroGames:  DrawMetroGames(); DrawPlayersPill(); break;
             case Screen::FlowSettings: DrawFlowSettings(); break;
             case Screen::About:       DrawAbout(); break;
             case Screen::Welcome:     DrawWelcome(); break;
@@ -2969,6 +3109,9 @@ namespace sl::menu::ui {
             !m_options_open && m_dialog == Dialog::None)
             DrawBackTap();
         DrawUsbStatus();   // over the screen, under the options overlay and dialogs
+#ifdef SL_QEXT
+        DrawDiscordBanner();
+#endif
         if (m_options_open) DrawOptions();
         Phase("draw screen");
         if (m_dialog != Dialog::None) DrawDialog();
@@ -3276,6 +3419,7 @@ namespace sl::menu::ui {
             case ItemKind::MediaCat:     file = "media";        break;
             case ItemKind::UserPage:     file = "user";         break;
             case ItemKind::WebBrowser:   file = "browser";      break;
+            case ItemKind::Discord:      file = "discord";      break;
             case ItemKind::MiiEdit:      file = "mii";          break;
             case ItemKind::Settings:     file = "settings";     break;
             case ItemKind::Wifi:         file = "wifi";         break;

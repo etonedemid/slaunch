@@ -24,6 +24,13 @@ namespace sl::menu::gfx {
 
     int IconCache::Live() const { return m_live; }
 
+    void IconCache::Drop(u64 key) {
+        auto it = m_map.find(key);
+        if (it == m_map.end()) return;
+        if (it->second.tex) { m_gfx->FreeImage(it->second.tex); m_live--; }
+        m_map.erase(it);
+    }
+
     void IconCache::Exit() { FreeAll(); }
 
     void IconCache::EvictOldest() {

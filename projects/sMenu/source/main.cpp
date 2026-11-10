@@ -497,15 +497,18 @@ static void RecordLaunch(u64 program_id, const char *nro) {
 // stops calling loop() until the menu is back.
 #ifdef SL_QEXT
 static bool g_Suspended = false;
-static void HandOff() {
+static void HandOff(u64 game = 0) {
     if (g_Suspended) return;
     g_Suspended = true;
+    // Its threads would run on the game's cores: all of it stops, except the
+    // gateway when a game's Rich Presence has to stay up.
+    if (g_UI) g_UI->DiscordSuspend(game);
     menu::usb::MtpStop();
     appletSetAutoSleepDisabled(false);
     if (MIX_Mixer *m = menu::audio::Mixer()) MIX_PauseAllTracks(m);
 }
 #else
-static void HandOff() { g_Running = false; }
+static void HandOff(u64 = 0) { g_Running = false; }
 #endif
 
 static void DispatchAction(Menu::Action action, u64 launch_id,
@@ -517,12 +520,12 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
                 menu::smi::ResumeApp();
             else
                 menu::smi::LaunchApp(launch_id);
-            HandOff();
+            HandOff(launch_id);
             break;
         case Menu::Action::ResumeApp:
             RecordLaunch(suspended_id, nullptr);
             menu::smi::ResumeApp();
-            HandOff();
+            HandOff(suspended_id);
             break;
         case Menu::Action::TerminateApp:
             // Just closes the running game; the menu stays up.
@@ -1163,6 +1166,7 @@ int loop(void) {
     // HandOff gave up here (not only in onOpen) also covers a launch that failed.
     if (g_Suspended) {
         g_Suspended = false;
+        g_UI->DiscordResume();
         if (g_UI->UsbTransfer()) menu::usb::MtpStart();
         if (MIX_Mixer *m = menu::audio::Mixer()) MIX_ResumeAllTracks(m);
     }

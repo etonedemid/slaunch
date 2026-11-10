@@ -170,6 +170,17 @@ namespace sl::menu::ui {
             }
             m_gfx->FillRect(x, y, size, 3, WithAlpha(t.accent, alpha)); // accent strip
         }
+        if (it.kind == ItemKind::Game && m_nextendo_players && size >= 96) {
+            const auto p = m_players.find(it.app_id);
+            if (p != m_players.end() && p->second > 0) {
+                char n[12];
+                snprintf(n, sizeof(n), "%d", p->second);
+                const int nw = m_gfx->TextWidth(gfx::FontSize::Small, n);
+                m_gfx->FillRect(x + 6, y + 6, nw + 32, 28, SDL_Color{ 0, 0, 0, (Uint8)(alpha * 150 / 255) });
+                m_gfx->FillRect(x + 12, y + 14, 12, 12, WithAlpha(SDL_Color{ 67, 181, 129, 255 }, alpha));
+                m_gfx->Text(gfx::FontSize::Small, x + 28, y + 7, WithAlpha(SDL_Color{ 255, 255, 255, 255 }, alpha), n);
+            }
+        }
         if (!icon) {                                 // no icon file: big initial
             char initial[2] = { it.name.empty() ? '?' : it.name[0], '\0' };
             if (initial[0] >= 'a' && initial[0] <= 'z') initial[0] -= 32;

@@ -51,3 +51,11 @@ See `assets/fonts/ATTRIBUTION.md`, `assets/hbloader/ATTRIBUTION.md`,
 `assets/icon_packs/Minimal/ATTRIBUTION.md`, and
 `assets/icons/buttons/ATTRIBUTION.md` for fonts, the hbloader fork, and icon
 pack credits.
+
+## HomeNX: Discord client and Nextendo counts
+
+`libs/discord` is the Discord client from [HomeNX](https://github.com/ad3333m/homenx)
+(GPL-3.0), which builds on SwitchCord; `libs/discord/README.md` lists the changes. It
+includes yyjson and QR Code generator (both MIT) and `assets/certs`, Mozilla-list root
+certificates. The Nextendo player counts read the same endpoints CardsNX does; that code
+was rewritten, not copied.

@@ -70,6 +70,12 @@ namespace sl::menu::ui {
             }
         }
 
+#ifdef SL_QEXT
+        if (m_screen == Screen::Discord && m_dc && !m_options_open && m_dialog == Dialog::None) {
+            OnTouchDiscord(phase, x, y);
+            return Action::None;
+        }
+#endif
         // ---- on-screen keyboard: tap a key ----
         if (m_screen == Screen::Keyboard) {
             if (phase != 0) return Action::None;  // act on touch-down only

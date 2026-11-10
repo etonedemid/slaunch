@@ -95,6 +95,12 @@ namespace sl::menu::ui {
                 // This fell through to the rename case, so typing the API key
                 // into Theming renamed whatever game the cursor happened to be
                 // on and never saved the key at all.
+#ifdef SL_QEXT
+                case sl::smi::Kb_DiscordMessage:
+                case sl::smi::Kb_DiscordToken:
+                    DiscordKeyboardDone(true);
+                    break;
+#endif
                 case sl::smi::Kb_SteamGridKey: {
                     constexpr const char *path = "sdmc:/slaunch/config/steamgriddb.txt";
                     mkdir("sdmc:/slaunch", 0777);
@@ -205,6 +211,10 @@ namespace sl::menu::ui {
                        (m_kb_purpose == sl::smi::Kb_SteamGridKey)
                        ? (m_kb_to_picker ? Screen::CoverPicker : Screen::Theming) : Screen::Main;
             m_kb_to_picker = false;
+#ifdef SL_QEXT
+            if (m_kb_purpose == sl::smi::Kb_DiscordMessage || m_kb_purpose == sl::smi::Kb_DiscordToken)
+                DiscordKeyboardDone(false);
+#endif
         }
         return Action::None;
     }
@@ -304,11 +314,15 @@ namespace sl::menu::ui {
             bool ok = false;
             const int idx = m->m_pick_choice;
             if (idx >= 0 && idx < (int)m->m_pick_urls.size()) {
-                mkdir("sdmc:/slaunch/covers", 0777);
+                const char *dir = m->m_pick_icon ? "sdmc:/slaunch/icons_custom" : "sdmc:/slaunch/covers";
+                mkdir(dir, 0777);
                 char dst[96];
-                snprintf(dst, sizeof(dst), "sdmc:/slaunch/covers/%016llX.jpg",
-                         (unsigned long long)m->m_pick_id);
+                snprintf(dst, sizeof(dst), "%s/%016llX.jpg", dir, (unsigned long long)m->m_pick_id);
                 ok = net::Download(m->m_pick_urls[idx].c_str(), dst, 25);
+                if (ok && m->m_pick_icon) {   // for the Discord presence
+                    snprintf(dst, sizeof(dst), "%s/%016llX.url", dir, (unsigned long long)m->m_pick_id);
+                    if (FILE *f = fopen(dst, "w")) { fputs(m->m_pick_urls[idx].c_str(), f); fclose(f); }
+                }
             }
             m->m_pick_state.store((int)(ok ? PickState::Applied : PickState::Failed),
                                   std::memory_order_release);
@@ -319,7 +333,17 @@ namespace sl::menu::ui {
         const std::string auth = "Bearer " + m->m_sgdb_key;
         PickState end = PickState::Failed;
 
+        // Icons: the eShop's own first (no key needed), then SteamGridDB's.
+        std::vector<std::string> urls, thumbs;
+        if (m->m_pick_icon && !net::ContentFilter::ShouldFilterGameByName(m->m_pick_name)) {
+            m->m_pick_state.store((int)PickState::Searching, std::memory_order_release);
+            const std::string e = net::EshopIcon(m->m_pick_name, 256);
+            if (!e.empty()) { urls.push_back(e); thumbs.push_back(e); }
+            end = PickState::NoArt;
+        }
+
         do {
+            if (m->m_pick_icon && !m->SgdbKeyPresent()) break;
             std::string q;
             for (unsigned char c : m->m_pick_name) {
                 if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
@@ -355,21 +379,32 @@ namespace sl::menu::ui {
 
             m->m_pick_state.store((int)PickState::Listing, std::memory_order_release);
             char grid[176];
-            snprintf(grid, sizeof(grid),
-                     "https://www.steamgriddb.com/api/v2/grids/game/%lld"
-                     "?dimensions=600x900&types=static&limit=%d", gid, kPickMax);
+            if (m->m_pick_icon)
+                snprintf(grid, sizeof(grid),
+                         "https://www.steamgriddb.com/api/v2/icons/game/%lld"
+                         "?types=static&mimes=image/png&limit=%d", gid, kPickMax);
+            else
+                snprintf(grid, sizeof(grid),
+                         "https://www.steamgriddb.com/api/v2/grids/game/%lld"
+                         "?dimensions=600x900&types=static&limit=%d", gid, kPickMax);
             body.clear();
             end = PickState::NoArt;
             if (!net::Get(grid, body, 15, auth.c_str(), &http, &rc)) break;
 
             // "url" is the full-size grid, "thumb" the preview beside it; one of
             // each per entry, in the same order, so the two lists stay aligned.
-            m->m_pick_urls   = JsonStrAll(body, "url",   kPickMax);
-            m->m_pick_thumbs = JsonStrAll(body, "thumb", kPickMax);
-            if (m->m_pick_urls.empty()) break;
-            if (m->m_pick_thumbs.size() < m->m_pick_urls.size())
-                m->m_pick_urls.resize(m->m_pick_thumbs.size());
-            if (m->m_pick_urls.empty()) break;
+            std::vector<std::string> u = JsonStrAll(body, "url",   kPickMax);
+            std::vector<std::string> t = JsonStrAll(body, "thumb", kPickMax);
+            u.resize(std::min(u.size(), t.size()));
+            t.resize(u.size());
+            urls.insert(urls.end(), u.begin(), u.end());
+            thumbs.insert(thumbs.end(), t.begin(), t.end());
+        } while (false);
+
+        do {
+            if (urls.empty()) break;
+            m->m_pick_urls   = std::move(urls);
+            m->m_pick_thumbs = std::move(thumbs);
 
             // Both vectors are complete from here on and never resized again,
             // which is what makes them safe to read on the main thread behind
@@ -397,13 +432,14 @@ namespace sl::menu::ui {
         m->m_pick_state.store((int)end, std::memory_order_release);
         m->m_pick_done.store(true, std::memory_order_release);
     }
-    void Menu::EnterCoverPicker() {
+    void Menu::EnterCoverPicker(bool icon) {
         if (m_pick_running) return;                 // a fetch is already in flight
         const MenuItem &it = m_items[m_cursor];
         if (it.kind != ItemKind::Game || it.app_id == 0) return;
 
         LeaveCoverPicker();                          // free any previous session
         m_pick_id     = it.app_id;
+        m_pick_icon   = icon;
         m_pick_name   = it.name;
         m_pick_cursor = 0;
         m_pick_scroll = 0.0f;
@@ -415,7 +451,7 @@ namespace sl::menu::ui {
         m_pick_done.store(false, std::memory_order_release);
         m_screen = Screen::CoverPicker;
 
-        if (!SgdbKeyPresent()) {
+        if (!icon && !SgdbKeyPresent()) {
             m_pick_state.store((int)PickState::NoKey, std::memory_order_release);
             return;
         }
@@ -481,6 +517,16 @@ namespace sl::menu::ui {
 
         const PickState st = (PickState)m_pick_state.load(std::memory_order_acquire);
         if (st != PickState::Applied) { SetStatus(T("Could not download that cover")); return; }
+
+        if (m_pick_icon) {
+            m_custom_icons.insert(m_pick_id);
+            m_icons.Drop(m_pick_id);
+            for (auto &kv : m_folder_art) kv.second.have = 0;   // folder faces too
+            SetStatus(T("Icon updated"));
+            m_screen = BackTarget();
+            LeaveCoverPicker();
+            return;
+        }
 
         // Drop what Flow and the shelf have cached for this title so the new
         // file is picked up on the next frame, exactly as a fetch does.
@@ -564,7 +610,7 @@ namespace sl::menu::ui {
     void Menu::DrawCoverPicker() {
         const Theme &t = m_theme.Current();
         const int    W = gfx::Gfx::Width;
-        DrawTopBar(T("Choose cover"));
+        DrawTopBar(m_pick_icon ? T("Choose icon") : T("Choose cover"));
 
         const PickState st = (PickState)m_pick_state.load(std::memory_order_acquire);
         const int have  = m_pick_have.load(std::memory_order_acquire);
@@ -580,7 +626,7 @@ namespace sl::menu::ui {
             case PickState::Searching:msg = T("Searching..."); break;
             case PickState::Listing:  msg = T("Loading covers..."); break;
             case PickState::NoMatch:  msg = T("No match on SteamGridDB"); break;
-            case PickState::NoArt:    msg = T("No covers available"); break;
+            case PickState::NoArt:    msg = m_pick_icon ? T("No icons found") : T("No covers available"); break;
             case PickState::Failed:   msg = T("Fetch failed"); break;
             case PickState::Applying: msg = T("Downloading..."); break;
             default: break;
@@ -609,20 +655,23 @@ namespace sl::menu::ui {
             if (!m_pick_tex[i] && budget > 0) {
                 char path[96];
                 snprintf(path, sizeof(path), "%s/%02d.jpg", kPickDir, i);
-                m_pick_tex[i] = m_gfx->LoadImageScaled(path, kPickCellW, kPickCellH);
+                m_pick_tex[i] = m_gfx->LoadImageScaled(path, kPickCellW, m_pick_icon ? kPickCellW : kPickCellH);
                 budget--;
             }
 
             const bool sel = (i == m_pick_cursor);
-            if (m_pick_tex[i]) m_gfx->DrawImage(m_pick_tex[i], cx, cy, kPickCellW, kPickCellH);
-            else               m_gfx->FillRect(cx, cy, kPickCellW, kPickCellH,
+            // Icons are square: drawn in the middle of the cell.
+            const int ch = m_pick_icon ? kPickCellW : kPickCellH;
+            const int iy = cy + (kPickCellH - ch) / 2;
+            if (m_pick_tex[i]) m_gfx->DrawImage(m_pick_tex[i], cx, iy, kPickCellW, ch);
+            else               m_gfx->FillRect(cx, iy, kPickCellW, ch,
                                                WithAlpha(t.fg, 26));
             if (sel) {
                 const SDL_Color a = t.accent;
-                m_gfx->FillRect(cx - 4, cy - 4, kPickCellW + 8, 4, a);
-                m_gfx->FillRect(cx - 4, cy + kPickCellH, kPickCellW + 8, 4, a);
-                m_gfx->FillRect(cx - 4, cy - 4, 4, kPickCellH + 8, a);
-                m_gfx->FillRect(cx + kPickCellW, cy - 4, 4, kPickCellH + 8, a);
+                m_gfx->FillRect(cx - 4, iy - 4, kPickCellW + 8, 4, a);
+                m_gfx->FillRect(cx - 4, iy + ch, kPickCellW + 8, 4, a);
+                m_gfx->FillRect(cx - 4, iy - 4, 4, ch + 8, a);
+                m_gfx->FillRect(cx + kPickCellW, iy - 4, 4, ch + 8, a);
             }
         }
 
@@ -1315,6 +1364,26 @@ namespace sl::menu::ui {
         }
         if (m_theming_cursor == TH_Online && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
             m_online_count = !m_online_count;
+            SaveSettings();
+        }
+        if (m_theming_cursor == TH_Players && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_nextendo_players = !m_nextendo_players;
+            if (!m_nextendo_players) m_players.clear();
+            m_players_tick = 0;
+            SaveSettings();
+        }
+        if (m_theming_cursor == TH_DiscordAlerts && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_discord_alerts = !m_discord_alerts;
+#ifdef SL_QEXT
+            m_dc_tried = false;   // on: connect now, not at the next start
+#endif
+            SaveSettings();
+        }
+        if (m_theming_cursor == TH_DiscordRpc && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_discord_rpc = !m_discord_rpc;
+#ifdef SL_QEXT
+            DiscordSetGame(m_discord_rpc ? m_suspended : 0);
+#endif
             SaveSettings();
         }
         auto toggleWelcome = [&]() { m_welcome_enabled = !m_welcome_enabled; SaveSettings(); };
@@ -2226,6 +2295,9 @@ namespace sl::menu::ui {
                 m_ui_mode != UiMode::Cover && m_ui_mode != UiMode::Deck) continue;
             // The wall shape is only meaningful where there is a wall.
             if ((i == TH_TileCols || i == TH_TileRows) && m_ui_mode != UiMode::Grid) continue;
+#ifndef SL_QEXT
+            if (i == TH_DiscordAlerts || i == TH_DiscordRpc) continue;   // no Discord outside the qext build
+#endif
             v.push_back(i);
         }
         return v;
@@ -2264,7 +2336,7 @@ namespace sl::menu::ui {
             T("Music"), T("Widgets"),
             T("Menu entries"),
             T("Screen timeout"), T("Screen timeout (TV)"), T("Ask who's playing"), T("Start as user"),
-            T("Welcome screen"), T("Check for updates"), T("Online count"), T("USB file transfer"),
+            T("Welcome screen"), T("Check for updates"), T("Online count"), T("Nextendo players"), T("Discord notifications"), T("Discord game status"), T("USB file transfer"),
             T("About"), T("Back")
         };
         std::vector<std::string> values(labels.size());
@@ -2307,6 +2379,9 @@ namespace sl::menu::ui {
         values[TH_Welcome]     = m_welcome_enabled ? T("On") : T("Off");
         values[TH_Updates]     = m_check_updates ? T("On") : T("Off");
         values[TH_Online]      = m_online_count ? T("On") : T("Off");
+        values[TH_Players]     = m_nextendo_players ? T("On") : T("Off");
+        values[TH_DiscordAlerts] = m_discord_alerts ? T("On") : T("Off");
+        values[TH_DiscordRpc]    = m_discord_rpc ? T("On") : T("Off");
         values[TH_Usb]         = m_usb_mtp ? T("On") : T("Off");
         values[TH_About]       = m_upd_available ? T("Update available") : std::string("v") + SL_VERSION;
         {

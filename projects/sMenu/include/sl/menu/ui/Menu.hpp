@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <switch.h>
 #include <sl/os/Applications.hpp>
 #include <sl/menu/ui/Theme.hpp>
@@ -10,6 +11,7 @@
 #include <sl/menu/hb/Homebrew.hpp>
 #include <sl/menu/hb/Shortcuts.hpp>
 #include <sl/menu/play/PlayStats.hpp>
+#include <sl/menu/play/Nextendo.hpp>
 #include <sl/menu/widgets/Widgets.hpp>
 #include <sl/menu/news/News.hpp>
 #include <sl/menu/dbg/Debug.hpp>
@@ -61,6 +63,7 @@ namespace sl::menu::ui {
         FileManager,   // browse and manage the SD card (Menu_Files.cpp)
         Bluetooth,     // radio on/off and audio device pairing (Menu_Screens.cpp)
         Collection,    // a user collection; A opens it (opt-in, Theming)
+        Discord,       // the Discord screen (Menu_Discord.cpp), qext build only
     };
 
     // What the box-art worker is doing (see Menu::DrawFetchStatus). Stages run
@@ -240,7 +243,8 @@ namespace sl::menu::ui {
                             // Deck: its side menu, the full-library grid, and the
                             // reader a news card opens into.
                             DeckMenu, DeckLibrary, DeckNews,
-                            MetroGames };   // Metro's "my games" card view
+                            MetroGames,     // Metro's "my games" card view
+                            Discord };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower,
                             ConfirmRetroArch, ConfirmDelete,
                             CrashReport };   // a notice: one OK, no choice
@@ -411,6 +415,48 @@ namespace sl::menu::ui {
         std::atomic<bool> m_ping_done{false};
         u64    m_ping_tick    = 0;
         bool   m_online_count = true;     // setting (persisted)
+        // Nextendo's players online per title, refreshed every few minutes.
+        static void PlayersTrampoline(void *self);
+        void   PollPlayers();
+        void   DrawPlayersPill();
+        Thread m_players_thread{};
+        bool   m_players_running = false;
+        std::atomic<bool> m_players_done{false};
+        u64    m_players_tick = 0;
+        bool   m_nextendo_players = false; // setting (persisted): contacts nextendo.network, so opt-in
+        bool   m_discord_alerts = true;    // setting (persisted): connect at start for DM/mention banners
+        bool   m_discord_rpc = true;       // setting (persisted): "Playing <game>" on Discord
+        bool   m_fm_pick = false;          // Files is choosing a file to send on Discord
+        std::map<u64, int> m_players, m_players_result;
+#ifdef SL_QEXT
+        struct DiscordUi *m_dc = nullptr;  // Menu_Discord.cpp
+        void   OpenDiscord();
+        Action OnButtonDiscord(Btn b);
+        void   DrawDiscord();
+        void   PollDiscord();
+        void   DiscordExit();
+        void   DiscordKeyboardDone(bool ok);
+        void   DiscordBuildLists();
+        void   DiscordBuildChat();
+        void   DrawDiscordQr(const std::string &text, int x, int y, int size);
+        SDL_Texture *DiscordPicture(const std::string &url, int w = 40, int h = 40, const std::string &alt = "");
+        // Draws it (the current frame, for a GIF); false while it loads.
+        bool   DiscordDraw(const std::string &url, int x, int y, int w, int h, Uint8 a = 255,
+                           const std::string &alt = "");
+        void   DiscordAttach(const std::string &path);   // a file picked in Files
+        void   OnTouchDiscord(int phase, int x, int y);
+        // Text with its emoji drawn as pictures, cut to maxw with "..." (0: no cut);
+        // returns the width drawn. Everything Discord names goes through it.
+        int    DiscordText(gfx::FontSize fs, int x, int y, SDL_Color c, const std::string &text, int maxw = 0);
+        void   DrawDiscordBanner();                      // a DM or mention, over any screen
+        bool   m_dc_tried = false;                       // the background connect for alerts
+        u64    m_rpc_id = 0;                             // the game in the Rich Presence
+        void   DiscordSetGame(u64 app_id);
+    public:
+        void   DiscordSuspend(u64 game = 0);   // a game (its id) or applet is taking over
+        void   DiscordResume();                // the menu is on screen again
+    private:
+#endif
         bool   m_usb_mtp = true;          // setting (persisted): USB file transfer (MTP)
         Action OnButtonThemes(Btn b);
         Action OnButtonEditor(Btn b);
@@ -962,6 +1008,7 @@ namespace sl::menu::ui {
         bool              m_pick_want_apply = false;
         int               m_pick_choice  = 0;
         u64               m_pick_id      = 0;
+        bool              m_pick_icon    = false;  // choosing the square icon, not the cover
         std::string       m_pick_name;
         std::vector<std::string>   m_pick_urls;    // full size
         std::vector<std::string>   m_pick_thumbs;  // preview
@@ -969,7 +1016,11 @@ namespace sl::menu::ui {
         int   m_pick_cursor = 0;
         float m_pick_scroll = 0.0f;               // animated row offset
 
-        void   EnterCoverPicker();
+        void   EnterCoverPicker(bool icon = false);
+        // Icons chosen in the picker live in slaunch/icons_custom/<id>.jpg (the
+        // extracted ones are rewritten at boot), with the source URL beside
+        // them in <id>.url for the Discord presence.
+        std::unordered_set<u64> m_custom_icons;
         void   LeaveCoverPicker();
         void   PollCoverPicker();
         void   StartPickApply();   // spawn the worker that downloads the choice

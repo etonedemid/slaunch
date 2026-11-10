@@ -49,7 +49,12 @@ namespace sl::menu::net {
     // hits of title / productImage / platform): the productImage path of the
     // entry that really is this game, the Switch release before a Switch 2
     // one, or "" when none is. Same matching rule as SteamAppFor.
-    std::string NintendoArtFor(const std::string &search_json, const std::string &title);
+    std::string NintendoArtFor(const std::string &search_json, const std::string &title,
+                               const char *field = "productImage");
+
+    // The game's square eShop icon as a w x w JPEG URL, or "" when the store
+    // has no such game. Blocking: worker threads only.
+    std::string EshopIcon(const std::string &title, int w = 256);
 
     // The same rule on its own: is `candidate` the game called `title`?
     bool TitlesMatch(const std::string &candidate, const std::string &title);

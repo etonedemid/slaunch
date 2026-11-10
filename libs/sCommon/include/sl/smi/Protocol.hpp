@@ -132,6 +132,8 @@ namespace sl::smi {
         Kb_NewFolder,     // file manager: name a new folder
         Kb_CollNew,       // name a new collection
         Kb_CollRename,    // rename a collection
+        Kb_DiscordMessage,
+        Kb_DiscordToken,
     };
     constexpr const char *KbRequestPath = "sdmc:/slaunch/config/kb_req.txt";
     constexpr const char *KbResultPath  = "sdmc:/slaunch/config/kb_result.txt";

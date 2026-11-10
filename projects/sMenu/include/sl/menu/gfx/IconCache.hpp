@@ -35,6 +35,9 @@ namespace sl::menu::gfx {
         // they reload at the new size.
         void SetScale(int px);
 
+        // Forget one key, so its next Get() reloads the file.
+        void Drop(u64 key);
+
         // Decoding budget for the current frame.
         //
         // Get() decodes synchronously, and the layouts call it once per visible

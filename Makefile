@@ -68,7 +68,7 @@ assets: hbloader
 	@# Black/white icons for the system menu entries (List + Grid modes).
 	@mkdir -p SdOut/slaunch/icons
 	@cp -f assets/theming.png assets/controllers.png assets/album.png assets/user.png \
-	       assets/browser.png assets/mii.png assets/settings.png assets/power.png \
+	       assets/browser.png assets/discord.png assets/mii.png assets/settings.png assets/power.png \
 	       assets/homebrewmenu.png assets/random.png assets/games.png \
 	       assets/filemanager.png assets/fm_folder.png \
 	       SdOut/slaunch/icons/ 2>/dev/null || true
@@ -90,6 +90,9 @@ assets: hbloader
 	@cp -f assets/hbloader/main assets/hbloader/main.npdm SdOut/slaunch/bin/hbloader/ 2>/dev/null || true
 	@# The qext build's stand-in for atmosphere/hbl.nsp during an applet launch.
 	@cp -f projects/hbloader/hbl.nsp SdOut/slaunch/bin/hbloader/
+	@# Roots for Discord, for hosts the console's own store refuses.
+	@mkdir -p SdOut/slaunch/certs
+	@cp -f assets/certs/*.pem SdOut/slaunch/certs/
 	@# Application variant: same loader, npdm with application_type=1 so the donor
 	@# process is a real application (am grants an application proxy -> full RAM).
 	@cp -f assets/hbloader/main SdOut/slaunch/bin/hbloader_app/main 2>/dev/null || true

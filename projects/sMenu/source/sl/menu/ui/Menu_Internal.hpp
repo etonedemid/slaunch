@@ -37,7 +37,7 @@ namespace sl::menu::ui {
            TH_Language, TH_Music,
            TH_Widgets, TH_Entries,
            TH_Sleep, TH_SleepTv, TH_AskUser, TH_AutoUser,
-           TH_Welcome, TH_Updates, TH_Online, TH_Usb,
+           TH_Welcome, TH_Updates, TH_Online, TH_Players, TH_DiscordAlerts, TH_DiscordRpc, TH_Usb,
            TH_About, TH_Back, TH_Count };
 
     enum { EF_Background = 0, EF_Wallpaper, EF_WallpaperDim, EF_WallpaperBlur,
@@ -116,6 +116,9 @@ namespace sl::menu::ui {
         { ItemKind::Power,        "Power"         },
         { ItemKind::HomebrewMenu, "Homebrew menu" },
         { ItemKind::FileManager,  "Files"         },
+#ifdef SL_QEXT
+        { ItemKind::Discord,      "Discord"       },
+#endif
     };
     inline constexpr int kSysEntryN = (int)(sizeof(kSysEntries) / sizeof(kSysEntries[0]));
 
@@ -517,7 +520,7 @@ namespace sl::menu::ui {
 
     // ---- X "Options" overlay ------------------------------------------------
     enum { OptFav = 0, OptRename, OptMove, OptUnpinHb, OptSetDonor,
-                       OptSort, OptCloseGame, OptPickCover, OptDismiss,
+                       OptSort, OptCloseGame, OptPickCover, OptPickIcon, OptResetIcon, OptDismiss,
                        OptTileSize, OptTileColor, OptTileReset,
                        OptAddWidget, OptAddWidgetMenu, OptSubBack,
                        OptRemoveWidget, OptCollMenu, OptCollToggle,
@@ -683,6 +686,16 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.1.0" },
+            { false, "Discord: sign in with a QR code or token, read and write your DMs and server channels" },
+            { false, "Discord chats show emoji, pictures, animated GIFs and replies, and load older messages as you scroll up" },
+            { false, "Send files and photos to Discord with a preview first, and zoom into pictures with L/R or a pinch" },
+            { false, "Discord works by touch, and its picker adds emoji to a message" },
+            { false, "Discord notifications for DMs and mentions while you are in the menu" },
+            { false, "Discord shows the game you are playing, with its eShop icon" },
+            { false, "Choose icon: pick a game's icon from the eShop or SteamGridDB" },
+            { false, "Green counts show how many people are playing a game online in Nextendo" },
+            { false, "Folder covers follow the order of the games inside them" },
             { true,  "v2.0.1" },
             { false, "The album, profile and Mii edit close the menu while they run, so they have the memory they need" },
             { false, "Choosing a cover offers to enter your SteamGridDB key when it is missing or rejected" },

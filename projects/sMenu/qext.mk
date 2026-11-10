@@ -24,8 +24,8 @@ ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC
 # No thread_local anywhere: the module loader sets up no TLS block, so a write
 # to one faults (it took the menu down in sol2's first state, on hardware).
 # SDL-dlink's headers first; the satellite libraries' from the stage prefix.
-FLAGS := -g -O2 -Wall -ffunction-sections -fdata-sections -fvisibility=default $(ARCH) \
-    -D__SWITCH__ -DSL_QEXT=1 -DSL_LIBNX_MASTER -DSL_VERSION=\"2.0.1\" -DSL_HAS_VIDEO=1 -DSL_HAS_NVTEGRA=1 \
+FLAGS := -idirafter ../../libs/discord -g -O2 -Wall -ffunction-sections -fdata-sections -fvisibility=default $(ARCH) \
+    -D__SWITCH__ -DSL_QEXT=1 -DSL_LIBNX_MASTER -DSL_VERSION=\"2.1.0\" -DSL_HAS_VIDEO=1 -DSL_HAS_NVTEGRA=1 \
     -D_longjmp=longjmp -D_setjmp=setjmp -DLUAI_MAXSTACK=1000000 -DLUA_32BITS -DLUAI_FUNC=extern \
     -I$(SDLDIR)/include -I$(SDL3_PREFIX)/include -I$(FFDIR)/include \
     -I$(LIBNX)/include -I$(PORTLIBS)/include -I$(SDLDIR)/extern/neko3d/include -I$(BUILD) \
@@ -38,6 +38,10 @@ CXXFLAGS := $(FLAGS) -std=gnu++20 -fno-rtti -fno-exceptions \
 HAZE_FLAGS := -std=gnu++23 -I$(ATMOSPHERE_DIR)/libraries/libvapours/include
 
 HAZE_SRCS := $(wildcard ../../libs/haze/source/*.cpp)
+# HomeNX's Discord client. It has try/catch; nothing in it is meant to throw across
+# the module's edge.
+DISCORD_SRCS := $(wildcard ../../libs/discord/*/*.cpp)
+DISCORD_FLAGS := -fexceptions -I../../libs/discord
 
 # MessageHandler reads the daemon's queue; Crash overrides libnx's exception
 # handler, which only works linked into the process image (the loader's).
@@ -46,8 +50,9 @@ CPPS := $(filter-out source/sl/menu/smi/MessageHandler.cpp source/sl/menu/dbg/Cr
         ../../libs/sCommon/source/sl/os/Applications.cpp \
         ../sSystem/source/sl/sys/pwr/Power.cpp \
         ../sSystem/source/sl/sys/hb/LaunchQueue.cpp \
-        $(HAZE_SRCS)
+        $(HAZE_SRCS) $(DISCORD_SRCS)
 CS   := $(filter-out %/lua.c %/luac.c,$(wildcard ../../libs/Lua/*.c)) \
+        ../../libs/discord/third_party/yyjson.c \
         $(QEXT_DIR)/menu/stub/stub.c
 OBJS := $(patsubst %,$(BUILD)/o/%.o,$(subst ../,up/,$(subst $(QEXT_DIR)/,qext/,$(CPPS) $(CS)))) \
         $(BUILD)/o/crt0.o
@@ -72,7 +77,8 @@ $(BUILD)/o/$(subst ../,up/,$(subst $(QEXT_DIR)/,qext/,$(1))).o: $(1)
 	@echo $(notdir $(1))
 	@$(2) $(3) -MMD -MP -c $$< -o $$@
 endef
-$(foreach f,$(filter-out $(HAZE_SRCS) source/sl/menu/usb/Mtp.cpp,$(CPPS)),$(eval $(call compile_rule,$(f),$(A64)g++,$(CXXFLAGS))))
+$(foreach f,$(filter-out $(HAZE_SRCS) $(DISCORD_SRCS) source/sl/menu/usb/Mtp.cpp,$(CPPS)),$(eval $(call compile_rule,$(f),$(A64)g++,$(CXXFLAGS))))
+$(foreach f,$(DISCORD_SRCS),$(eval $(call compile_rule,$(f),$(A64)g++,$(CXXFLAGS) $(DISCORD_FLAGS))))
 $(foreach f,$(HAZE_SRCS) source/sl/menu/usb/Mtp.cpp,$(eval $(call compile_rule,$(f),$(A64)g++,$(CXXFLAGS) $(HAZE_FLAGS))))
 $(foreach f,$(CS),$(eval $(call compile_rule,$(f),$(A64)gcc,$(CFLAGS))))
 

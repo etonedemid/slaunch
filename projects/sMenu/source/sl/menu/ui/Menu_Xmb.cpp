@@ -71,7 +71,8 @@ namespace sl::menu::ui {
             case ItemKind::MusicPlayer:  return XmbCat::Media;
             case ItemKind::UserPage:
             case ItemKind::MiiEdit:      return XmbCat::User;
-            case ItemKind::WebBrowser:   return XmbCat::Network;
+            case ItemKind::WebBrowser:
+            case ItemKind::Discord:      return XmbCat::Network;
             default:                     return XmbCat::Settings;   // Theming, Controllers, Settings, Power...
         }
     }

@@ -100,6 +100,7 @@ namespace sl::menu::ui {
     }
     void Menu::OpenFileManager() {
         m_screen = Screen::Files;
+        m_fm_pick = false;
         if (m_fm_path.empty()) m_fm_path = "sdmc:/";
         m_fm_cursor = 0;
         m_fm_scroll = 0.0f;
@@ -342,6 +343,17 @@ namespace sl::menu::ui {
             return Action::None;
         }
         const int n = (int)m_fm_list.size();
+#ifdef SL_QEXT
+        if (m_fm_pick) {                                 // choosing a file for Discord
+            if (b == Btn::X) return Action::None;
+            if (b == Btn::B && m_fm_path == "sdmc:/") { m_fm_pick = false; m_screen = Screen::Discord; return Action::None; }
+            if (b == Btn::A && n > 0 && !m_fm_list[m_fm_cursor].dir) {
+                m_fm_pick = false;
+                DiscordAttach(Join(m_fm_path, m_fm_list[m_fm_cursor].name));
+                return Action::None;
+            }
+        }
+#endif
         if (b == Btn::B) {
             if (m_fm_path == "sdmc:/") { m_screen = BackTarget(); return Action::None; }
             FmGo(Parent(m_fm_path), BaseName(m_fm_path));
@@ -394,7 +406,7 @@ namespace sl::menu::ui {
             return;
         }
 
-        DrawTopBar("Files");
+        DrawTopBar(m_fm_pick ? "Send a file" : "Files");
         // Where we are, trimmed from the left so the end of a long path shows.
         {
             std::string shown = m_fm_path;
@@ -499,6 +511,8 @@ namespace sl::menu::ui {
 
         if (m_fm_menu_open)
             DrawHint({ {{"up","down"}, "Choose"}, {{"a"}, "Confirm"}, {{"b"}, "Cancel"} });
+        else if (m_fm_pick)
+            DrawStatusHint({ {{"a"}, "Choose"}, {{"b"}, "Back"}, {{"l","r"}, "Page"} });
         else
             DrawStatusHint({ {{"a"}, "Open"}, {{"b"}, "Back"}, {{"x"}, "Actions"},
                              {{"l","r"}, "Page"} });
