@@ -693,8 +693,11 @@ std::string stripMarkdown(const std::string& s) {
     return out;
 }
 
-// Tenor and Giphy "GIFs" are MP4s; both also serve a real GIF.
+// Tenor and Giphy "GIFs" are MP4s; both also serve a real GIF. Klipy, what
+// Discord's GIF picker uses now, sends an animated WebP as the thumbnail.
 std::string gifOf(const Embed& e) {
+    if (e.thumbOrig.rfind("https://static.klipy.com/", 0) == 0 && Str::EndsWith(Str::Lower(e.thumbOrig), ".webp"))
+        return e.thumbOrig;
     const std::string& v = !e.videoUrl.empty() ? e.videoUrl : e.thumbOrig;
     // The small GIF each site keeps (~200 px, under 1 MB): the full one can be
     // 10 MB, past what the menu fetches, and the chat draws it small anyway.

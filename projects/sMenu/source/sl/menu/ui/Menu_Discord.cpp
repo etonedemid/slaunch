@@ -414,22 +414,93 @@ namespace sl::menu::ui {
         }
     }
 
+    // A notification in the style of the layout it shows over: Metro gets the
+    // Xbox 360 achievement toast, XMB the PS3's pop-up, the rest a card in the
+    // theme's own colours. kBanSecs long, timed from ban_until.
     void Menu::DrawDiscordBanner() {
         if (!m_dc || !m_dc->ban_until) return;
         DiscordUi &d = *m_dc;
         const u64 now = armGetSystemTick(), freq = armGetSystemTickFreq();
         if (now >= d.ban_until) { d.ban_until = 0; return; }
-        const float left = (float)(d.ban_until - now) / (float)freq;   // seconds
-        const Uint8 a = (Uint8)(255 * std::min(1.0f, left / 0.4f));
+        constexpr float kBanSecs = 5.0f;
+        const float left = (float)(d.ban_until - now) / (float)freq;
+        const float e = std::max(0.0f, kBanSecs - left);              // since it appeared
+        auto ease = [](float v) { v = std::clamp(v, 0.0f, 1.0f); return 1.0f - (1.0f - v) * (1.0f - v) * (1.0f - v); };
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
         const Theme &t = m_theme.Current();
-        const int bw = 460, bh = 78, x = gfx::Gfx::Width - bw - 24, y = 20;
-        m_gfx->FillRect(x, y, bw, bh, WithAlpha(t.bg_bottom, (Uint8)(a * 245 / 255)));
-        m_gfx->FillRect(x, y, 5, bh, WithAlpha(SDL_Color{ 88, 101, 242, 255 }, a));   // Discord blurple
-        int tx = x + 20;
-        if (DiscordDraw(d.ban_avatar, x + 18, y + 15, 48, 48, a)) tx = x + 80;
-        const int tw = x + bw - tx - 16;
-        DiscordText(FontSize::Small, tx, y + 10, WithAlpha(t.fg, a), d.ban_title, tw);
-        DiscordText(FontSize::Small, tx, y + 42, WithAlpha(t.dim, a), d.ban_text, tw);
+        auto card = [&](SDL_Texture *tex, float x, float y, float w, float h, float r, float sh,
+                        SDL_Color fill, Uint8 a) {
+            gfx::Gfx::CardStyle cs;
+            cs.radius = r; cs.shadow = sh; cs.fill = fill;
+            if (!m_gfx->Card(tex, x, y, w, h, cs, a)) {
+                if (fill.a) m_gfx->FillRect((int)x, (int)y, (int)w, (int)h, WithAlpha(fill, (Uint8)(fill.a * a / 255)));
+                if (tex) m_gfx->DrawImage(tex, (int)x, (int)y, (int)w, (int)h, a);
+            }
+        };
+        // The sender's picture, round when the card shader can do it.
+        auto avatar = [&](float x, float y, float sz, Uint8 a) {
+            SDL_Texture *av = DiscordPicture(d.ban_avatar, (int)sz, (int)sz);
+            if (av) card(av, x, y, sz, sz, sz / 2, 0.0f, SDL_Color{ 0, 0, 0, 0 }, a);
+            return av != nullptr;
+        };
+
+        if (m_ui_mode == UiMode::Metro) {
+            // The achievement: a disc pops up, the dark pill unrolls from it,
+            // then the words; all of it backwards on the way out.
+            const float in = std::min(e, left);                         // symmetric out
+            const float pop = ease(in / 0.25f), grow = ease((in - 0.25f) / 0.35f);
+            const float txt = std::clamp((in - 0.55f) / 0.2f, 0.0f, 1.0f);
+            const float h = 84.0f, full = 600.0f;
+            const float pw = h + (full - h) * grow;
+            const float px = (W - pw) / 2.0f, py = H - 150.0f;
+            if (grow > 0.0f)
+                card(nullptr, px, py, pw, h, h / 2, 16.0f, SDL_Color{ 38, 38, 40, 240 }, 255);
+            const float ds = h * (0.6f + 0.4f * pop), dx = px + (h - ds) / 2, dy = py + (h - ds) / 2;
+            if (pop > 0.0f) {
+                card(nullptr, dx, dy, ds, ds, ds / 2, grow > 0.0f ? 0.0f : 12.0f,
+                     WithAlpha(m_mt_accent, 255), (Uint8)(255 * pop));
+                const float in_s = ds - 12.0f;
+                if (!avatar(dx + 6, dy + 6, in_s, (Uint8)(255 * pop)))
+                    if (SDL_Texture *ic = SystemIcon(ItemKind::Discord))
+                        m_gfx->DrawImageTinted(ic, (int)(dx + ds * 0.25f), (int)(dy + ds * 0.25f), (int)(ds * 0.5f),
+                                               (int)(ds * 0.5f), SDL_Color{ 255, 255, 255, 255 }, (Uint8)(255 * pop));
+            }
+            if (txt > 0.0f) {
+                const Uint8 ta = (Uint8)(255 * txt);
+                const int tx = (int)(px + h + 14), tw = (int)(pw - h - 40);
+                DiscordText(FontSize::Small, tx, (int)py + 12, SDL_Color{ 255, 255, 255, ta }, d.ban_title, tw);
+                DiscordText(FontSize::Small, tx, (int)py + 46, SDL_Color{ 190, 190, 190, ta }, d.ban_text, tw);
+            }
+            return;
+        }
+
+        const Uint8 a = (Uint8)(255 * std::min(1.0f, left / 0.4f));
+        if (m_ui_mode == UiMode::XMB) {
+            // The PS3's: a small smoked box at the top right that slides in.
+            const int bw = 420, bh = 70;
+            const float x = W - bw - 30 + (1.0f - ease(e / 0.3f)) * (bw + 40), y = 40;
+            card(nullptr, x, y, bw, bh, 6.0f, 10.0f, SDL_Color{ 20, 20, 24, 215 }, a);
+            m_gfx->FillRect((int)x + 6, (int)y, bw - 12, 1, SDL_Color{ 255, 255, 255, (Uint8)(60 * a / 255) });
+            int tx = (int)x + 16;
+            if (DiscordDraw(d.ban_avatar, (int)x + 12, (int)y + 11, 48, 48, a)) tx = (int)x + 72;
+            const int tw = (int)x + bw - tx - 14;
+            DiscordText(FontSize::Small, tx, (int)y + 8, WithAlpha(SDL_Color{ 255, 255, 255, 255 }, a), d.ban_title, tw);
+            DiscordText(FontSize::Small, tx, (int)y + 38, WithAlpha(SDL_Color{ 180, 180, 180, 255 }, a), d.ban_text, tw);
+            return;
+        }
+
+        // Every other layout: a card in the theme's colours, dropping in from the top.
+        const int bw = 480, bh = 82;
+        const float x = W - bw - 24, y = 20 - (1.0f - ease(e / 0.3f)) * (bh + 40);
+        const SDL_Color fill{ (Uint8)((t.bg_top.r + t.bg_bottom.r) / 2), (Uint8)((t.bg_top.g + t.bg_bottom.g) / 2),
+                             (Uint8)((t.bg_top.b + t.bg_bottom.b) / 2), 245 };
+        card(nullptr, x, y, bw, bh, 14.0f, 18.0f, fill, a);
+        card(nullptr, x + 8, y + 14, 5, bh - 28, 2.5f, 0.0f, t.accent, a);
+        int tx = (int)x + 26;
+        if (avatar(x + 24, y + 16, 50, a)) tx = (int)x + 88;
+        const int tw = (int)x + bw - tx - 18;
+        DiscordText(FontSize::Small, tx, (int)y + 12, WithAlpha(t.title, a), d.ban_title, tw);
+        DiscordText(FontSize::Small, tx, (int)y + 44, WithAlpha(t.dim, a), d.ban_text, tw);
     }
 
     void Menu::DiscordAttach(const std::string &path) {

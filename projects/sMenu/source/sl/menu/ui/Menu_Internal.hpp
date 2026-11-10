@@ -686,6 +686,9 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.1.2" },
+            { false, "Discord notifications match the layout: an achievement toast on Metro, a PS3-style pop-up on XMB, a card in the theme's colours elsewhere" },
+            { false, "GIFs from Discord's GIF picker animate again" },
             { true,  "v2.1.1" },
             { false, "Metro's social panel has a Discord tile" },
             { true,  "v2.1.0" },
