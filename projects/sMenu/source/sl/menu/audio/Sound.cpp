@@ -71,8 +71,14 @@ namespace sl::menu::audio {
 
     void Sound::Play(Sfx s) {
         if (!m_ok) return;
-        const int i = (int)s;
-        if (i < 0 || i >= (int)Sfx::Count || !m_sfx[i]) return;
+        int i = (int)s;
+        if (i < 0 || i >= (int)Sfx::Count) return;
+        // Neither "yes" cue ships: both come from the card, and a sound set often
+        // brings only one. A press of A is answered by whichever is there, rather
+        // than launching a game with a sound and opening a screen in silence.
+        if (!m_sfx[i] && s == Sfx::Click)   i = (int)Sfx::Confirm;
+        if (!m_sfx[i] && s == Sfx::Confirm) i = (int)Sfx::Click;
+        if (!m_sfx[i]) return;
         MIX_Track *t = nullptr;
         if (s == Sfx::Move) t = m_move_voice;
         else for (MIX_Track *v : m_voice)
