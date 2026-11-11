@@ -487,11 +487,23 @@ namespace sl::menu::ui {
         }
 
         const int pt = t.h > kMtRH + 10 && t.w > 300 ? 21 : 19;
-        const std::string cap = MFit(MF_Semi, pt, t.caption, w - 20);
+        const bool running = it && it->kind == ItemKind::Game && m_suspended && it->app_id == m_suspended;
+        // Who is online in a game, at the right of its caption as a live tile
+        // counted things, clear of the running badge.
+        int cw = 0;
+        if (const int on = it ? OnlineCount(*it) : -1; on >= 0) {
+            char n[12];
+            snprintf(n, sizeof(n), "%d", on);
+            const int nw = MWidth(MF_Semi, pt, n), nx = x + w - 10 - (running ? 26 : 0) - nw;
+            MText(MF_Semi, pt, nx, y + h - (pt + 11), Fade(kMtWhite, a), n);
+            OnlineDot(nx - 15, y + h - (pt + 11) + pt * 6 / 10 - 5, 10, on, a);
+            cw = nw + 25 + (running ? 26 : 0);
+        }
+        const std::string cap = MFit(MF_Semi, pt, t.caption, w - 20 - cw);
         MText(MF_Semi, pt, x + 10, y + h - (pt + 11),
               Fade(dark_caption ? kMtInk : it ? kMtWhite : m_mt_on, a), cap.c_str());
 
-        if (it && it->kind == ItemKind::Game && m_suspended && it->app_id == m_suspended) {
+        if (running) {
             // Running: the disc badge the dashboard put on the game in the tray.
             const int bx = x + w - 22, by = y + h - 19;
             m_gfx->FillRect(bx - 7, by - 7, 14, 14, Fade(kMtWhite, a));
@@ -1408,6 +1420,13 @@ namespace sl::menu::ui {
                 sub = play::FormatPlaytime(pi->seconds);
             else sub = T("Never played");
             MText(MF_Semi, 18, ix, ay + ah + 36, SDL_Color{ 90, 90, 94, 255 }, sub.c_str());
+            if (const int on = OnlineCount(it); on >= 0) {
+                char n[32];
+                snprintf(n, sizeof(n), "%d %s", on, T("online"));
+                const int ox = ix + MWidth(MF_Semi, 18, sub.c_str()) + MWidth(MF_Semi, 18, "   ");
+                OnlineDot(ox, ay + ah + 36 + 8, 9, on, 255);
+                MText(MF_Semi, 18, ox + 15, ay + ah + 36, SDL_Color{ 90, 90, 94, 255 }, n);
+            }
 
             // A little pad in the corner, as each card had.
             const int gx = x + w - 38, gy = y + h - 28;

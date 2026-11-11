@@ -427,11 +427,8 @@ namespace sl::menu::ui {
             if (!info.empty()) info += "   ";
             info += T("Update available");
         }
-        if (!info.empty())
-            m_gfx->Text(FontSize::Small, textX,
-                        selY + m_gfx->LineHeight(FontSize::Normal) / 2 + 6,
-                        WithAlpha(t.dim, listA),
-                        Ellipsize(info, W - 120 - textX, FontSize::Small).c_str());
+        TextOnline(FontSize::Small, textX, selY + m_gfx->LineHeight(FontSize::Normal) / 2 + 6,
+                   WithAlpha(t.dim, listA), Ellipsize(info, W - 120 - textX, FontSize::Small), sel);
 
         // Position within the category, bottom right, as RetroArch places its
         // entry index.

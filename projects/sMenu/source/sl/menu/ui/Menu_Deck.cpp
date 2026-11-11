@@ -303,7 +303,7 @@ namespace sl::menu::ui {
             const int ty = kDeckRowY + kDeckRowH + 50;
             m_gfx->FillTriangle(kDeckRowX + 1, ty, kDeckRowX + 1, ty + 14,
                                 kDeckRowX + 12, ty + 7, t.accent);
-            m_gfx->Text(FontSize::Small, kDeckRowX + 22, ty - 1, t.dim, sub.c_str());
+            TextOnline(FontSize::Small, kDeckRowX + 22, ty - 1, t.dim, sub, sel);
         }
 
         // ---- tabs ------------------------------------------------------------
@@ -653,11 +653,8 @@ namespace sl::menu::ui {
             const std::string nm = Ellipsize(m_items[list[m_deck_lib_cursor]].name,
                                              gfx::Gfx::Width - 240, FontSize::Normal);
             m_gfx->Text(FontSize::Normal, kDeckLibX, 116, t.fg, nm.c_str());
-            if (m_show_counter) {
-                const int pw = m_gfx->TextWidth(FontSize::Small, pos);
-                m_gfx->Text(FontSize::Small, gfx::Gfx::Width - kDeckLibX - pw, 120,
-                            t.dim, pos);
-            }
+            TextOnline(FontSize::Small, gfx::Gfx::Width - kDeckLibX, 120, t.dim,
+                       m_show_counter ? pos : "", m_items[list[m_deck_lib_cursor]], 1);
         }
 
         // Keep the selected row on screen, then ease toward it.

@@ -1,7 +1,9 @@
 #include <sl/menu/ui/Menu.hpp>
 #include <sl/menu/ui/Locale.hpp>
 #include <SDL3_image/SDL_image.h>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <ctime>
@@ -10,7 +12,15 @@
 #include <dirent.h>
 #include <map>
 #include <vector>
+#include <sl/menu/net/Http.hpp>
+#include <sl/menu/net/ContentFilter.hpp>
 #include "Menu_Internal.hpp"
+// The JSON reader comes with the Discord client, so the game info is built
+// where that is (the console's qext build and the simulator), not elsewhere.
+#if __has_include("third_party/yyjson.h")
+#include "third_party/yyjson.h"
+#define SL_GAME_INFO 1
+#endif
 
 // The two Xbox 360 dashboards that came before Metro, drawn from scratch.
 //
@@ -390,6 +400,7 @@ namespace sl::menu::ui {
         SDL_Texture *spine = nullptr, *spine_r = nullptr;   // Blades: one blade's tile, left / right stack
         SDL_Texture *light = nullptr;                       // Blades: the lighting over an open blade
         SDL_Texture *light_w = nullptr;                     // ...and over one that fills the screen (no bands)
+        SDL_Texture *info = nullptr, *star = nullptr, *star_off = nullptr;   // Blades: a game's details
         SDL_Texture *cat_face[6] = {}, *cat_spine[6] = {};  // Blades: one category's, drawn as is
         SDL_Texture *panel = nullptr, *highlight = nullptr, *card = nullptr, *detail = nullptr;
         SDL_Texture *frame = nullptr, *front = nullptr;     // NXE: over every panel / the front one
@@ -448,6 +459,9 @@ namespace sl::menu::ui {
             if (!theirs) { s.spine = own("spine.png"); s.spine_r = own("spine_right.png"); }
             if (!s.light) s.light = own("light.png");
             if (!s.light_w) s.light_w = own("light_wide.png");
+            if (!s.info) s.info = own("info.png");
+            if (!s.star) s.star = own("star.png");
+            if (!s.star_off) s.star_off = own("star_off.png");
         };
         if (dir.empty()) { builtin(); return s; }
         auto img = [&](const std::string &base) -> SDL_Texture * {
@@ -535,7 +549,7 @@ namespace sl::menu::ui {
         if (!m_xskin) return;
         XboxSkin &s = *m_xskin;
         std::vector<SDL_Texture *> all = { s.bg, s.face, s.spine, s.spine_r, s.light, s.light_w, s.panel, s.highlight, s.card,
-                                           s.detail, s.frame, s.front };
+                                           s.detail, s.frame, s.front, s.info, s.star, s.star_off };
         all.insert(all.end(), std::begin(s.cat_face), std::end(s.cat_face));
         all.insert(all.end(), std::begin(s.cat_spine), std::end(s.cat_spine));
         all.insert(all.end(), std::begin(s.btn), std::end(s.btn));
@@ -604,6 +618,261 @@ namespace sl::menu::ui {
             info += T("Update available");
         }
         return info;
+    }
+
+    namespace {
+        std::string InfoPath(u64 id) {
+            char p[96];
+            snprintf(p, sizeof(p), "sdmc:/slaunch/covers/%016llX_info.txt", (unsigned long long)id);
+            return p;
+        }
+#ifdef SL_GAME_INFO
+        std::string UrlQuery(const std::string &s) {
+            std::string q;
+            for (unsigned char c : s) {
+                if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
+                else { char b[4]; snprintf(b, sizeof(b), "%%%02X", c); q += b; }
+            }
+            return q;
+        }
+        const char *JStr(yyjson_val *o, const char *k) { const char *s = yyjson_get_str(yyjson_obj_get(o, k)); return s ? s : ""; }
+        yyjson_val *Value(yyjson_val *claim) {
+            return yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(claim, "mainsnak"), "datavalue"), "value");
+        }
+        // A Wikidata claim's qualifier `prop`: the item it names, or "".
+        const char *Qual(yyjson_val *claim, const char *prop) {
+            yyjson_val *q = yyjson_arr_get_first(yyjson_obj_get(yyjson_obj_get(claim, "qualifiers"), prop));
+            return JStr(yyjson_obj_get(yyjson_obj_get(q, "datavalue"), "value"), "id");
+        }
+        // The items a property names, at most `max`.
+        std::vector<std::string> Items(yyjson_val *claims, const char *prop, size_t max) {
+            std::vector<std::string> out;
+            yyjson_val *c;
+            size_t i, n;
+            yyjson_arr_foreach(yyjson_obj_get(claims, prop), i, n, c) {
+                const char *id = JStr(Value(c), "id");
+                if (*id && out.size() < max) out.push_back(id);
+            }
+            return out;
+        }
+        // "single-player video game" -> "Single-player", "racing video game" -> "Racing".
+        std::string Tidy(std::string s) {
+            for (const char *suf : { " video game", " game", " mode" })
+                if (s.size() > strlen(suf) && s.compare(s.size() - strlen(suf), strlen(suf), suf) == 0)
+                    s.resize(s.size() - strlen(suf));
+            if (!s.empty()) s[0] = (char)toupper((unsigned char)s[0]);
+            return s;
+        }
+#endif
+    }
+
+    // Worker. A game the store sells gets its genre, maker, date, players and
+    // ESRB rating from the store's own search; Wikidata fills what the store
+    // has not - all of it for the forwarder of a port of a PC or Xbox game -
+    // and gives the critics' score. Every match must really be this game
+    // (net::TitlesMatch), so an unknown title shows nothing rather than a namesake.
+    void Menu::InfoTrampoline(void *self) {
+        Menu *m = static_cast<Menu *>(self);
+        GameInfo &gi = m->m_info_result;
+        gi = GameInfo{};
+        m->m_info_ok = false;
+        const std::string path = InfoPath(m->m_info_id);
+        if (FILE *f = fopen(path.c_str(), "r")) {      // fetched on an earlier run
+            char ln[512];
+            while (fgets(ln, sizeof(ln), f)) {
+                std::string s(ln);
+                while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+                const size_t eq = s.find('=');
+                if (eq == std::string::npos) continue;
+                const std::string k = s.substr(0, eq), v = s.substr(eq + 1);
+                if (k == "genre") gi.genre = v;
+                else if (k == "maker") gi.maker = v;
+                else if (k == "players") gi.players = v;
+                else if (k == "esrb") gi.esrb = v;
+                else if (k == "source") gi.source = v;
+                else if (k == "year") gi.year = atoi(v.c_str());
+                else if (k == "score") gi.score = atoi(v.c_str());
+                else if (k == "recommend") gi.recommend = atoi(v.c_str());
+            }
+            fclose(f);
+            if (gi.score >= 0 && gi.source.empty()) gi.source = "OpenCritic";   // written before there was a choice
+            m->m_info_ok = true;
+            m->m_info_done.store(true, std::memory_order_release);
+            return;
+        }
+#ifdef SL_GAME_INFO
+        const std::string name = net::SearchName(m->m_info_name), q = UrlQuery(name);
+        std::string body;
+        // Only a title id in Nintendo's own range (0x01...) is a game the store
+        // can sell. A port's forwarder (0x05..., as the forwarder makers number
+        // them) only shares a name with one - "Moonlight", "Call of Duty" - so
+        // it goes to Wikidata alone. ponytail: a forwarder given an 0x01 id
+        // still asks the store; the store's records carry no title id to check.
+        const bool official = (m->m_info_id >> 56) == 0x01;
+        // Nothing is written unless the store answered: offline, it is tried again next run.
+        const bool online = !q.empty() && (!official || net::Get((
+            "https://u3b6gr4ua3-dsn.algolia.net/1/indexes/store_game_en_us"
+            "?x-algolia-application-id=U3B6GR4UA3"
+            "&x-algolia-api-key=a29c6927638bfd8cee23993e51e721c9"
+            "&hitsPerPage=8&attributesToRetrieve=title,platform,softwarePublisher,softwareDeveloper,"
+            "releaseDate,playerCount,contentRatingCode,gameGenreLabels"
+            "&attributesToHighlight=&attributesToSnippet=&query=" + q).c_str(), body, 10));
+        if (online) {
+            yyjson_doc *doc = yyjson_read(body.data(), body.size(), 0);
+            yyjson_val *best = nullptr, *hit;
+            size_t i, n;
+            yyjson_arr_foreach(yyjson_obj_get(yyjson_doc_get_root(doc), "hits"), i, n, hit) {
+                if (!net::TitlesMatch(JStr(hit, "title"), name)) continue;
+                if (!best || !strcmp(JStr(hit, "platform"), "Nintendo Switch")) best = hit;   // Switch before Switch 2
+                if (!strcmp(JStr(best, "platform"), "Nintendo Switch")) break;
+            }
+            if (best) {
+                yyjson_val *g;
+                size_t gi_i, gi_n;
+                yyjson_arr_foreach(yyjson_obj_get(best, "gameGenreLabels"), gi_i, gi_n, g) {
+                    if (gi_i >= 3) break;
+                    if (!gi.genre.empty()) gi.genre += ", ";
+                    gi.genre += yyjson_get_str(g) ? yyjson_get_str(g) : "";
+                }
+                gi.maker = *JStr(best, "softwarePublisher") ? JStr(best, "softwarePublisher") : JStr(best, "softwareDeveloper");
+                gi.year = atoi(JStr(best, "releaseDate"));                 // "2018-12-07T..."
+                gi.players = JStr(best, "playerCount");
+                gi.esrb = JStr(best, "contentRatingCode");
+                if (gi.esrb == "E10") gi.esrb += "+";
+            }
+            yyjson_doc_free(doc);
+
+            const std::string api = "https://www.wikidata.org/w/api.php?format=json";
+            // The game of that name (or alias: "Need for Speed Most Wanted" is
+            // one) whose description gives the store's year, else the first
+            // video game of that name - never the franchise, a series or a
+            // bundle. ponytail: ten hits - a game ranked below ten namesakes
+            // shows nothing from here.
+            std::string entity, fallback;
+            const std::string year = gi.year > 0 ? std::to_string(gi.year) : "";
+            // False once Wikidata fails to answer (it rate-limits with 429):
+            // what the store gave is shown, but not kept, so a later run asks again.
+            bool wd = net::Get((api + "&action=wbsearchentities&language=en&type=item&limit=10&search=" + q).c_str(), body, 10);
+            if (wd) {
+                doc = yyjson_read(body.data(), body.size(), 0);
+                yyjson_arr_foreach(yyjson_obj_get(yyjson_doc_get_root(doc), "search"), i, n, hit) {
+                    const char *desc = JStr(hit, "description");
+                    if (!strstr(desc, "game") || strstr(desc, "franchise") || strstr(desc, "series") ||
+                        strstr(desc, "bundle") || strstr(desc, "character")) continue;
+                    if (!net::TitlesMatch(JStr(hit, "label"), name) &&
+                        !net::TitlesMatch(JStr(yyjson_obj_get(hit, "match"), "text"), name)) continue;
+                    if (!year.empty() && strstr(desc, year.c_str())) { entity = JStr(hit, "id"); break; }
+                    if (fallback.empty() && strstr(desc, "video game")) fallback = JStr(hit, "id");
+                }
+                yyjson_doc_free(doc);
+            }
+            if (entity.empty()) entity = fallback;
+            if (!entity.empty() && !(wd = net::Get((api + "&action=wbgetentities&props=claims&ids=" + UrlQuery(entity)).c_str(), body, 15)))
+                entity.clear();
+            if (!entity.empty()) {
+                doc = yyjson_read(body.data(), body.size(), 0);
+                yyjson_val *claims = yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc), "entities"), entity.c_str()), "claims");
+                // The score: OpenCritic's top critics, else Metacritic's best
+                // platform, else Kritikanstvo's - the aggregators Wikidata keeps.
+                int oc = -1, mc = -1, kr = -1;
+                yyjson_val *c;
+                yyjson_arr_foreach(yyjson_obj_get(claims, "P444"), i, n, c) {
+                    const char *v = yyjson_get_str(Value(c)), *by = Qual(c, "P447");
+                    if (!v) continue;
+                    if (!strcmp(by, "Q21039459")) {                                    // OpenCritic
+                        if (!strcmp(Qual(c, "P459"), "Q114712322")) oc = atoi(v);           // top critic average, "89/100"
+                        else if (!strcmp(Qual(c, "P459"), "Q119576498")) gi.recommend = atoi(v); // critics recommend, "97%"
+                    } else if (strstr(v, "/100")) {
+                        if (!strcmp(by, "Q150248")) mc = std::max(mc, atoi(v));           // Metacritic
+                        else if (!strcmp(by, "Q117190337")) kr = std::max(kr, atoi(v));   // Kritikanstvo
+                    }
+                }
+                if (oc >= 0)      { gi.score = oc; gi.source = "OpenCritic"; }
+                else if (mc >= 0) { gi.score = mc; gi.source = "Metacritic"; }
+                else if (kr >= 0) { gi.score = kr; gi.source = "Kritikanstvo"; }
+                // The rest, where the store had nothing to say.
+                yyjson_arr_foreach(yyjson_obj_get(claims, "P577"), i, n, c) {     // first release
+                    const int y = atoi(JStr(Value(c), "time") + 1);                      // "+2003-10-29T..."
+                    if (y > 0 && (!best || !gi.year) && (gi.year == 0 || y < gi.year)) gi.year = y;
+                }
+                std::vector<std::string> genre, maker, mode, esrb;
+                if (gi.genre.empty())   genre = Items(claims, "P136", 3);
+                if (gi.maker.empty())   { maker = Items(claims, "P123", 1); if (maker.empty()) maker = Items(claims, "P178", 1); }
+                if (gi.players.empty()) mode = Items(claims, "P404", 3);
+                if (gi.esrb.empty())    esrb = Items(claims, "P852", 1);
+                yyjson_doc_free(doc);
+                std::string ids;
+                for (const auto *v : { &genre, &maker, &mode, &esrb })
+                    for (const std::string &id : *v) ids += (ids.empty() ? "" : "|") + id;
+                std::map<std::string, std::string> label;
+                if (!ids.empty() && !(wd = net::Get((api + "&action=wbgetentities&props=labels&languages=en%7Cmul&ids=" + UrlQuery(ids)).c_str(), body, 10)))
+                    ids.clear();
+                if (!ids.empty()) {
+                    doc = yyjson_read(body.data(), body.size(), 0);
+                    yyjson_val *k, *e;
+                    yyjson_obj_foreach(yyjson_obj_get(yyjson_doc_get_root(doc), "entities"), i, n, k, e) {
+                        yyjson_val *ls = yyjson_obj_get(e, "labels");
+                        const char *en = JStr(yyjson_obj_get(ls, "en"), "value");
+                        label[yyjson_get_str(k)] = *en ? en : JStr(yyjson_obj_get(ls, "mul"), "value");
+                    }
+                    yyjson_doc_free(doc);
+                }
+                auto join = [&](const std::vector<std::string> &v) {
+                    std::string s;
+                    for (const std::string &id : v)
+                        if (!label[id].empty()) s += (s.empty() ? "" : ", ") + Tidy(label[id]);
+                    return s;
+                };
+                if (gi.genre.empty())   gi.genre = join(genre);
+                if (gi.maker.empty())   gi.maker = maker.empty() ? "" : label[maker[0]];
+                if (gi.players.empty()) gi.players = join(mode);
+                if (gi.esrb.empty())    gi.esrb = esrb.empty() ? "" : label[esrb[0]];   // "Mature 17+"
+                // Not in the store, and Wikidata names no publisher: a namesake.
+                // A forwarder for a tool (Moonlight, Checkpoint) finds some
+                // obscure game of that name with a genre and nothing else;
+                // every real game a port is made of has a publisher.
+                if (!best && gi.maker.empty()) gi = GameInfo{};
+            }
+
+            mkdir("sdmc:/slaunch/covers", 0777);
+            if (FILE *f = wd ? fopen(path.c_str(), "w") : nullptr) {
+                fprintf(f, "genre=%s\nmaker=%s\nplayers=%s\nesrb=%s\nsource=%s\nyear=%d\nscore=%d\nrecommend=%d\n",
+                        gi.genre.c_str(), gi.maker.c_str(), gi.players.c_str(), gi.esrb.c_str(),
+                        gi.source.c_str(), gi.year, gi.score, gi.recommend);
+                fclose(f);
+            }
+            m->m_info_ok = true;
+        }
+#endif
+        m->m_info_done.store(true, std::memory_order_release);
+    }
+
+    const Menu::GameInfo *Menu::BladesInfo(const MenuItem &it) {
+        if (m_info_running && m_info_done.load(std::memory_order_acquire)) {
+            threadWaitForExit(&m_info_thread);
+            threadClose(&m_info_thread);
+            m_info_running = false;
+            if (m_info_ok) m_info[m_info_id] = std::move(m_info_result);
+        }
+        const u64 key = it.kind == ItemKind::Game ? it.app_id : 0;
+        if (!key) return nullptr;
+        const auto f = m_info.find(key);
+        if (f != m_info.end()) return &f->second;
+        // One request at a time, once per game per run, and only for the row
+        // the list has settled on - not every game scrolled past.
+        if (m_info_running || m_info_tried.count(key) ||
+            std::abs(m_xmb_item_scroll - (float)m_xmb_item) > 0.05f ||
+            net::ContentFilter::ShouldFilterGameByName(it.name))
+            return nullptr;
+        m_info_tried.insert(key);
+        m_info_id = key;
+        m_info_name = it.name;
+        m_info_done.store(false, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_info_thread, &Menu::InfoTrampoline, this, nullptr, 0x10000, 0x3B, -2))) {
+            threadStart(&m_info_thread);
+            m_info_running = true;
+        }
+        return nullptr;
     }
 
     // Shared by both: the bar's two eased positions. False: nothing to draw.
@@ -1021,6 +1290,92 @@ namespace sl::menu::ui {
     // ---------------------------------------------------------------------------
     // Blades: the main screen
     // ---------------------------------------------------------------------------
+    void Menu::DrawBladesGameInfo(const MenuItem &it, const GameInfo *gi, int x, int y, int w, int h, Uint8 A) {
+        const XboxSkin &sk = Skin();
+        const SDL_Color white = WithAlpha(kWhite, A), grey = WithAlpha(SDL_Color{ 165, 165, 165, 255 }, A);
+        if (sk.detail)    m_gfx->Draw9(sk.detail, x, y, w, h, sk.b_panel, kWhite, A);
+        else if (sk.info) m_gfx->DrawImage(sk.info, x, y, w, h, A);
+        else              XbCard((float)x, (float)y, (float)w, (float)h, 12.0f, 0.0f, SDL_Color{ 12, 12, 12, 235 }, A);
+
+        // The picture in a pale frame, the name beside it, the stars under that.
+        constexpr int pad = 16, bs = 112;
+        m_gfx->FillRect(x + pad - 2, y + pad - 2, bs + 4, bs + 4, WithAlpha(SDL_Color{ 255, 255, 255, 70 }, A));
+        DrawXmbIcon(it, x + pad + bs / 2, y + pad + bs / 2, bs, A);
+        const int tx = x + pad + bs + 14, tw = x + w - pad - tx;
+        int ty = y + pad - 2;
+        std::vector<std::string> name = WrapText(FontSize::Small, it.name, tw);
+        if (name.size() > 2) {   // two lines, the second cut short with "..."
+            for (size_t k = 2; k < name.size(); k++) name[1] += " " + name[k];
+            name.resize(2);
+        }
+        for (const std::string &ln : name) {
+            MText(XF_Semi, 22, tx, ty, white, MFit(XF_Semi, 22, ln, tw).c_str());
+            ty += 28;
+        }
+        ty += 6;
+        if (gi && gi->score >= 0) {
+            // Out of five in half stars, from the critics' average out of 100.
+            const int halves = std::clamp((int)lround(gi->score / 10.0), 0, 10);
+            constexpr int ss = 22, step = 25;
+            for (int k = 0; k < 5; k++) {
+                const int sx = tx + k * step;
+                if (sk.star_off) m_gfx->DrawImage(sk.star_off, sx, ty, ss, ss, A);
+                if (!sk.star || halves <= 2 * k) continue;
+                if (halves >= 2 * k + 2) m_gfx->DrawImage(sk.star, sx, ty, ss, ss, A);
+                else {
+                    float sw = 0, sh = 0;
+                    SDL_GetTextureSize(sk.star, &sw, &sh);
+                    m_gfx->DrawRegion(sk.star, SDL_FRect{ 0, 0, sw / 2, sh }, SDL_FRect{ (float)sx, (float)ty, ss / 2.0f, (float)ss }, kWhite, A);
+                }
+            }
+            char sc[48];
+            snprintf(sc, sizeof(sc), "%s %d", gi->source.empty() ? "OpenCritic" : gi->source.c_str(), gi->score);
+            MText(XF_Semi, 15, tx, ty + ss + 4, grey, sc);
+        } else if (!gi && m_info_running && m_info_id == it.app_id) {
+            MText(XF_Semi, 16, tx, ty, grey, T("Looking it up..."));
+        }
+
+        // Labelled rows under a rule, the way the dashboard listed a game's details.
+        const int ry = y + pad + bs + 14;
+        m_gfx->FillRect(x + pad, ry, w - 2 * pad, 1, WithAlpha(SDL_Color{ 255, 255, 255, 60 }, A));
+        if (gi) {
+            const std::string year = gi->year > 0 ? std::to_string(gi->year) : std::string();
+            // The ESRB code in words, as the box on the case says it.
+            static const std::pair<const char *, const char *> kEsrb[] = {
+                { "E", "Everyone" }, { "E10+", "Everyone 10+" }, { "T", "Teen" },
+                { "M", "Mature 17+" }, { "AO", "Adults Only 18+" }, { "RP", "Rating Pending" } };
+            std::string rating = gi->esrb;
+            for (const auto &e : kEsrb)
+                if (gi->esrb == e.first) rating = T(e.second);
+            const std::pair<const char *, const std::string *> rows[] = {
+                { T("Genre:"), &gi->genre }, { T("Publisher:"), &gi->maker },
+                { T("Released:"), &year }, { T("Players:"), &gi->players }, { T("Rating:"), &rating } };
+            int lw = 0;
+            for (const auto &r : rows) lw = std::max(lw, MWidth(XF_Semi, 17, r.first));
+            int yy = ry + 12;
+            for (const auto &r : rows) {
+                if (r.second->empty()) continue;
+                MText(XF_Semi, 17, x + pad, yy, grey, r.first);
+                MText(XF_Semi, 17, x + pad + lw + 10, yy, white, MFit(XF_Semi, 17, *r.second, w - 2 * pad - lw - 10).c_str());
+                yy += 28;
+            }
+        }
+        // Time played and when, along the bottom, and who is online in it.
+        const std::string played = MFit(XF_Semi, 16, XboxInfo(it), w - 2 * pad - 120);
+        int px = x + pad;
+        const int py = y + h - pad - 22;
+        if (!played.empty()) {
+            MText(XF_Semi, 16, px, py, grey, played.c_str());
+            px += MWidth(XF_Semi, 16, played.c_str()) + MWidth(XF_Semi, 16, "   ");
+        }
+        if (const int on = OnlineCount(it); on >= 0) {
+            char n[32];
+            snprintf(n, sizeof(n), "%d %s", on, T("online"));
+            OnlineDot(px, py + 7, 9, on, A);
+            MText(XF_Semi, 16, px + 15, py, grey, n);
+        }
+    }
+
     void Menu::DrawMainBlades() {
         if (!XboxStep()) return;
         const XboxSkin &sk = Skin();
@@ -1129,7 +1484,9 @@ namespace sl::menu::ui {
             // then its name and what there is to say about it.
             const MenuItem &sel = m_items[col.items[std::clamp(m_xmb_item, 0, count - 1)]];
             const int dx = left + pw + 36, dw = right - dx;
-            if (dw >= 200) {
+            if (dw >= 200 && sel.kind == ItemKind::Game && sel.app_id != 0) {
+                DrawBladesGameInfo(sel, BladesInfo(sel), dx - 12, 124, dw + 12, kBlListY + ph - 124, A);
+            } else if (dw >= 200) {
                 if (sk.detail) m_gfx->Draw9(sk.detail, dx - 12, 124, dw + 12, kBlListY + ph - 124, sk.b_panel, kWhite, A);
                 const int as = std::min(180, dw - 20);
                 icon(sel, dx + dw / 2, 132 + as / 2, as, A);

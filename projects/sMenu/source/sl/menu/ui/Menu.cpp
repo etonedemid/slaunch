@@ -267,6 +267,11 @@ namespace sl::menu::ui {
             threadClose(&m_ping_thread);
             m_ping_running = false;
         }
+        if (m_info_running) {
+            threadWaitForExit(&m_info_thread);
+            threadClose(&m_info_thread);
+            m_info_running = false;
+        }
         if (m_players_running) {
             threadWaitForExit(&m_players_thread);
             threadClose(&m_players_thread);
@@ -2164,20 +2169,33 @@ namespace sl::menu::ui {
             m_players_running = true;
         }
     }
-    // The selected game's count, in every layout.
-    void Menu::DrawPlayersPill() {
-        if (!m_nextendo_players || m_items.empty() || m_cursor >= (int)m_items.size()) return;
-        const MenuItem &it = m_items[m_cursor];
-        if (it.kind != ItemKind::Game) return;
+    // The selected game's count goes where each layout already says things
+    // about the selected game: its counter or play-time line, in its type.
+    int Menu::OnlineCount(const MenuItem &it) const {
+        if (!m_nextendo_players || it.kind != ItemKind::Game) return -1;
         const auto p = m_players.find(it.app_id);
-        if (p == m_players.end() || p->second < 0) return;   // 0 still shows: it is tracked
-        char text[32];
-        snprintf(text, sizeof(text), "%d %s", p->second, T("online"));
-        const int w = m_gfx->TextWidth(gfx::FontSize::Small, text);
-        const int x = 40, y = 76;
-        m_gfx->FillRect(x, y, w + 42, 32, SDL_Color{ 0, 0, 0, 150 });
-        m_gfx->FillRect(x + 10, y + 10, 12, 12, SDL_Color{ 67, 181, 129, 255 });
-        m_gfx->Text(gfx::FontSize::Small, x + 30, y + 3, SDL_Color{ 255, 255, 255, 255 }, text);
+        return p == m_players.end() ? -1 : p->second;   // 0 still counts: it is tracked
+    }
+    void Menu::OnlineDot(int x, int y, int d, int n, Uint8 a) {
+        XbCard((float)x, (float)y, (float)d, (float)d, d / 2.0f, 0.0f,
+               n > 0 ? SDL_Color{ 67, 181, 129, 255 } : SDL_Color{ 128, 128, 128, 255 }, a);
+    }
+    void Menu::TextOnline(gfx::FontSize fs, int x, int y, SDL_Color c, const std::string &pre,
+                          const MenuItem &it, int align) {
+        const int n = OnlineCount(it);
+        char on[32] = "";
+        if (n >= 0) snprintf(on, sizeof(on), "%d %s", n, T("online"));
+        const int lh = m_gfx->LineHeight(fs), d = std::max(8, lh * 2 / 5);
+        const int pw  = pre.empty() ? 0 : m_gfx->TextWidth(fs, pre.c_str());
+        const int gap = !pre.empty() && *on ? m_gfx->TextWidth(fs, "   ") : 0;   // the lines' own separator
+        const int ow  = *on ? d + lh / 3 + m_gfx->TextWidth(fs, on) : 0;
+        if (align == 0)     x -= (pw + gap + ow) / 2;
+        else if (align > 0) x -= pw + gap + ow;
+        if (!pre.empty()) m_gfx->Text(fs, x, y, c, pre.c_str());
+        if (!*on) return;
+        x += pw + gap;
+        OnlineDot(x, y + (lh - d) / 2, d, n, c.a);
+        m_gfx->Text(fs, x + d + lh / 3, y, c, on);
     }
     void Menu::PollUpdateCheck() {
         if (m_upd_running && m_upd_done.load(std::memory_order_acquire)) {
@@ -3142,7 +3160,7 @@ namespace sl::menu::ui {
         Phase("background");
         switch (m_screen) {
             case Screen::Oobe:        DrawOobe();   break;
-            case Screen::Main:        DrawMain(); DrawPlayersPill(); break;
+            case Screen::Main:        DrawMain(); break;
             case Screen::Theming:     DrawTheming(); break;
             case Screen::Themes:      DrawThemes(); break;
             case Screen::ThemeEditor: DrawEditor(); break;
@@ -3160,9 +3178,9 @@ namespace sl::menu::ui {
 #endif
             case Screen::FlowMenu:    DrawFlowMenu(); break;
             case Screen::DeckMenu:    DrawDeckMenu(); break;
-            case Screen::DeckLibrary: DrawDeckLibrary(); DrawPlayersPill(); break;
+            case Screen::DeckLibrary: DrawDeckLibrary(); break;
             case Screen::DeckNews:    DrawDeckNews(); break;
-            case Screen::MetroGames:  DrawMetroGames(); DrawPlayersPill(); break;
+            case Screen::MetroGames:  DrawMetroGames(); break;
             case Screen::FlowSettings: DrawFlowSettings(); break;
             case Screen::About:       DrawAbout(); break;
             case Screen::Welcome:     DrawWelcome(); break;

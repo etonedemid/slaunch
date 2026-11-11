@@ -13,10 +13,14 @@ another picture - so the files are sLaunch's own and ship with it.
   light_wide.png   the same without the bands, for a blade that fills the
                    screen: those screens keep their own header and legend
                    lines, and the menu draws slimmer bands to suit.
+  info.png         the glossy black sheet a game's details sit on, as the
+                   360's game pages had: grey glass on top, black below, a
+                   sweep of shine across it and a pale rim. Stretched to fit.
+  star.png         a lit rating star, gold, and star_off.png an unlit one.
 """
 import os
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "UI", "blades")
 
@@ -103,6 +107,51 @@ def light(bands=True):
     return Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8), "RGBA")
 
 
+def info_panel():
+    w, h = 480, 440
+    x, y = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
+    u, v = x / w, y / h
+    d = rrect(x, y, 3.0, 3.0, w - 3.0, h - 3.0, 14.0)
+    inside = np.clip(0.5 - d, 0.0, 1.0)
+    img = np.zeros((h, w, 4))
+    top = v < 0.45                                                       # grey glass, then black
+    grey = np.where(top, 0.27 - 0.17 * v / 0.45, 0.05 - 0.05 * (v - 0.45) / 0.55)
+    for i in range(3):
+        img[..., i] = grey
+    img[..., 3] = 0.94 * inside
+    shine = np.hypot(x - 1.30 * w, y - 1.45 * h) > 1.20 * h              # the sweep, upper left of an arc
+    over(img, (1.0, 1.0, 1.0), inside * shine * 0.07 * smooth(1.0, 0.0, v))
+    over(img, (1.0, 1.0, 1.0), 0.55 * np.clip(1.0 - np.abs(d + 1.0), 0.0, 1.0) * (0.45 + 0.55 * smooth(1.0, 0.0, v)))
+    return Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8), "RGBA")
+
+
+def star(lit=True, size=64, ss=4):
+    n = size * ss
+    c, ro, ri = n / 2, n * 0.47, n * 0.47 * 0.42
+    pts = lambda k: [(c + r * np.sin(np.pi * i / 5), c + 0.04 * n - r * np.cos(np.pi * i / 5))
+                     for i, r in enumerate([ro * k, ri * k] * 5)]
+    rim, body = Image.new("L", (n, n)), Image.new("L", (n, n))
+    ImageDraw.Draw(rim).polygon(pts(1.0), fill=255)
+    ImageDraw.Draw(body).polygon(pts(0.86), fill=255)
+    rim = np.asarray(rim, float) / 255
+    body = np.asarray(body, float) / 255
+    v = np.linspace(0.0, 1.0, n)[:, None] * np.ones((1, n))
+    img = np.zeros((n, n, 4))
+    if lit:
+        over(img, (0.36, 0.24, 0.02), rim)                               # dark gold edge
+        top, bot = np.array([1.0, 0.93, 0.45]), np.array([0.93, 0.62, 0.08])
+        col = top[None, None, :] * (1 - v[..., None]) + bot[None, None, :] * v[..., None]
+        a = body
+        for i in range(3):
+            img[..., i] = col[..., i] * a + img[..., i] * (1 - a)
+        over(img, (1.0, 1.0, 0.85), body * 0.35 * smooth(0.55, 0.30, v))   # shine on the upper half
+    else:
+        over(img, (0.55, 0.55, 0.55), rim * 0.85)
+        over(img, (0.16, 0.16, 0.16), body * 0.9)
+    out = Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8), "RGBA")
+    return out.resize((size, size), Image.LANCZOS)
+
+
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     s = spine()
@@ -110,5 +159,12 @@ if __name__ == "__main__":
     s.transpose(Image.FLIP_LEFT_RIGHT).save(os.path.join(OUT, "spine.png"), optimize=True)
     light().save(os.path.join(OUT, "light.png"), optimize=True)
     light(bands=False).save(os.path.join(OUT, "light_wide.png"), optimize=True)
+    p = info_panel()
+    p.save(os.path.join(OUT, "info.png"), optimize=True)
+    on, off = star(), star(lit=False)
+    on.save(os.path.join(OUT, "star.png"), optimize=True)
+    off.save(os.path.join(OUT, "star_off.png"), optimize=True)
     assert s.size == (112, 1440) and s.getpixel((0, 700))[3] < 40 and s.getpixel((60, 700))[3] == 255
+    assert p.getpixel((0, 0))[3] == 0 and p.getpixel((240, 300))[3] > 200 and p.getpixel((240, 300))[0] < 30
+    assert on.getpixel((32, 34))[3] == 255 and on.getpixel((32, 34))[0] > 200 and on.getpixel((2, 62))[3] == 0
     print("wrote", sorted(os.listdir(OUT)))

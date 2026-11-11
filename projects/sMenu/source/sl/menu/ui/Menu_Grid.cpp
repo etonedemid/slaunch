@@ -728,8 +728,12 @@ namespace sl::menu::ui {
 
         // The selected entry's name, in the corner Metro puts its page title.
         const MenuItem &sel = m_items[m_cursor];
-        m_gfx->Text(FontSize::Large, TileLeft(), TileTop() - 58, t.title,
-                    Ellipsize(sel.name, 900, FontSize::Large).c_str());
+        const std::string nm = Ellipsize(sel.name, 900, FontSize::Large);
+        m_gfx->Text(FontSize::Large, TileLeft(), TileTop() - 58, t.title, nm.c_str());
+        // Who is online in it, after the name and level with its foot.
+        TextOnline(FontSize::Small, TileLeft() + m_gfx->TextWidth(FontSize::Large, nm.c_str()) + 24,
+                   TileTop() - 58 + m_gfx->LineHeight(FontSize::Large) - m_gfx->LineHeight(FontSize::Small) - 4,
+                   t.dim, "", sel);
 
         if (sel.kind == ItemKind::MusicPlayer)
             DrawStatusHint({ {{"a"}, "Open"}, {{"y"}, "Play/pause"}, {{"x"}, "Options"} });

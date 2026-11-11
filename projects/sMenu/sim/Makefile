@@ -64,18 +64,21 @@ SIM_SRCS  := \
 # The Lua library, minus its two standalone front ends: lua.c and luac.c each
 # define main(), which collides with the simulator's.
 LUA_SRCS  := $(filter-out %/lua.c %/luac.c, $(wildcard $(ROOT_DIR)/libs/Lua/*.c))
+# yyjson, the Discord client's JSON reader: Blades' game info uses it too.
+LUA_SRCS  += $(ROOT_DIR)/libs/discord/third_party/yyjson.c
 
 SRCS      := $(MENU_SRCS) $(SIM_SRCS)
 OBJS      := $(patsubst %,$(BUILD)/%.o,$(notdir $(SRCS))) \
              $(patsubst %,$(BUILD)/lua/%.o,$(notdir $(LUA_SRCS)))
 
-VPATH     := $(sort $(dir $(SRCS))) $(ROOT_DIR)/libs/Lua
+VPATH     := $(sort $(dir $(SRCS))) $(ROOT_DIR)/libs/Lua $(ROOT_DIR)/libs/discord/third_party
 
 INCLUDES  := -I$(SIM_DIR)include \
              -I$(MENU_DIR)/include \
              -I$(ROOT_DIR)/libs/sCommon/include \
              -I$(ROOT_DIR)/libs/Lua \
-             -I$(ROOT_DIR)/libs/sol2/include
+             -I$(ROOT_DIR)/libs/sol2/include \
+             -idirafter $(ROOT_DIR)/libs/discord
 
 # libavformat/libavcodec/libavutil: the host's own FFmpeg (software H.264
 # decode - there is no Tegra/NVDEC on a desktop). Same VideoPlayer source as

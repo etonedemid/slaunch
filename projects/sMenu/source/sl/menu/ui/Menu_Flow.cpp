@@ -1719,8 +1719,7 @@ namespace sl::menu::ui {
             // Position counters are optional; blanking the string here keeps
             // the layout arithmetic below untouched.
             if (!m_show_counter) pos[0] = '\0';
-            m_gfx->TextCentered(FontSize::Small, W / 2,
-                                ty + m_gfx->LineHeight(FontSize::Large) + 4, t.dim, pos);
+            TextOnline(FontSize::Small, W / 2, ty + m_gfx->LineHeight(FontSize::Large) + 4, t.dim, pos, cur, 0);
         }
 
         DrawFetchStatus();

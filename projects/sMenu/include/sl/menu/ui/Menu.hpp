@@ -421,7 +421,14 @@ namespace sl::menu::ui {
         // Nextendo's players online per title, refreshed every few minutes.
         static void PlayersTrampoline(void *self);
         void   PollPlayers();
-        void   DrawPlayersPill();
+        // Nextendo's count for a game: -1 when it is not tracked or counts are off.
+        int    OnlineCount(const MenuItem &it) const;
+        void   OnlineDot(int x, int y, int d, int n, Uint8 a);   // green, grey when nobody is on
+        // A layout's small line about the selected game (its counter, play
+        // time...) with "* N online" after it, the two as one group: align -1
+        // starts at x, 0 centres on it, 1 ends there. Just `pre` when untracked.
+        void   TextOnline(gfx::FontSize fs, int x, int y, SDL_Color c, const std::string &pre,
+                          const MenuItem &it, int align = -1);
         Thread m_players_thread{};
         bool   m_players_running = false;
         std::atomic<bool> m_players_done{false};
@@ -721,6 +728,28 @@ namespace sl::menu::ui {
         void DrawMainNxe();
         bool XboxStep();                              // eases the bar; false = nothing to draw
         std::string XboxInfo(const MenuItem &sel);    // play time, running, update
+        // What Blades says about the selected game: from Nintendo's store
+        // search, and Wikidata for what the store lacks (all of it for a
+        // port's forwarder) and the critics' score, fetched once on a worker
+        // and kept in slaunch/covers/<title id>_info.txt. nullptr until it is in.
+        struct GameInfo {
+            std::string genre, maker, players, esrb, source;   // source: whose score
+            int year = 0, score = -1, recommend = -1;
+        };
+        const GameInfo *BladesInfo(const MenuItem &it);
+        // The selected game's page beside the list, as the 360's were: a black
+        // glass sheet, the picture and name, its stars, then labelled rows.
+        void DrawBladesGameInfo(const MenuItem &it, const GameInfo *gi, int x, int y, int w, int h, Uint8 a);
+        static void InfoTrampoline(void *self);
+        std::map<u64, GameInfo> m_info;               // main thread only, by title id
+        std::set<u64> m_info_tried;                   // asked for this run, found or not
+        Thread m_info_thread{};
+        bool   m_info_running = false;
+        std::atomic<bool> m_info_done{false};
+        u64    m_info_id = 0;                         // the worker's request...
+        std::string m_info_name;
+        GameInfo m_info_result;                       // ...and its answer
+        bool   m_info_ok = false;
         int  BladesColAt(int x, int y) const;
         int  BladesItemAt(int x, int y) const;
         int  NxeColAt(int x, int y) const;

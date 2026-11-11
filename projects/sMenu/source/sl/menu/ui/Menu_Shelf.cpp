@@ -160,8 +160,7 @@ namespace sl::menu::ui {
                 sub += (sub.empty() ? "" : "   ") + play::FormatPlaytime(pi->seconds) + "   " +
                        play::FormatLastPlayed(pi->last_played);
         }
-        if (!sub.empty())
-            m_gfx->Text(FontSize::Small, tx, ty + lh + 2, t.dim, sub.c_str());
+        TextOnline(FontSize::Small, tx, ty + lh + 2, t.dim, sub, sel);
 
         // Position, top right, as the 360 counted its library.
         if (m_show_counter) {
@@ -260,8 +259,7 @@ namespace sl::menu::ui {
                 sub += (sub.empty() ? "" : "   ") + play::FormatPlaytime(pi->seconds) + "   " +
                        play::FormatLastPlayed(pi->last_played);
         }
-        if (!sub.empty())
-            m_gfx->Text(FontSize::Small, tx, ty + m_gfx->LineHeight(FontSize::Large) + 2, t.dim, sub.c_str());
+        TextOnline(FontSize::Small, tx, ty + m_gfx->LineHeight(FontSize::Large) + 2, t.dim, sub, sel);
 
         if (m_show_counter) {
             char cnt[32];

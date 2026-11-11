@@ -117,16 +117,13 @@ namespace sl::menu::ui {
             m_gfx->Text(FontSize::Small, gfx::Gfx::Width - pw - 40, 120, t.dim, pos);
         }
 
-        // Play time / last played for the selected game, under the counter. Only
-        // once pdm has answered, and only for games that have actually been played.
-        if (const play::PlayInfo *pi = Play(m_items[m_cursor].app_id)) {
-            if (pi->seconds > 0) {
-                const std::string line = play::FormatPlaytime(pi->seconds) + "   " +
-                                         play::FormatLastPlayed(pi->last_played);
-                const int w = m_gfx->TextWidth(FontSize::Small, line.c_str());
-                m_gfx->Text(FontSize::Small, gfx::Gfx::Width - w - 40, 150, t.dim, line.c_str());
-            }
-        }
+        // Play time / last played for the selected game, and who is online in
+        // it, under the counter. Play time only once pdm has answered, and only
+        // for games that have actually been played.
+        std::string line;
+        if (const play::PlayInfo *pi = Play(m_items[m_cursor].app_id); pi && pi->seconds > 0)
+            line = play::FormatPlaytime(pi->seconds) + "   " + play::FormatLastPlayed(pi->last_played);
+        TextOnline(FontSize::Small, gfx::Gfx::Width - 40, 150, t.dim, line, m_items[m_cursor], 1);
 
         DrawStatusHint({ {{"a"}, "Select"}, {{"y"}, "Search"}, {{"x"}, "Options"} });
     }
@@ -170,16 +167,15 @@ namespace sl::menu::ui {
             }
             m_gfx->FillRect(x, y, size, 3, WithAlpha(t.accent, alpha)); // accent strip
         }
-        if (it.kind == ItemKind::Game && m_nextendo_players && size >= 96) {
-            const auto p = m_players.find(it.app_id);
-            if (p != m_players.end() && p->second > 0) {
-                char n[12];
-                snprintf(n, sizeof(n), "%d", p->second);
-                const int nw = m_gfx->TextWidth(gfx::FontSize::Small, n);
-                m_gfx->FillRect(x + 6, y + 6, nw + 32, 28, SDL_Color{ 0, 0, 0, (Uint8)(alpha * 150 / 255) });
-                m_gfx->FillRect(x + 12, y + 14, 12, 12, WithAlpha(SDL_Color{ 67, 181, 129, 255 }, alpha));
-                m_gfx->Text(gfx::FontSize::Small, x + 28, y + 7, WithAlpha(SDL_Color{ 255, 255, 255, 255 }, alpha), n);
-            }
+        // The other games' counts, on their tiles. The selected one's is by its
+        // name, where its layout says the rest about it.
+        if (const int on = OnlineCount(it); on > 0 && size >= 96 && &it != &m_items[m_cursor]) {
+            char n[12];
+            snprintf(n, sizeof(n), "%d", on);
+            const int nw = m_gfx->TextWidth(gfx::FontSize::Small, n);
+            XbCard((float)x + 8, (float)y + 8, (float)nw + 34, 28.0f, 14.0f, 0.0f, SDL_Color{ 0, 0, 0, 160 }, alpha);
+            OnlineDot(x + 18, y + 17, 10, on, alpha);
+            m_gfx->Text(gfx::FontSize::Small, x + 34, y + 8, WithAlpha(SDL_Color{ 255, 255, 255, 255 }, alpha), n);
         }
         if (!icon) {                                 // no icon file: big initial
             char initial[2] = { it.name.empty() ? '?' : it.name[0], '\0' };
@@ -374,7 +370,7 @@ namespace sl::menu::ui {
         // Position counters are optional; blanking the string here keeps
         // the layout arithmetic below untouched.
         if (!m_show_counter) pos[0] = '\0';
-        m_gfx->TextCentered(FontSize::Small, center_x, name_y + 48, t.dim, pos);
+        TextOnline(FontSize::Small, center_x, name_y + 48, t.dim, pos, sel, 0);
 
         DrawStatusHint({ {{"a"}, "Select"}, {{"y"}, "Search"}, {{"x"}, "Options"} });
     }

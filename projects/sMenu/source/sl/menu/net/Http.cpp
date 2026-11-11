@@ -32,6 +32,9 @@ namespace sl::menu::net {
         g_inited = false;
     }
 
+    // Wikidata rate-limits (429) a client that does not say who it is.
+    static const char kUserAgent[] = "sLaunch (https://github.com/etonedemid/slaunch)";
+
     bool Get(const char *url, std::string &out, long timeout_s,
              const char *authorization, long *out_http, int *out_curl) {
         out.clear();
@@ -52,7 +55,7 @@ namespace sl::menu::net {
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_s);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "sLaunch/0.1");
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, kUserAgent);
         // No CA bundle on the Switch -> skip verification.
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -94,7 +97,7 @@ namespace sl::menu::net {
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_s);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "sLaunch/0.1");
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, kUserAgent);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 
@@ -173,7 +176,7 @@ namespace sl::menu::net {
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_s);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "sLaunch/0.1");
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, kUserAgent);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         Progress pr{ now, total };
