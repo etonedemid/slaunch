@@ -3,6 +3,7 @@
 #include "discord/remote_auth.h"
 #include "discord/store.h"
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -69,6 +70,7 @@ public:
         std::vector<Media> media; // images and GIFs under the text
         struct Audio { std::string url, name; };
         std::vector<Audio> audio; // playable sound clips attached to the message
+        std::vector<Audio> video; // video files attached to it, played full screen
     };
 
     DiscordService();
@@ -150,7 +152,9 @@ public:
     // Fed by an audio clip from the trusted sender (auto), or requestSound().
     bool takeSound(std::string& path);
     // Fetch an audio clip to the SD card on a worker, then queue it for takeSound.
-    void requestSound(const std::string& url);
+    // video: a video attachment instead, saved as slaunch/cache/dc_video.mp4
+    // (the mov demuxer reads .mov too); one at a time, false while one is loading.
+    bool requestSound(const std::string& url, bool video = false);
     // Unicode emoji in any text (a channel or user name) as U+F0000 + i marks,
     // urls[i] being the Twemoji picture: what lines() does to message text.
     static std::string emojiMarks(const std::string& s, std::vector<std::string>& urls);
@@ -188,6 +192,7 @@ private:
     std::mutex m_soundMu;
     std::string m_soundPath;
     bool m_hasSound = false;
+    std::atomic<bool> m_videoBusy{false};
 
     std::unique_ptr<Store> m_store;
     std::unique_ptr<Gateway> m_gateway;

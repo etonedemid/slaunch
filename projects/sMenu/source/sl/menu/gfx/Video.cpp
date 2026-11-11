@@ -140,9 +140,21 @@ namespace sl::menu::gfx {
             }
         }
 
+        // The screen is 1280x720, so a bigger picture (a phone's 1080p or 4K
+        // clip from Discord) is scaled down by the conversion: three 4K RGBA
+        // buffers alone would be 100 MB.
+        m_out_w = m_width;
+        m_out_h = m_height;
+#ifdef SL_QEXT
+        if (m_out_w > 1280 || m_out_h > 720) {
+            const double s = std::min(1280.0 / m_out_w, 720.0 / m_out_h);
+            m_out_w = std::max(2, (int)(m_out_w * s) & ~1);
+            m_out_h = std::max(2, (int)(m_out_h * s) & ~1);
+        }
+#endif
         for (auto &b : m_buf) {
 #ifdef SL_QEXT
-            b.rgba.resize((size_t)m_width * m_height * 4);
+            b.rgba.resize((size_t)m_out_w * m_out_h * 4);
 #else
             b.y.resize(YSize(m_width, m_height));
             b.uv.resize(UVSize(m_width, m_height));
@@ -156,7 +168,7 @@ namespace sl::menu::gfx {
         // main thread, into uncached memory, which is far too slow. The decode
         // thread converts instead (see DecodeLoop) and this takes plain RGBA.
         m_tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_RGBA32,
-                                  SDL_TEXTUREACCESS_STREAMING, m_width, m_height);
+                                  SDL_TEXTUREACCESS_STREAMING, m_out_w, m_out_h);
 #else
         m_tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_NV12,
                                   SDL_TEXTUREACCESS_STREAMING, m_width, m_height);
@@ -176,22 +188,21 @@ namespace sl::menu::gfx {
         }
         threadStart(&m_thread);
         m_thread_running = true;
-        VLOG("opened %dx%d %s", m_width, m_height, m_path.c_str());
+        VLOG("opened %dx%d (shown %dx%d) %s", m_width, m_height, m_out_w, m_out_h, m_path.c_str());
         return true;
     }
 
     void VideoPlayer::Tick() {
-        int ready = m_ready_buf.load(std::memory_order_acquire);
-        if (ready < 0 || ready == m_shown_buf || !m_tex) return;
-        const Buf &b = m_buf[ready];
+        if (!m_tex || !(m_mid.load(std::memory_order_acquire) & kFresh)) return;
+        m_shown_buf = m_mid.exchange(m_shown_buf, std::memory_order_acq_rel) & 3;
+        const Buf &b = m_buf[m_shown_buf];
 #ifdef SL_QEXT
-        const bool up_ok = SDL_UpdateTexture(m_tex, nullptr, b.rgba.data(), m_width * 4);
-        static bool logged = false;
-        if (!logged) { logged = true; VLOG("first texture update %s: %s", up_ok ? "ok" : "FAILED", up_ok ? "" : SDL_GetError()); }
+        const bool up_ok = SDL_UpdateTexture(m_tex, nullptr, b.rgba.data(), m_out_w * 4);
+        if (!m_has_frame) VLOG("first texture update %s: %s", up_ok ? "ok" : "FAILED", up_ok ? "" : SDL_GetError());
 #else
         SDL_UpdateNVTexture(m_tex, nullptr, b.y.data(), b.y_pitch, b.uv.data(), b.uv_pitch);
 #endif
-        m_shown_buf = ready;
+        m_has_frame = true;
     }
 
     void VideoPlayer::Close() {
@@ -217,9 +228,10 @@ namespace sl::menu::gfx {
         if (m_hw_device_ctx) { av_buffer_unref(&m_hw_device_ctx); m_hw_device_ctx = nullptr; }
         if (m_tex) { SDL_DestroyTexture(m_tex); m_tex = nullptr; }
         m_stream_idx = -1;
-        m_width = m_height = 0;
-        m_ready_buf.store(-1, std::memory_order_release);
-        m_shown_buf = -1;
+        m_width = m_height = m_out_w = m_out_h = 0;
+        m_mid.store(1, std::memory_order_release);
+        m_shown_buf = 2;
+        m_has_frame = false;
         m_path.clear();
     }
 
@@ -403,7 +415,12 @@ namespace sl::menu::gfx {
         bool   drain_sent = false;          // null packet sent to flush the decoder
         bool   have_frame = false;          // dec_frame holds the next picture
         double frame_pts  = 0.0;
-        int    write_buf  = 0;
+        int    write_buf  = 0;              // m_mid starts as 1, Tick owns 2
+        int    shown = 0, lost = 0;         // frames converted / failed to reach the CPU
+        auto publish = [&]() {
+            write_buf = m_mid.exchange(write_buf | kFresh, std::memory_order_acq_rel) & 3;
+            shown++;
+        };
 
         auto clear_queue = [&]() {
             for (AVPacket *q : vq) av_packet_free(&q);
@@ -469,13 +486,14 @@ namespace sl::menu::gfx {
 
                 AVFrame *src = dec_frame;
 #ifdef SL_QEXT
-                static bool fmt_logged = false;
-                if (!fmt_logged) { fmt_logged = true; VLOG("first frame format %d (nvtegra %d)", dec_frame->format, (int)AV_PIX_FMT_NVTEGRA); }
+                if (shown == 0 && lost == 0) VLOG("first frame format %d (nvtegra %d)", dec_frame->format, (int)AV_PIX_FMT_NVTEGRA);
 #endif
 #ifdef SL_HAS_NVTEGRA
                 if (dec_frame->format == AV_PIX_FMT_NVTEGRA) {
                     sw_frame->format = AV_PIX_FMT_NV12;
-                    src = (av_hwframe_transfer_data(sw_frame, dec_frame, 0) == 0) ? sw_frame : nullptr;
+                    const int tr = av_hwframe_transfer_data(sw_frame, dec_frame, 0);
+                    src = tr == 0 ? sw_frame : nullptr;
+                    if (tr != 0 && lost++ == 0) VLOG("frame transfer failed rc=%d", tr);
                 }
 #endif
                 if (src) {
@@ -485,8 +503,9 @@ namespace sl::menu::gfx {
                     if (!sws || sws_fmt != fmt) {
                         if (sws) sws_freeContext(sws);
                         sws_fmt = fmt;
-                        sws = sws_getContext(m_width, m_height, fmt, m_width, m_height, AV_PIX_FMT_RGBA,
-                                             SWS_POINT, nullptr, nullptr, nullptr);
+                        const bool scaled = m_out_w != m_width || m_out_h != m_height;
+                        sws = sws_getContext(m_width, m_height, fmt, m_out_w, m_out_h, AV_PIX_FMT_RGBA,
+                                             scaled ? SWS_FAST_BILINEAR : SWS_POINT, nullptr, nullptr, nullptr);
                         // H.264 at this size is BT.709, limited range, to full-range RGB.
                         const int *cs = sws_getCoefficients(SWS_CS_ITU709);
                         if (sws) sws_setColorspaceDetails(sws, cs, 0, cs, 1, 0, 1 << 16, 1 << 16);
@@ -494,10 +513,9 @@ namespace sl::menu::gfx {
                     if (sws) {
                         const u64 t0 = armGetSystemTick();
                         uint8_t *dst[4] = { b.rgba.data() };
-                        const int dst_ls[4] = { m_width * 4 };
+                        const int dst_ls[4] = { m_out_w * 4 };
                         sws_scale(sws, src->data, src->linesize, 0, m_height, dst, dst_ls);
-                        m_ready_buf.store(write_buf, std::memory_order_release);
-                        write_buf ^= 1;
+                        publish();
                         sws_ticks += armGetSystemTick() - t0;
                         if (++sws_frames == 120) {
                             VLOG("convert %.1f ms a frame", armTicksToNs(sws_ticks / 120) / 1e6);
@@ -508,14 +526,12 @@ namespace sl::menu::gfx {
                     if (src->format == AV_PIX_FMT_NV12) {
                         CopyPlane(b.y.data(), b.y_pitch, src->data[0], src->linesize[0], m_width, m_height);
                         CopyPlane(b.uv.data(), b.uv_pitch, src->data[1], src->linesize[1], m_width, m_height / 2);
-                        m_ready_buf.store(write_buf, std::memory_order_release);
-                        write_buf ^= 1;
+                        publish();
                     } else if (src->format == AV_PIX_FMT_YUV420P) {
                         CopyPlane(b.y.data(), b.y_pitch, src->data[0], src->linesize[0], m_width, m_height);
                         InterleaveUV(b.uv.data(), b.uv_pitch, src->data[1], src->linesize[1],
                                      src->data[2], src->linesize[2], m_width / 2, m_height / 2);
-                        m_ready_buf.store(write_buf, std::memory_order_release);
-                        write_buf ^= 1;
+                        publish();
                     }
                     // Any other pixel format (e.g. 10-bit) is dropped - out of
                     // scope (8-bit H.264 only).
@@ -536,6 +552,7 @@ namespace sl::menu::gfx {
             svcSleepThread(5'000'000);
         }
 
+        VLOG("closed after %d frames (%d lost) at %.1f s", shown, lost, ClockNow());
         for (AVPacket *q : vq) av_packet_free(&q);
         av_frame_free(&a_frame);
         av_frame_free(&sw_frame);

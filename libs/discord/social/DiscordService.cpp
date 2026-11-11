@@ -880,6 +880,7 @@ std::vector<DiscordService::Line> DiscordService::lines(Snowflake channelId, siz
                 l.media.push_back(std::move(md));
             } else {
                 if (a.IsAudio()) l.audio.push_back({ a.proxyUrl.empty() ? a.url : a.proxyUrl, a.filename });
+                else if (a.IsVideo() && !a.Spoiler()) l.video.push_back({ a.proxyUrl.empty() ? a.url : a.proxyUrl, a.filename });
                 else text += (text.empty() ? "" : " ") + std::string("[file] ") + a.filename;
             }
         }
@@ -1211,29 +1212,38 @@ void DiscordService::maybeSound(yyjson_val* d) {
     }
 }
 
-void DiscordService::requestSound(const std::string& url) {
-    if (url.empty()) return;
-    Async::Run(Async::Pool::Images, [this, url] {
+bool DiscordService::requestSound(const std::string& url, bool video) {
+    if (url.empty()) return false;
+    // One video file on the card at a time: a second download would write
+    // over the first while it is still being fetched or played.
+    if (video && m_videoBusy.exchange(true)) return false;
+    Async::Run(Async::Pool::Images, [this, url, video] {
         Http::Request rq;
         rq.url = url;
-        rq.maxBytes = 8u << 20;   // clips are small; a big file is not a sound effect
+        // Sound clips are small; a big file is not a sound effect. Videos
+        // are held in memory until written, so they get a ceiling too.
+        rq.maxBytes = video ? 48u << 20 : 8u << 20;
+        rq.timeoutMs = video ? 120000 : rq.timeoutMs;
         const Http::Response r = Http::Perform(rq);
-        if (!r.Ok() || r.body.empty()) { LOG("sound: fetch failed (%ld)", r.status); return; }
+        auto done = [&] { if (video) m_videoBusy.store(false); };
+        if (!r.Ok() || r.body.empty()) { LOG("sound: fetch failed (%ld)", r.status); done(); return; }
         // One extension off the URL so the mixer picks the right decoder.
         std::string ext = ".bin";
         const size_t q = url.find('?'), dot = url.rfind('.', q == std::string::npos ? url.size() : q);
         if (dot != std::string::npos && (q == std::string::npos || dot < q)) ext = url.substr(dot, (q == std::string::npos ? url.size() : q) - dot);
         ::mkdir("sdmc:/slaunch/cache", 0777);
-        const std::string path = "sdmc:/slaunch/cache/dc_sound" + ext;
+        const std::string path = video ? "sdmc:/slaunch/cache/dc_video.mp4" : "sdmc:/slaunch/cache/dc_sound" + ext;
         FILE* f = fopen(path.c_str(), "wb");
-        if (!f) { LOG("sound: cannot write %s", path.c_str()); return; }
+        if (!f) { LOG("sound: cannot write %s", path.c_str()); done(); return; }
         fwrite(r.body.data(), 1, r.body.size(), f);
         fclose(f);
+        done();
         std::lock_guard<std::mutex> lk(m_soundMu);
         m_soundPath = path;
         m_hasSound = true;
         LOG("sound: ready %s (%zu bytes)", path.c_str(), r.body.size());
     });
+    return true;
 }
 
 bool DiscordService::takeSound(std::string& path) {

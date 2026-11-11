@@ -278,7 +278,7 @@ namespace sl::menu::ui {
         struct Row { Snowflake id = 0; std::string text, avatar; bool category = false, voice = false, unread = false; int mentions = 0; };
         struct Piece { std::string text; int emoji = -1, x = 0; };   // emoji: index into urls
         struct ChatRow {
-            enum Kind { Head, Text, Media, Reply, Audio } kind = Text;   // Reply: text = who, time = what they said. Audio: url = clip, text = name
+            enum Kind { Head, Text, Media, Reply, Audio, Video } kind = Text;   // Reply: text = who, time = what they said. Audio, Video: url = file, text = name
             std::vector<Piece> pieces;      // Text; Head uses text for the name
             std::string text, time, url, alt;   // Head: name, time, avatar. Media: the picture (alt: a still)
             std::string full;                   // Media: a bigger still for the viewer
@@ -418,8 +418,47 @@ namespace sl::menu::ui {
             PlayNotifySound();
         }
         // A sound clip the trusted sender posted, or one the user tapped to play.
+        // A video only plays if the chat it came from is still on screen.
         std::string clip;
-        if (m_dc->svc.takeSound(clip)) m_sfx.PlayClip(clip.c_str());
+        if (m_dc->svc.takeSound(clip)) {
+            if (!IsVideoPath(clip.c_str())) m_sfx.PlayClip(clip.c_str());
+            else if (m_screen == Screen::Discord && !PlayAlbumVideo(clip)) SetStatus(T("Could not play that clip"));
+        }
+        // However the Discord screen was left, its video does not play on.
+        if (m_album_video_active && m_screen != Screen::Discord && m_screen != Screen::Album) StopAlbumVideo();
+    }
+
+    void Menu::DiscordPlay(int row) {
+        const DiscordUi::ChatRow &r = m_dc->chat_rows[row];
+        const bool video = r.kind == DiscordUi::ChatRow::Video;
+        if (!m_dc->svc.requestSound(r.url, video)) { SetStatus(T("Still loading the last video...")); return; }
+        SetStatus(video ? T("Loading video...") : T("Playing sound..."));
+    }
+
+    // A chat's video, full screen and fitted (a phone's upright clip is not
+    // cropped), with the album viewer's transport below it.
+    void Menu::DrawDiscordVideo() {
+        const Theme &t = m_theme.Current();
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+        m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 255 });
+        m_album_video.Tick();
+        if (SDL_Texture *vt = m_album_video.GetTexture()) {
+            float tw = 1, th = 1;
+            SDL_GetTextureSize(vt, &tw, &th);
+            const float s = std::min(W / std::max(1.0f, tw), H / std::max(1.0f, th));
+            const int w = (int)(tw * s), h = (int)(th * s);
+            m_gfx->DrawImage(vt, (W - w) / 2, (H - h) / 2, w, h, 255);
+        } else {
+            m_gfx->TextCentered(FontSize::Normal, W / 2, H / 2 - 20, t.dim, T("Loading..."));
+        }
+        const double dur = m_album_video.Duration(), p = m_album_video.Position();
+        const bool held = m_album_video.Paused() || m_album_video.Ended();
+        const int bx = 40, bw = W - 80, by = H - 96;
+        m_gfx->FillRect(0, by - 16, W, H - by + 16, SDL_Color{ 0, 0, 0, 140 });
+        m_gfx->FillRect(bx, by, bw, 6, SDL_Color{ 255, 255, 255, 60 });
+        if (dur > 0.0) m_gfx->FillRect(bx, by, (int)(bw * std::min(1.0, p / dur)), 6, t.accent);
+        m_gfx->Text(FontSize::Small, bx, by + 12, t.fg, (FormatTime(p) + " / " + FormatTime(dur)).c_str());
+        DrawStatusHint({ {{"a"}, held ? "Play" : "Pause"}, {{"left", "right"}, "Seek"}, {{"b"}, "Close"} });
     }
 
     // A notification in the style of the layout it shows over: Metro gets the
@@ -828,6 +867,17 @@ namespace sl::menu::ui {
         };
         auto leave = [&] { m_screen = Screen::Main; };
 
+        if (m_album_video_active) {                      // a chat's video, full screen
+            if (b == Btn::B) StopAlbumVideo();
+            if (b == Btn::Left)  m_album_video.Seek(m_album_video.Position() - 5.0);
+            if (b == Btn::Right) m_album_video.Seek(m_album_video.Position() + 5.0);
+            if (b == Btn::A) {
+                if (m_album_video.Ended()) { m_album_video.Seek(0.0); m_album_video.SetPaused(false); }
+                else m_album_video.SetPaused(!m_album_video.Paused());
+            }
+            return Action::None;
+        }
+
         switch (s.state()) {
             case DiscordService::State::SignedOut:
                 if (b == Btn::A) s.startQrLogin();
@@ -899,7 +949,10 @@ namespace sl::menu::ui {
             if (b == Btn::A) { keyboard(sl::smi::Kb_DiscordMessage); m_kb_text = d.draft; }
             if (b == Btn::Minus) d.picker = true;
             if (b == Btn::Plus && !d.draft.empty()) { s.send(d.chat, d.draft); d.draft.clear(); d.chat_up = 0; }
-            if (b == Btn::Y && d.vis_media >= 0) ViewOpen(d, m_gfx, d.vis_media);
+            if (b == Btn::Y && d.vis_media >= 0) {
+                if (d.chat_rows[d.vis_media].kind == DiscordUi::ChatRow::Video) DiscordPlay(d.vis_media);
+                else ViewOpen(d, m_gfx, d.vis_media);
+            }
             if (b == Btn::X) {
                 m_fm_pick = true;
                 m_fm_menu_open = false;
@@ -1119,14 +1172,15 @@ namespace sl::menu::ui {
                 m.h = m.ph + 10;
                 if (!m.url.empty()) d.chat_rows.push_back(std::move(m));
             }
-            for (const auto &au : l.audio) {
-                DiscordUi::ChatRow m;
-                m.kind = DiscordUi::ChatRow::Audio;
-                m.url = au.url;
-                m.text = au.name;
-                m.h = kDcChatLineH + 10;
-                d.chat_rows.push_back(std::move(m));
-            }
+            for (const auto *list : { &l.audio, &l.video })
+                for (const auto &au : *list) {
+                    DiscordUi::ChatRow m;
+                    m.kind = list == &l.video ? DiscordUi::ChatRow::Video : DiscordUi::ChatRow::Audio;
+                    m.url = au.url;
+                    m.text = au.name;
+                    m.h = kDcChatLineH + 10;
+                    d.chat_rows.push_back(std::move(m));
+                }
         }
     }
 
@@ -1161,6 +1215,7 @@ namespace sl::menu::ui {
         const Theme &t = m_theme.Current();
         const int W = gfx::Gfx::Width;
         d.hits.clear();
+        if (m_album_video_active) { DrawDiscordVideo(); return; }
         auto hit = [&](int x, int y, int w, int h, int kind, int idx = 0) { d.hits.push_back({ SDL_Rect{ x, y, w, h }, kind, idx }); };
         DrawTopBar("");   // the clock and battery; no title, the screen says what it is
 
@@ -1250,8 +1305,11 @@ namespace sl::menu::ui {
                         m_gfx->FillRect(kDcTextX, y + 4, r.w, r.ph, WithAlpha(t.fg, 24));
                     hit(kDcTextX, std::max(y + 4, top), r.w, std::min(y + 4 + r.ph, kDcInputY - 4) - std::max(y + 4, top), HMedia, i);
                     if (d.vis_media < 0 && y + 4 >= top && y + 4 + r.ph <= kDcInputY - 4) d.vis_media = i;
-                } else if (r.kind == DiscordUi::ChatRow::Audio) {
+                } else if (r.kind == DiscordUi::ChatRow::Audio || r.kind == DiscordUi::ChatRow::Video) {
                     // A pill with a play triangle and the file name; tap to play.
+                    // Y plays the first video on screen, as it opens the first picture.
+                    if (r.kind == DiscordUi::ChatRow::Video && d.vis_media < 0 && y + 6 >= top && y + r.h - 6 <= kDcInputY - 4)
+                        d.vis_media = i;
                     const int pw = std::min(360, 70 + m_gfx->TextWidth(FontSize::Small, r.text.c_str()));
                     const int px = kDcTextX, py = y + 6, ph = r.h - 12;
                     gfx::Gfx::CardStyle cs; cs.radius = ph / 2.0f; cs.shadow = 0.0f;
@@ -1502,6 +1560,15 @@ namespace sl::menu::ui {
     void Menu::OnTouchDiscord(int phase, int x, int y) {
         DiscordUi &d = *m_dc;
         DiscordService &s = d.svc;
+        if (m_album_video_active) {   // the video: tap the bar to seek, anywhere else to pause
+            if (phase != 0) return;
+            const double dur = m_album_video.Duration();
+            if (y > gfx::Gfx::Height - 120 && dur > 0.0)
+                m_album_video.Seek(dur * std::clamp((x - 40) / (double)(gfx::Gfx::Width - 80), 0.0, 1.0));
+            else
+                OnButtonDiscord(Btn::A);
+            return;
+        }
         if (s.state() != DiscordService::State::Ready) {   // sign-in screens: a tap is A
             if (phase == 0) OnButtonDiscord(Btn::A);
             return;
@@ -1579,9 +1646,7 @@ namespace sl::menu::ui {
                 case HText:   OnButtonDiscord(Btn::Y); break;
                 case HCancel: OnButtonDiscord(Btn::B); break;
                 case HMedia:  ViewOpen(d, m_gfx, h.idx); break;
-                case HAudio:  if (h.idx >= 0 && h.idx < (int)d.chat_rows.size())
-                                  m_dc->svc.requestSound(d.chat_rows[h.idx].url);
-                              SetStatus("Playing sound...");
+                case HAudio:  if (h.idx >= 0 && h.idx < (int)d.chat_rows.size()) DiscordPlay(h.idx);
                               break;
                 case HInput:  OnButtonDiscord(Btn::A); break;
                 case HPlus:   OnButtonDiscord(Btn::X); break;

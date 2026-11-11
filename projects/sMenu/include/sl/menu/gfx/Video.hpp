@@ -11,9 +11,8 @@
 // pause and seeking for the album's clip player.
 //
 // Decodes on a worker thread (libnx Thread, same pattern as
-// Menu::ShotDecodeTrampoline in Menu_Flow.cpp) into a pair of plain NV12
-// pixel buffers; the main thread's Tick() uploads whichever one is ready via
-// SDL_UpdateNVTexture. All SDL_Renderer calls stay on the main thread, same
+// Menu::ShotDecodeTrampoline in Menu_Flow.cpp) into three pixel buffers; the
+// main thread's Tick() uploads the newest one. All SDL_Renderer calls stay on the main thread, same
 // rule the cover-art decode already follows.
 //
 // On the real Switch build this decodes on the NVDEC hardware block via the
@@ -52,8 +51,9 @@ namespace sl::menu::gfx {
         // Call once per menu frame. Uploads a newly-decoded frame to the GPU
         // texture if the worker has produced one since the last Tick().
         void Tick();
-        // nullptr until Open has succeeded.
-        SDL_Texture *GetTexture() const { return m_tex; }
+        // nullptr until the first frame is on it: a fresh streaming texture
+        // holds whatever was in that memory, which drew as garbage.
+        SDL_Texture *GetTexture() const { return m_has_frame ? m_tex : nullptr; }
         void Close();
 
         // Transport. Positions are seconds from the start of the file.
@@ -99,6 +99,7 @@ namespace sl::menu::gfx {
         AVBufferRef     *m_hw_device_ctx = nullptr;
         int m_stream_idx = -1, m_astream_idx = -1;
         int m_width = 0, m_height = 0;
+        int m_out_w = 0, m_out_h = 0;         // the texture: the picture fitted to 1280x720
 
         Thread m_thread{};
         bool m_thread_running = false;
@@ -118,17 +119,20 @@ namespace sl::menu::gfx {
         float  m_rs_prev[2] = { 0, 0 };       // last input frame
         double m_skip_until = 0.0;            // drop frames before this (seek)
 
-        // Double-buffered NV12 pixel storage (Y plane + interleaved UV plane),
-        // sized to m_width/m_height. The worker fills whichever buffer is not
-        // the one currently on the GPU, then flips m_ready_buf; Tick() reads
-        // it and uploads if it names a buffer newer than what is on-screen.
+        // Triple-buffered frames (NV12, or RGBA on the console). The worker
+        // owns one, Tick() owns one, and m_mid holds the third plus kFresh
+        // when it is newer than Tick's. Each side swaps its own for the
+        // middle one, so neither ever touches a buffer the other is using.
+        // With two, the worker could start on the buffer Tick was uploading.
         struct Buf { std::vector<uint8_t> y, uv, rgba; int y_pitch = 0, uv_pitch = 0; };
-        Buf m_buf[2];
-        std::atomic<int> m_ready_buf{-1};
-        int m_shown_buf = -1;
+        static constexpr int kFresh = 4;
+        Buf m_buf[3];
+        std::atomic<int> m_mid{1};
+        int m_shown_buf = 2;
 #endif
 
         SDL_Texture *m_tex = nullptr;
+        bool m_has_frame = false;
     };
 
 } // namespace sl::menu::gfx

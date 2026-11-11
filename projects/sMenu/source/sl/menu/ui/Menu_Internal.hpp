@@ -689,6 +689,10 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.2.1" },
+            { false, "Discord: videos in a chat play full screen - tap one, or press Y" },
+            { false, "Album clips no longer show garbage before the first frame or tear while playing" },
+            { false, "Videos bigger than the screen are scaled down, so 1080p and 4K clips play" },
             { true,  "v2.2.0" },
             { false, "New layout: Blades, after the first Xbox 360 dashboard - a curved blade per category, with its own look on every screen" },
             { false, "Blades shows your account picture on its gamer card, and the widgets you switched on in its bottom band" },

@@ -446,6 +446,10 @@ namespace sl::menu::ui {
         void   DiscordBuildLists();
         void   DiscordBuildChat();
         void   DrawDiscordQr(const std::string &text, int x, int y, int size);
+        // Chat row `row` (an Audio or Video one): fetch it, then play it. A
+        // video plays full screen on m_album_video (DrawDiscordVideo).
+        void   DiscordPlay(int row);
+        void   DrawDiscordVideo();
         SDL_Texture *DiscordPicture(const std::string &url, int w = 40, int h = 40, const std::string &alt = "");
         // Draws it (the current frame, for a GIF); false while it loads.
         bool   DiscordDraw(const std::string &url, int x, int y, int w, int h, Uint8 a = 255,
