@@ -402,10 +402,14 @@ namespace sl::menu::ui {
         static void UpdateCheckTrampoline(void *self);
         void StartUpdateCheck();
         void PollUpdateCheck();
+        void CheckUpdatesNow();           // About's A: check now and say what came of it
+        void AskUpdate();                 // the question, with the size when known
+        void MarkUpdateSeen();            // answered: not asked about this release again
         Thread m_upd_thread{};
         bool   m_upd_running   = false;
         bool   m_upd_checked   = false;   // GitHub answered (set on the worker, read after m_upd_done)
         u64    m_upd_tick      = 0;       // last try, for the retry while offline
+        bool   m_upd_manual    = false;   // CheckUpdatesNow's, answered when it ends
         std::atomic<bool> m_upd_done{false};
         bool   m_check_updates = true;    // setting (persisted)
         bool   m_upd_available = false;

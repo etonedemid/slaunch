@@ -91,12 +91,13 @@ namespace sl::menu::ui {
 
     void Menu::PollOta() {
 #ifdef SL_SIMULATOR
-        // SL_OTA_DEMO=ask|check|get|install|done|same|fail opens the pop-up in that
+        // SL_OTA_DEMO=live|ask|check|get|install|done|same|fail opens the pop-up in that
         // state over the home screen, for screenshots: there is no card to update.
         static bool demo_done = false;
         if (const char *d = getenv("SL_OTA_DEMO"); d && !demo_done && m_screen == Screen::Main) {
             demo_done = true;
             const std::string s = d;
+            if (s == "live") return;   // only CanOta: the real check and plan, against the sim's card
             m_upd_latest = "v9.9.9";
             if (s == "ask") {   // the question instead, as PollUpdateCheck asks it
                 m_upd_zip = "x";

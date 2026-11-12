@@ -1183,7 +1183,10 @@ namespace sl::menu::ui {
         if (b == Btn::Down) m_about_scroll = std::min(maxScroll, m_about_scroll + 1);
         if (b == Btn::Up)   m_about_scroll = std::max(0, m_about_scroll - 1);
         if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = TH_About; }
-        if (b == Btn::A && CanOta() && !m_upd_zip.empty()) StartOta();
+        if (b == Btn::A) {
+            if (CanOta() && !m_upd_zip.empty() && !m_upd_running) StartOta();
+            else CheckUpdatesNow();
+        }
         return Action::None;
     }
     void Menu::DrawAbout() {
@@ -1202,7 +1205,8 @@ namespace sl::menu::ui {
         } else {
             char line[140];
             snprintf(line, sizeof(line), "%s  -  %s", ver,
-                     m_check_updates ? T("up to date") : T("update check off"));
+                     m_upd_running ? T("checking for updates...") : m_upd_checked ? T("up to date")
+                     : m_check_updates ? T("not checked yet") : T("update check off"));
             m_gfx->TextCentered(FontSize::Small, cx, 158, t.dim, line);
         }
         m_gfx->TextCentered(FontSize::Small, cx, 190, t.dim, "github.com/etonedemid/slaunch");
@@ -1227,10 +1231,8 @@ namespace sl::menu::ui {
         if (m_about_scroll + kAboutVisible < kChangelogN)
             m_gfx->TextCentered(FontSize::Small, cx, kAboutTop + kAboutVisible * kAboutRowH, t.dim, "v");
 
-        if (CanOta() && !m_upd_zip.empty())
-            DrawHint({ {{"a"}, "Update now"}, {{"up","down"}, "Scroll"}, {{"b"}, "Back"} });
-        else
-            DrawHint({ {{"up","down"}, "Scroll"}, {{"b"}, "Back"} });
+        DrawHint({ {{"a"}, CanOta() && !m_upd_zip.empty() ? "Update now" : "Check for updates"},
+                   {{"up","down"}, "Scroll"}, {{"b"}, "Back"} });
     }
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto openWidgets = [&]() {
@@ -2002,8 +2004,10 @@ namespace sl::menu::ui {
             return Action::None;
         }
         if (b == Btn::Up || b == Btn::Down) m_dialog_cursor ^= 1;
-        if (m_dialog == Dialog::ConfirmUpdate && (b == Btn::B || (b == Btn::A && m_dialog_cursor == 1)))
-            SetStatus("Update any time from Theming > About");
+        if (m_dialog == Dialog::ConfirmUpdate && (b == Btn::A || b == Btn::B)) {
+            MarkUpdateSeen();
+            if (b == Btn::B || m_dialog_cursor == 1) SetStatus("Update any time from Theming > About");
+        }
         if (b == Btn::B) { m_dialog = Dialog::None; m_pending_launch = 0; return Action::None; }
         if (b == Btn::A) {
             bool yes = (m_dialog_cursor == 0);

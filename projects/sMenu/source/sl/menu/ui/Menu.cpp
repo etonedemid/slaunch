@@ -2086,13 +2086,15 @@ namespace sl::menu::ui {
                 // The question gives the download size, so work out what changed
                 // now - only when it will ask: a plan reads every installed file,
                 // and the menu restarts after every game.
-                if (CanOta() && !zip.empty() && UpdateSeen() != tag) {
+                if (CanOta() && !zip.empty() && (m->m_upd_manual || UpdateSeen() != tag)) {
                     ota::Progress pr;
                     std::string err;
                     std::vector<ota::Entry> plan;
                     if (ota::Plan(zip, "sdmc:", plan, pr, err)) {
-                        for (const ota::Entry &e : plan) m->m_upd_bytes += e.csize;
-                        m->m_upd_plan = std::move(plan);
+                        u64 bytes = 0;
+                        for (const ota::Entry &e : plan) bytes += e.csize;
+                        m->m_upd_bytes = bytes;
+                        m->m_upd_plan  = std::move(plan);
                     }
                 }
                 m->m_upd_latest    = tag;
@@ -2103,7 +2105,7 @@ namespace sl::menu::ui {
         m->m_upd_done.store(true, std::memory_order_release);
     }
     void Menu::StartUpdateCheck() {
-        if (!m_check_updates || m_upd_running || m_upd_available || m_upd_checked) return;
+        if ((!m_check_updates && !m_upd_manual) || m_upd_running || m_upd_available || m_upd_checked) return;
         m_upd_tick = armGetSystemTick();
         m_upd_done.store(false, std::memory_order_release);
         if (R_SUCCEEDED(threadCreate(&m_upd_thread, &Menu::UpdateCheckTrampoline, this,
@@ -2238,31 +2240,58 @@ namespace sl::menu::ui {
         if (!m_upd_running && !m_upd_checked &&
             armGetSystemTick() - m_upd_tick > 30 * armGetSystemTickFreq())
             StartUpdateCheck();
+        if (m_upd_running) return;   // the fields below are the worker's until it ends
+        if (m_upd_manual) {
+            m_upd_manual = false;
+            if (m_upd_available && CanOta() && !m_upd_zip.empty()) { m_upd_told = true; AskUpdate(); }
+            else if (m_upd_available) {
+                snprintf(m_status, sizeof(m_status), "%s %s", T("Update available:"), m_upd_latest.c_str());
+                m_status_tick = armGetSystemTick();
+                m_status_secs = 6;
+            } else SetStatus(m_upd_checked ? "sLaunch is up to date" : "Could not reach GitHub");
+            return;
+        }
         // The result used to live only in Theming > About, where nobody saw
         // it. Say it once on the home screen, once per new release: the menu
         // restarts after every game and would nag otherwise.
         if (!m_upd_available || m_upd_told || m_screen != Screen::Main) return;
-        m_upd_told = true;
-        if (m_upd_latest == UpdateSeen()) return;
-        if (FILE *fp = fopen(kUpdateSeen, "w")) { fprintf(fp, "%s\n", m_upd_latest.c_str()); fclose(fp); }
-        // A build that can update itself asks; the others point at the installer.
-        if (CanOta() && !m_upd_zip.empty() && m_dialog == Dialog::None && !m_options_open) {
-            m_dialog_title = std::string(T("Hey! A new update came out, update?")) + " (" + m_upd_latest;
-            if (m_upd_bytes) {
-                char mb[24];
-                snprintf(mb, sizeof(mb), ", %.1f MB", m_upd_bytes / 1048576.0);
-                m_dialog_title += mb;
+        if (m_upd_latest == UpdateSeen()) { m_upd_told = true; return; }
+        // A build that can update itself asks, once nothing else is open. The
+        // release counts as seen when the question is answered, not when it
+        // opens: a menu restart (a game started) must not swallow it.
+        if (CanOta() && !m_upd_zip.empty()) {
+            if (m_dialog == Dialog::None && !m_options_open && m_ota == OtaStep::Off) {
+                m_upd_told = true;
+                AskUpdate();
             }
-            m_dialog_title += ")";
-            m_dialog_note = m_suspended ? T("The suspended game will be closed.") : "";
-            m_dialog_cursor = 0;
-            m_dialog        = Dialog::ConfirmUpdate;
             return;
         }
+        m_upd_told = true;
+        MarkUpdateSeen();
         snprintf(m_status, sizeof(m_status), "%s %s - %s", T("Update available:"),
                  m_upd_latest.c_str(), T("see Theming > About"));
         m_status_tick = armGetSystemTick();
         m_status_secs = 10;
+    }
+    void Menu::AskUpdate() {
+        m_dialog_title = std::string(T("Hey! A new update came out, update?")) + " (" + m_upd_latest;
+        if (m_upd_bytes) {
+            char mb[24];
+            snprintf(mb, sizeof(mb), ", %.1f MB", m_upd_bytes / 1048576.0);
+            m_dialog_title += mb;
+        }
+        m_dialog_title += ")";
+        m_dialog_note   = m_suspended ? T("The suspended game will be closed.") : "";
+        m_dialog_cursor = 0;
+        m_dialog        = Dialog::ConfirmUpdate;
+    }
+    void Menu::MarkUpdateSeen() {
+        if (FILE *fp = fopen(kUpdateSeen, "w")) { fprintf(fp, "%s\n", m_upd_latest.c_str()); fclose(fp); }
+    }
+    void Menu::CheckUpdatesNow() {
+        m_upd_manual = true;
+        if (!m_upd_running) { m_upd_checked = false; StartUpdateCheck(); }
+        SetStatus("Checking for updates...");
     }
     void Menu::EnterWelcome() {
         m_screen        = Screen::Welcome;

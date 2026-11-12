@@ -691,7 +691,7 @@ namespace sl::menu::ui {
         inline const LogLine kChangelog[] = {
             { true,  "v2.2.3" },
             { false, "Updates install from the menu: it asks when one is out, with the download size, and fetches only the files that changed" },
-            { false, "Theming > About: press A to update any time" },
+            { false, "Theming > About: press A to check for updates, or to update when one is out" },
             { false, "The update check keeps trying until the console is online, so it no longer misses a release after a reboot" },
             { false, "Blades: pop-ups sit in the middle of the screen" },
             { false, "Discord: when Discord stops accepting your token, the error says how to get a fresh one" },
