@@ -1289,7 +1289,8 @@ namespace sl::menu::ui {
         const Dialog dialog_before = m_dialog;
 
         Action a = Action::None;
-        if (m_options_open)               a = OnButtonOptions(b, out_app_id);
+        if (m_ota != OtaStep::Off)        a = OnButtonUpdate(b);   // over everything, like it is drawn
+        else if (m_options_open)          a = OnButtonOptions(b, out_app_id);
         else if (m_dialog != Dialog::None) a = OnButtonDialog(b, out_app_id);
         else switch (m_screen) {
             case Screen::Oobe:          a = OnButtonOobe(b);          break;
@@ -2060,24 +2061,53 @@ namespace sl::menu::ui {
     }
 
     // ---- Theming submenu ---------------------------------------------------
+    namespace {
+        constexpr const char *kUpdateSeen = "sdmc:/slaunch/config/update_seen";
+        // The release the home screen last told about.
+        std::string UpdateSeen() {
+            char last[32] = {};
+            if (FILE *fp = fopen(kUpdateSeen, "r")) {
+                if (!fgets(last, sizeof(last), fp)) last[0] = '\0';
+                fclose(fp);
+            }
+            last[strcspn(last, "\r\n")] = '\0';
+            return last;
+        }
+    }
     void Menu::UpdateCheckTrampoline(void *self) {
         Menu *m = static_cast<Menu *>(self);
         std::string body;
         if (net::Get("https://api.github.com/repos/etonedemid/slaunch/releases/latest",
                      body, 15)) {
+            m->m_upd_checked = true;
             std::string tag = JsonStr(body, "tag_name");
             if (!tag.empty() && CmpVer(tag.c_str(), SL_VERSION) > 0) {
+                const std::string zip = ota::ZipUrl(body);
+                // The question gives the download size, so work out what changed
+                // now - only when it will ask: a plan reads every installed file,
+                // and the menu restarts after every game.
+                if (CanOta() && !zip.empty() && UpdateSeen() != tag) {
+                    ota::Progress pr;
+                    std::string err;
+                    std::vector<ota::Entry> plan;
+                    if (ota::Plan(zip, "sdmc:", plan, pr, err)) {
+                        for (const ota::Entry &e : plan) m->m_upd_bytes += e.csize;
+                        m->m_upd_plan = std::move(plan);
+                    }
+                }
                 m->m_upd_latest    = tag;
+                m->m_upd_zip       = zip;
                 m->m_upd_available = true;
             }
         }
         m->m_upd_done.store(true, std::memory_order_release);
     }
     void Menu::StartUpdateCheck() {
-        if (!m_check_updates || m_upd_running || m_upd_available) return;
+        if (!m_check_updates || m_upd_running || m_upd_available || m_upd_checked) return;
+        m_upd_tick = armGetSystemTick();
         m_upd_done.store(false, std::memory_order_release);
         if (R_SUCCEEDED(threadCreate(&m_upd_thread, &Menu::UpdateCheckTrampoline, this,
-                                     nullptr, 0x8000, 0x3B, -2))) {
+                                     nullptr, 0x10000, 0x3B, -2))) {
             threadStart(&m_upd_thread);
             m_upd_running = true;
         }
@@ -2203,20 +2233,32 @@ namespace sl::menu::ui {
             threadClose(&m_upd_thread);
             m_upd_running = false;
         }
+        // The menu starts before the console is online after a reboot, so the
+        // first check usually finds no network: try again until one gets through.
+        if (!m_upd_running && !m_upd_checked &&
+            armGetSystemTick() - m_upd_tick > 30 * armGetSystemTickFreq())
+            StartUpdateCheck();
         // The result used to live only in Theming > About, where nobody saw
         // it. Say it once on the home screen, once per new release: the menu
         // restarts after every game and would nag otherwise.
         if (!m_upd_available || m_upd_told || m_screen != Screen::Main) return;
         m_upd_told = true;
-        constexpr const char *seen = "sdmc:/slaunch/config/update_seen";
-        char last[32] = {};
-        if (FILE *fp = fopen(seen, "r")) {
-            if (!fgets(last, sizeof(last), fp)) last[0] = '\0';
-            fclose(fp);
-            last[strcspn(last, "\r\n")] = '\0';
+        if (m_upd_latest == UpdateSeen()) return;
+        if (FILE *fp = fopen(kUpdateSeen, "w")) { fprintf(fp, "%s\n", m_upd_latest.c_str()); fclose(fp); }
+        // A build that can update itself asks; the others point at the installer.
+        if (CanOta() && !m_upd_zip.empty() && m_dialog == Dialog::None && !m_options_open) {
+            m_dialog_title = std::string(T("Hey! A new update came out, update?")) + " (" + m_upd_latest;
+            if (m_upd_bytes) {
+                char mb[24];
+                snprintf(mb, sizeof(mb), ", %.1f MB", m_upd_bytes / 1048576.0);
+                m_dialog_title += mb;
+            }
+            m_dialog_title += ")";
+            m_dialog_note = m_suspended ? T("The suspended game will be closed.") : "";
+            m_dialog_cursor = 0;
+            m_dialog        = Dialog::ConfirmUpdate;
+            return;
         }
-        if (m_upd_latest == last) return;
-        if (FILE *fp = fopen(seen, "w")) { fprintf(fp, "%s\n", m_upd_latest.c_str()); fclose(fp); }
         snprintf(m_status, sizeof(m_status), "%s %s - %s", T("Update available:"),
                  m_upd_latest.c_str(), T("see Theming > About"));
         m_status_tick = armGetSystemTick();
@@ -3045,6 +3087,7 @@ namespace sl::menu::ui {
         PollHbScan();       // swap in the homebrew browser list when its worker finishes
         PollResolvePins();  // fold in pinned-homebrew names/icons when its worker finishes
         PollUpdateCheck();  // join the update-check worker when it finishes
+        PollOta();          // ...and the updater's
         PollPing();         // anonymous online count heartbeat
         PollPlayers();      // Nextendo's players per game
 #ifdef SL_QEXT
@@ -3205,6 +3248,7 @@ namespace sl::menu::ui {
         if (m_options_open) DrawOptions();
         Phase("draw screen");
         if (m_dialog != Dialog::None) DrawDialog();
+        if (m_ota != OtaStep::Off) DrawUpdate();
 
         // Last, so it sits over every screen including dialogs, and always in
         // the system font: a user-selected font may have no digits worth

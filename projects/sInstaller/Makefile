@@ -19,7 +19,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := sLaunch Installer
 APP_AUTHOR  := sLaunch
-APP_VERSION := 2.2.2
+APP_VERSION := 2.2.3
 APP_ICON    := ../../assets/icon.jpg
 
 PKGCONF    := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
@@ -43,6 +43,9 @@ CXXFLAGS  = $(CFLAGS) -std=c++20 -fno-rtti -fno-exceptions
 
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
             -Wl,-Map,$(BUILD)/$(TARGET).map
+# The SDL stage dirs ahead of portlibs: its libwebp (1.5) replaces portlibs' 1.0.2,
+# which lacks what libwebpmux needs (WebPMalloc).
+LDFLAGS  += $(filter -L%,$(SDL_LIBS))
 
 # Network libs first (curl -> mbedtls -> z), minizip for extracting the update
 # zip (needs -lz after it), then SDL.

@@ -17,6 +17,7 @@
 #include <sl/menu/dbg/Debug.hpp>
 #include <sl/menu/cfg/UserCfg.hpp>
 #include <sl/menu/usb/Mtp.hpp>
+#include <sl/menu/net/Ota.hpp>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -249,7 +250,7 @@ namespace sl::menu::ui {
                             MetroGames,     // Metro's "my games" card view
                             Discord };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower,
-                            ConfirmRetroArch, ConfirmDelete,
+                            ConfirmRetroArch, ConfirmDelete, ConfirmUpdate,
                             CrashReport };   // a notice: one OK, no choice
         // Once per start: anything that crashed since the menu last looked
         // left a report in atmosphere/crash_reports (fatal_reports for a
@@ -403,10 +404,33 @@ namespace sl::menu::ui {
         void PollUpdateCheck();
         Thread m_upd_thread{};
         bool   m_upd_running   = false;
+        bool   m_upd_checked   = false;   // GitHub answered (set on the worker, read after m_upd_done)
+        u64    m_upd_tick      = 0;       // last try, for the retry while offline
         std::atomic<bool> m_upd_done{false};
         bool   m_check_updates = true;    // setting (persisted)
         bool   m_upd_available = false;
         std::string m_upd_latest;         // e.g. "v0.6.0" when an update is found
+        std::string m_upd_zip;            // its "-sd.zip", for the update below
+        std::vector<ota::Entry> m_upd_plan;   // what it would download, worked out before asking
+        u64    m_upd_bytes     = 0;       // and how much that is
+
+        // The update itself, in the menu (Menu_Update.cpp): only the files that
+        // changed, no installer. A pop-up over the layout, in the layout's look.
+        enum class OtaStep { Off, Busy, Done, Same, Failed };   // Busy: m_ota_pr.stage says which part
+        static bool CanOta();             // this build installs the release's layout
+        void   StartOta();
+        void   PollOta();
+        static void OtaTrampoline(void *self);
+        Action OnButtonUpdate(Btn b);
+        void   DrawUpdate();
+        OtaStep m_ota = OtaStep::Off;
+        std::string m_ota_err;
+        std::vector<ota::Entry> m_ota_files;
+        ota::Progress m_ota_pr;
+        Thread m_ota_thread{};
+        bool   m_ota_running = false;
+        std::atomic<bool> m_ota_finished{false}, m_ota_ok{false};
+        u64    m_ota_tick = 0;            // when it opened, for the animations
         int    m_about_scroll  = 0;       // first visible changelog line in About
         // Anonymous online count (opt-out, Theming). While the menu is up it
         // posts a random install id and the version every few minutes; the

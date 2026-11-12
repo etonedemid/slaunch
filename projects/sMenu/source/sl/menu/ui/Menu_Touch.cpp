@@ -57,6 +57,7 @@ namespace sl::menu::ui {
     Menu::Action Menu::OnTouch(int phase, int x, int y, u64 &out_app_id) {
         out_app_id = 0;
         if (m_sd_removed) return Action::None;   // frozen: awaiting reboot
+        if (m_ota != OtaStep::Off) return Action::None;   // the updater is buttons only
         if (m_boom_state != 0) { if (phase == 0) BoomReassemble(); return Action::None; }
 #ifdef SL_QEXT
         // The notification banner sits over every screen: a tap opens its chat.

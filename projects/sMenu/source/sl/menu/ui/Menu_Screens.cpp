@@ -1183,6 +1183,7 @@ namespace sl::menu::ui {
         if (b == Btn::Down) m_about_scroll = std::min(maxScroll, m_about_scroll + 1);
         if (b == Btn::Up)   m_about_scroll = std::max(0, m_about_scroll - 1);
         if (b == Btn::B) { m_screen = Screen::Theming; m_sub_scroll = TH_About; }
+        if (b == Btn::A && CanOta() && !m_upd_zip.empty()) StartOta();
         return Action::None;
     }
     void Menu::DrawAbout() {
@@ -1226,7 +1227,10 @@ namespace sl::menu::ui {
         if (m_about_scroll + kAboutVisible < kChangelogN)
             m_gfx->TextCentered(FontSize::Small, cx, kAboutTop + kAboutVisible * kAboutRowH, t.dim, "v");
 
-        DrawHint({ {{"up","down"}, "Scroll"}, {{"b"}, "Back"} });
+        if (CanOta() && !m_upd_zip.empty())
+            DrawHint({ {{"a"}, "Update now"}, {{"up","down"}, "Scroll"}, {{"b"}, "Back"} });
+        else
+            DrawHint({ {{"up","down"}, "Scroll"}, {{"b"}, "Back"} });
     }
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto openWidgets = [&]() {
@@ -1998,6 +2002,8 @@ namespace sl::menu::ui {
             return Action::None;
         }
         if (b == Btn::Up || b == Btn::Down) m_dialog_cursor ^= 1;
+        if (m_dialog == Dialog::ConfirmUpdate && (b == Btn::B || (b == Btn::A && m_dialog_cursor == 1)))
+            SetStatus("Update any time from Theming > About");
         if (b == Btn::B) { m_dialog = Dialog::None; m_pending_launch = 0; return Action::None; }
         if (b == Btn::A) {
             bool yes = (m_dialog_cursor == 0);
@@ -2011,6 +2017,7 @@ namespace sl::menu::ui {
             }
             if (which == Dialog::ConfirmCloseGame) return Action::TerminateApp;
             if (which == Dialog::ConfirmDelete) { FmConfirmDelete(); return Action::None; }
+            if (which == Dialog::ConfirmUpdate) { StartOta(); return Action::None; }
             if (which == Dialog::ConfirmRetroArch) {
                 m_retroarch = true;
                 SaveSettings();
@@ -3683,8 +3690,9 @@ namespace sl::menu::ui {
         // Dim the whole screen, then draw a centered box.
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0,0,0,150});
         int cx = gfx::Gfx::Width / 2;
-        // The note wraps; the box grows to fit it.
-        const int bw = 640;
+        // The note wraps; the box grows to fit it, and is as wide as its heading.
+        const char *title = m_dialog_title.empty() ? T("Close running application?") : m_dialog_title.c_str();
+        const int bw = std::max(640, m_gfx->TextWidth(FontSize::Large, title) + 80);
         const auto note = m_dialog_note.empty() ? std::vector<std::string>()
                         : WrapText(FontSize::Small, m_dialog_note, bw - 60);
         const int nlh = m_gfx->LineHeight(FontSize::Small) + 4;
@@ -3697,9 +3705,7 @@ namespace sl::menu::ui {
 
         // Power prompts set their own heading (and sometimes a warning line); the
         // launch/close dialogs are always about the running game.
-        m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title,
-                            m_dialog_title.empty() ? T("Close running application?")
-                                                   : m_dialog_title.c_str());
+        m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title, title);
         for (size_t l = 0; l < note.size(); l++)
             m_gfx->TextCentered(FontSize::Small, cx, by + 88 + (int)l * nlh, t.dim, note[l].c_str());
 

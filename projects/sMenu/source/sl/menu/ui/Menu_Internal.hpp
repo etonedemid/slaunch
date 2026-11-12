@@ -689,6 +689,12 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.2.3" },
+            { false, "Updates install from the menu: it asks when one is out, with the download size, and fetches only the files that changed" },
+            { false, "Theming > About: press A to update any time" },
+            { false, "The update check keeps trying until the console is online, so it no longer misses a release after a reboot" },
+            { false, "Blades: pop-ups sit in the middle of the screen" },
+            { false, "Discord: when Discord stops accepting your token, the error says how to get a fresh one" },
             { true,  "v2.2.2" },
             { false, "Blades: the selected game gets a page - genre, publisher, release year, players, age rating and the critics' score in stars" },
             { false, "Forwarders for ports (Call of Duty, Halo, Need for Speed...) get their page from Wikidata" },

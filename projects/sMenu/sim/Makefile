@@ -33,6 +33,7 @@ MENU_SRCS := \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Shelf.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Xmb.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Xbox.cpp \
+	$(MENU_DIR)/source/sl/menu/ui/Menu_Update.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Flow.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Deck.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Metro.cpp \
@@ -49,6 +50,7 @@ MENU_SRCS := \
 	$(MENU_DIR)/source/sl/menu/hb/Homebrew.cpp \
 	$(MENU_DIR)/source/sl/menu/hb/Shortcuts.cpp \
 	$(MENU_DIR)/source/sl/menu/net/Http.cpp \
+	$(MENU_DIR)/source/sl/menu/net/Ota.cpp \
 	$(MENU_DIR)/source/sl/menu/net/ContentFilter.cpp \
 	$(MENU_DIR)/source/sl/menu/news/News.cpp \
 	$(MENU_DIR)/source/sl/menu/play/PlayStats.cpp \
@@ -84,7 +86,7 @@ INCLUDES  := -I$(SIM_DIR)include \
 # decode - there is no Tegra/NVDEC on a desktop). Same VideoPlayer source as
 # the Switch build; only the hwaccel that comes back from avcodec_open2()
 # differs. See THIRDPARTY.md.
-PKGS      := sdl3 sdl3-image sdl3-ttf sdl3-mixer libcurl \
+PKGS      := sdl3 sdl3-image sdl3-ttf sdl3-mixer libcurl zlib \
              libavformat libavcodec libavutil
 PKGCFLAGS := $(shell pkg-config --cflags $(PKGS))
 PKGLIBS   := $(shell pkg-config --libs $(PKGS))

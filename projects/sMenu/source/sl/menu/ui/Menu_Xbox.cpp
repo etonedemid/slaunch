@@ -1213,13 +1213,11 @@ namespace sl::menu::ui {
         return (int)floorf(BsTop(scroll, rows) + (float)(y - (kBsY + 8)) / (float)kBsRowH);
     }
 
-    // Pop-ups: the screen dimmed, and a pale card in the blade's colour with a
-    // darker bar for its title, as the gamer card has. Returns the card's left edge.
+    // Pop-ups: the screen dimmed, and a pale card in the blade's colour with a darker
+    // bar for its title, as the gamer card has, centred on the screen. Returns its left edge.
     int Menu::BladesPopup(int cw, int ch, const std::string &title) {
         const SDL_Color base = BladesColorOf(m_xmb_col);
-        int left, right;
-        BladesSpan(left, right);
-        const int x = std::clamp((left + right - cw) / 2, 8, W - cw - 8), y = std::max(12, (H - ch) / 2);
+        const int x = (W - cw) / 2, y = std::max(12, (H - ch) / 2);
         m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 135 });
         XbCard((float)x, (float)y, (float)cw, (float)ch, 10.0f, 20.0f, WithAlpha(Gloss(base, 1.58f), 250));
         XbCard(x + 3.0f, y + 3.0f, cw - 6.0f, 36.0f, 8.0f, 0.0f, WithAlpha(Shade(base, 0.48f), 250));

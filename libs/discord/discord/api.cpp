@@ -78,6 +78,10 @@ Http::Response Call(const std::string& method, const std::string& path, const st
 
 std::string ErrorText(const Http::Response& r) {
     if (!r.error.empty()) return "Network error: " + r.error;
+    // Discord's own text here is just "401: Unauthorized".
+    if (r.status == 401)
+        return "Discord didn't accept this token. Copy a fresh one from a browser that is still signed in "
+               "(signing out there cancels it), or sign in with the QR code.";
     if (auto doc = J::Parse(r.body)) {
         yyjson_val* root = J::Root(doc);
         std::string msg = J::S(root, "message");
@@ -85,7 +89,6 @@ std::string ErrorText(const Http::Response& r) {
             return "Discord asked for a CAPTCHA, which sLaunch cannot show. Try the QR code again later, or press Y to use a token.";
         if (!msg.empty()) return msg;
     }
-    if (r.status == 401) return "This account's token is no longer valid.";
     if (r.status == 403) return "You don't have permission to do that.";
     if (r.status == 429) return "You're being rate limited. Try again in a moment.";
     return Str::Format("Discord returned HTTP %ld.", r.status);
