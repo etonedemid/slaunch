@@ -366,14 +366,14 @@ namespace sl::menu::ui {
             // social hub stood your avatar on one.
             m_gfx->FillRect(x, y, w, h, Fade(SDL_Color{ 232, 233, 235, 255 }, a));
             const int s = std::min(w - 40, h - 90);
-            if (SDL_Texture *mii = MiiBody()) {
+            if (MiiHave()) {
                 // The Mii standing on the plate, as the hub stood your avatar:
                 // the render is a square, the body its lower part, feet at the foot.
                 const int ms = (int)((h - 64) / 0.60f), foot = y + h - 44;
                 for (int k = 0; k < 4; k++)   // a soft shadow, narrower and darker toward its middle
                     m_gfx->FillRect(x + w / 2 - ms * (9 - 2 * k) / 100, foot - 4 + k, ms * (18 - 4 * k) / 100, 8 - 2 * k,
                                     Fade(SDL_Color{ 0, 0, 0, 14 }, a));
-                m_gfx->DrawImage(mii, x + (w - ms) / 2, foot - ms * 975 / 1000, ms, ms, a);
+                MiiDraw(x + (w - ms) / 2, foot - ms * 975 / 1000, ms, a);
             } else if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, x + (w - s) / 2, y + 26, s, s, a);
             else {
                 m_gfx->FillRect(x + (w - s) / 2, y + 26, s, s, Fade(SDL_Color{ 200, 202, 205, 255 }, a));

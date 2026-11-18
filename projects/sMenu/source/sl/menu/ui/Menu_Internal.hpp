@@ -62,12 +62,12 @@ namespace sl::menu::ui {
     // has; a stale hand-counted number there silently makes the last row
     // untappable.
     enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_MetroColors, TH_ShelfVert, TH_Backdrop, TH_TileCols, TH_TileRows,
+           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_MetroColors, TH_NxeTint, TH_NxeIcon, TH_ShelfVert, TH_Backdrop, TH_TileCols, TH_TileRows,
            TH_TdbRegion, TH_Sgdb, TH_SgdbKey, TH_FlowSet, TH_Wrap,
            TH_Hints, TH_Counter, TH_RetroArch, TH_Collections, TH_ShowHidden, TH_Fonts,
            TH_Language, TH_Music,
            TH_Widgets, TH_Entries,
-           TH_Sleep, TH_SleepTv, TH_AskUser, TH_AutoUser,
+           TH_Sleep, TH_SleepTv, TH_AskUser, TH_AutoUser, TH_Lock, TH_Passcode,
            TH_Welcome, TH_Updates, TH_Online, TH_Players, TH_DiscordAlerts, TH_DiscordGame, TH_DiscordSound, TH_DiscordRpc, TH_Usb,
            TH_About, TH_Back, TH_Count };
 
@@ -748,6 +748,14 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.5.0" },
+            { false, "Your Mii is drawn in 3D on the NXE profile and Metro's gamer tile, and it moves" },
+            { false, "Lock screen on wake, with an optional passcode (Theming > Lock screen), styled for every layout" },
+            { false, "NXE can be themed like Metro: one colour for the panels and one for the icons (Theming > NXE colours)" },
+            { false, "Collections show their games' covers in Flow and Shelf, and a new cover shows at once" },
+            { false, "Every language is translated in full again" },
+            { false, "Text that mixes Cyrillic or other scripts with Latin letters sits on one baseline" },
+            { false, "Fixed crashes: running out of memory with Discord connected, after the Album, on waking, and when changing layouts" },
             { true,  "v2.3.1" },
             { false, "NXE: the game library's panels draw again instead of four squares in their corners, and the list is readable" },
             { false, "NXE: the game page shows every row, rating included, above the time played" },

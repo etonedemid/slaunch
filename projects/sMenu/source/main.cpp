@@ -15,6 +15,10 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <new>
+#include <exception>
+#include <csignal>
+#include <malloc.h>
 #include <unordered_map>
 #include <sys/stat.h>
 
@@ -99,6 +103,46 @@ static void BootLog(const char *fmt, ...) {
     va_end(ap);
     fputc('\n', fp);
     fclose(fp);
+}
+
+// Out of memory. The menu is built without exceptions, so a failed new (or any
+// libstdc++ throw) is std::terminate -> abort -> exit, and an exiting qlaunch
+// is am's fatal 2128-0100: the whole console goes down. A reserve held from
+// boot is given up the first time new fails, which lets that allocation
+// succeed; the next frame trims the art caches and takes the reserve back.
+namespace {
+    constexpr size_t kMemReserve = 8u << 20;
+    std::atomic<void *> g_MemReserve{ nullptr };
+    std::atomic<bool> g_MemLow{ false };
+}
+static void OnNewFail() {
+    if (void *r = g_MemReserve.exchange(nullptr)) { free(r); g_MemLow.store(true); return; }
+    std::set_new_handler(nullptr);   // nothing left to give: the next failure terminates
+}
+static void OnTerminate() {
+#ifdef SL_QEXT
+    BootLog("fatal: std::terminate (%s), malloc heap %u MB, arena %lu of %lu MB used",
+            g_MemLow.load() ? "out of memory" : "not memory", (unsigned)mallinfo().uordblks >> 20,
+            (qext_arena_size() - qext_arena_free_bytes()) >> 20, qext_arena_size() >> 20);
+#else
+    BootLog("fatal: std::terminate (%s), malloc heap %u MB",
+            g_MemLow.load() ? "out of memory" : "not memory", (unsigned)mallinfo().uordblks >> 20);
+#endif
+    svcBreak(BreakReason_Panic, 0, 0);   // a crash report with this stack, not a silent exit
+    abort();
+}
+// Any abort (an assert, a library giving up): newlib's would exit quietly,
+// which takes the console down with no trace. Break instead, so Atmosphere
+// writes qlaunch's crash report with the stack that called it.
+static void OnAbort(int) {
+    BootLog("fatal: abort, malloc heap %u MB", (unsigned)mallinfo().uordblks >> 20);
+    svcBreak(BreakReason_Panic, 0, 0);
+}
+static void MemGuardArm() {
+    if (!g_MemReserve.load()) g_MemReserve.store(malloc(kMemReserve));
+    std::set_new_handler(OnNewFail);
+    std::set_terminate(OnTerminate);
+    signal(SIGABRT, OnAbort);
 }
 
 // Rewrite antialias=1 to antialias=0 in the settings file. Used when the
@@ -417,7 +461,10 @@ static void OnSleepRequested() {
 }
 static void OnSleepFinished()  { if (g_Asleep) BootLog("applet: woke up, presenting again"); g_Asleep = false; }
 static void OnAppletHook(AppletHookType hook, void *) {
-    if (hook == AppletHookType_OnResume) OnSleepFinished();
+    if (hook == AppletHookType_OnResume) {
+        if (g_Asleep && g_UI) g_UI->Lock(false);   // woke with the menu up
+        OnSleepFinished();
+    }
 }
 
 #ifndef SL_QEXT
@@ -618,6 +665,7 @@ struct MenuRun {
 static MenuRun *g_Run = nullptr;
 
 static bool MenuBoot() {
+    MemGuardArm();
     MenuRun &r = *(g_Run = new MenuRun);
 
     // sSystem hands us the selected user + suspended-app state at launch.
@@ -790,6 +838,12 @@ static bool MenuBoot() {
 static void MenuFrame() {
     MenuRun &r = *g_Run;
     Menu &ui = *r.ui;
+    if (g_MemLow.exchange(false)) {
+        BootLog("mem: out of memory, reserve spent, malloc heap %u MB; trimming", (unsigned)mallinfo().uordblks >> 20);
+        ui.MemoryLow();
+    } else if (!g_MemReserve.load()) {
+        MemGuardArm();   // the trim has had its frames to land
+    }
     SDL_Joystick *joy = r.joy;
     bool &has_suspended = r.has_suspended;
     u64  &suspended_id  = r.suspended_id;
@@ -1228,6 +1282,15 @@ void onOpen(void) {
     if (g_Run->has_suspended) g_UI->SetSuspendedApp(g_Run->suspended_id);
     else                      g_UI->ClearSuspendedApp();
     g_UI->ShowPendingError();
+}
+
+// Our loader patch calls this after onOpen when the console wakes. inGame: a
+// game had the screen when it slept; it goes back to it once unlocked, or
+// straight away with the lock screen off.
+void onWake(int inGame) {
+    if (!g_Run) return;
+    if (g_UI->Lock(inGame != 0) || !inGame || !g_Run->has_suspended) return;
+    DispatchAction(Menu::Action::ResumeApp, 0, g_Run->has_suspended, g_Run->suspended_id);
 }
 
 void onHomeButton(void) {

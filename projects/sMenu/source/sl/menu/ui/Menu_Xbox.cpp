@@ -431,6 +431,9 @@ namespace sl::menu::ui {
 
     struct Menu::XboxSkin {
         std::string dir;                                    // "" = built-in
+        std::string themed;                                 // NXE in the theme's colours: what it was built for
+        std::vector<SDL_Texture *> tinted;                  // ...its grey panels, drawn in the tint
+        SDL_Color tint{}, icon{};                           // ...the colours they carry now
         SDL_Texture *bg = nullptr;                          // NXE: the whole screen
         SDL_Texture *face = nullptr;                        // Blades: any open blade, tinted its colour
         SDL_Texture *spine = nullptr, *spine_r = nullptr;   // Blades: one blade's tile, left / right stack
@@ -482,16 +485,59 @@ namespace sl::menu::ui {
         const std::string &name = XboxSkinName();
         const std::string dir = name.empty() ? std::string()
             : std::string(kSkinDir) + (m_ui_mode == UiMode::NXE ? "/nxe/" : "/blades/") + name;
-        if (m_xskin && m_xskin->dir == dir) return *m_xskin;
+        // NXE in the theme's colours: every panel grey under one tint, every
+        // icon in one colour. A change of either (or of theme) builds it again.
+        const bool themed = m_ui_mode == UiMode::NXE && m_nxe_themed;
+        char key[16] = "";
+        if (themed) snprintf(key, sizeof(key), "theme %d", m_theme.CurrentIndex());
+        auto same = [](SDL_Color a, SDL_Color b) { return a.r == b.r && a.g == b.g && a.b == b.b; };
+        if (m_xskin && m_xskin->dir == dir && m_xskin->themed == key) {
+            // A new tint or icon colour is only a colour mod on what is loaded.
+            XboxSkin &k = *m_xskin;
+            if (themed && !same(k.tint, m_nxe_tint)) {
+                for (SDL_Texture *t : k.tinted) SDL_SetTextureColorMod(t, m_nxe_tint.r, m_nxe_tint.g, m_nxe_tint.b);
+                k.tint = m_nxe_tint;
+                const int luma = (m_nxe_tint.r * 299 + m_nxe_tint.g * 587 + m_nxe_tint.b * 114) / 1000;
+                k.list_sel = luma > 165 ? SDL_Color{ 25, 25, 27, 255 } : SDL_Color{ 255, 255, 255, 255 };
+            }
+            if (themed && !same(k.icon, m_nxe_icon)) {
+                for (auto &kv : k.icons) if (kv.second) SDL_SetTextureColorMod(kv.second, m_nxe_icon.r, m_nxe_icon.g, m_nxe_icon.b);
+                k.icon = m_nxe_icon;
+            }
+            return k;
+        }
         XboxSkinDrop();
         m_xskin = new XboxSkin;
         XboxSkin &s = *m_xskin;
         s.dir = dir;
+        s.themed = key;
+        s.tint = m_nxe_tint;
+        s.icon = m_nxe_icon;
+        // The theme's backdrop stands in for the skin's own picture and floor.
+        auto load = [&](const std::string &p, const std::string &base) -> SDL_Texture * {
+            if (themed && (base == "background" || base == "floor")) return nullptr;
+            if (themed && base.compare(0, 7, "button_") != 0 && base.compare(0, 4, "star") != 0) {
+                SDL_Texture *t = m_gfx->LoadImageTinted(p.c_str(), m_nxe_tint);
+                if (t) s.tinted.push_back(t);
+                return t;
+            }
+            return m_gfx->LoadImage(p.c_str());
+        };
+        // ...and its text in the theme's colours, dark or light on the tinted bar.
+        auto themeText = [&] {
+            if (!themed) return;
+            const Theme &t = m_theme.At(m_theme.CurrentIndex());
+            s.text = s.list_text = t.fg;
+            s.dim = t.dim;
+            const int luma = (m_nxe_tint.r * 299 + m_nxe_tint.g * 587 + m_nxe_tint.b * 114) / 1000;
+            s.list_sel = luma > 165 ? SDL_Color{ 25, 25, 27, 255 } : SDL_Color{ 255, 255, 255, 255 };
+            s.has_text = s.has_list = s.has_dim = s.has_sel = true;
+        };
         // What sLaunch ships, for whatever the skin leaves alone.
         auto builtin = [&] {
             auto own = [&](const char *file) -> SDL_Texture * {
                 const std::string p = std::string(m_ui_mode == UiMode::NXE ? kNxArt : kXbArt) + file;
-                return Exists(p) ? m_gfx->LoadImage(p.c_str()) : nullptr;
+                return Exists(p) ? load(p, std::string(file, strcspn(file, "."))) : nullptr;
             };
             if (m_ui_mode == UiMode::NXE) {
                 if (!s.bg) s.bg = own("background.png");
@@ -525,13 +571,13 @@ namespace sl::menu::ui {
             if (!s.star) s.star = own("star.png");
             if (!s.star_off) s.star_off = own("star_off.png");
         };
-        if (dir.empty()) { builtin(); return s; }
+        if (dir.empty()) { builtin(); themeText(); return s; }
         auto img = [&](const std::string &base) -> SDL_Texture * {
             for (const char *ext : { ".png", ".jpg" }) {
                 const std::string p = dir + "/" + base + ext;
                 struct stat st {};
                 if (stat(p.c_str(), &st) == 0)
-                    if (SDL_Texture *t = m_gfx->LoadImage(p.c_str())) return t;
+                    if (SDL_Texture *t = load(p, base)) return t;
             }
             return nullptr;
         };
@@ -614,6 +660,7 @@ namespace sl::menu::ui {
             fclose(fp);
         }
         builtin();
+        themeText();
         return s;
     }
 
@@ -630,7 +677,8 @@ namespace sl::menu::ui {
         paths.push_back(std::string(kNxArt) + "icon_" + name + ".png");
         for (const std::string &p : paths) {
             struct stat st {};
-            if (stat(p.c_str(), &st) == 0 && (t = m_gfx->LoadImage(p.c_str()))) break;
+            if (stat(p.c_str(), &st) == 0 &&
+                (t = m_nxe_themed ? m_gfx->LoadImageTinted(p.c_str(), m_nxe_icon) : m_gfx->LoadImage(p.c_str()))) break;
         }
         s.icons[name] = t;
         return t;
@@ -1401,6 +1449,7 @@ namespace sl::menu::ui {
         }
     }
     void Menu::NxeTheme(Theme &t) {
+        if (m_nxe_themed) return;   // the theme's own colours (Theming > NXE colours)
         const XboxSkin &sk = Skin();
         t.bg_top    = SDL_Color{ 120, 170, 40, 255 };
         t.bg_bottom = SDL_Color{ 200, 204, 206, 255 };
@@ -1870,9 +1919,9 @@ namespace sl::menu::ui {
 
         // The Mii the account's picture was made from, as studio data; "" when
         // the picture is a character, or there is no Mii service.
-        std::string AccountMiiHex(AccountUid uid) {
+        std::string AccountMiiHex(AccountUid uid, u8 *cid) {
 #ifdef SL_SIMULATOR
-            (void)uid;
+            (void)uid; (void)cid;
             return "000d142a303f434b717a7b84939ba6b2bbbec5cbc9d0e2ea010d15252b3250535960736f726870757f8289a0a7aeb1";
 #else
             #define MIILOG(...) do { if (FILE *f_ = fopen("sdmc:/slaunch/boot.log", "a")) { fputs("mii: ", f_); fprintf(f_, __VA_ARGS__); fputc('\n', f_); fclose(f_); } } while (0)
@@ -1898,7 +1947,7 @@ namespace sl::menu::ui {
                     if (!memcmp(&all[i].create_id, ud.miiID, 16)) hit = i;
                 MIILOG("get rc=0x%x count=%d account=%d", rc, n, hit);
                 if (hit < 0 && n > 0) hit = 0;
-                if (hit >= 0) out = MiiStudioHex((const u8 *)&all[hit]);
+                if (hit >= 0) { out = MiiStudioHex((const u8 *)&all[hit]); memcpy(cid, &all[hit].create_id, 16); }
                 miiDatabaseClose(&db);
             } else {
                 MIILOG("open rc=0x%x", rc);
@@ -1906,6 +1955,67 @@ namespace sl::menu::ui {
             miiExit();
             return out;
             #undef MIILOG
+#endif
+        }
+
+        // Debug: with sdmc:/slaunch/config/dump_miimodel present, copies the
+        // MiiModel system archive (0100000000000802) to sdmc:/slaunch/miimodel/
+        // once, to work out the local 3D renderer from the console's own data.
+        void MiiDumpModel() {
+#ifndef SL_SIMULATOR
+            const char *flag = "sdmc:/slaunch/config/dump_miimodel";
+            struct stat st {};
+            if (stat(flag, &st) != 0) return;
+            remove(flag);
+            FILE *log = fopen("sdmc:/slaunch/boot.log", "a");
+            FsStorage sto;
+            Result rc = fsOpenDataStorageByDataId(&sto, 0x0100000000000802ull, NcmStorageId_BuiltInSystem);
+            if (R_SUCCEEDED(rc)) rc = romfsMountFromStorage(sto, 0, "miimodel");
+            if (log) fprintf(log, "mii: miimodel mount rc=0x%x\n", rc);
+            if (R_FAILED(rc)) { if (log) fclose(log); return; }
+            mkdir("sdmc:/slaunch/miimodel", 0777);
+            if (DIR *d = opendir("miimodel:/")) {
+                while (dirent *e = readdir(d)) {
+                    const std::string src = std::string("miimodel:/") + e->d_name, dst = std::string("sdmc:/slaunch/miimodel/") + e->d_name;
+                    FILE *i = fopen(src.c_str(), "rb"), *o = i ? fopen(dst.c_str(), "wb") : nullptr;
+                    long n = 0;
+                    if (i && o) { static char buf[64 * 1024]; size_t k; while ((k = fread(buf, 1, sizeof(buf), i)) > 0) n += (long)fwrite(buf, 1, k, o); }
+                    if (o) fclose(o);
+                    if (i) fclose(i);
+                    if (log) fprintf(log, "mii: miimodel %s %ld bytes\n", e->d_name, n);
+                }
+                closedir(d);
+            }
+            romfsUnmount("miimodel");
+            if (log) fclose(log);
+#endif
+        }
+
+        // The system's own picture of the Mii (miiimg, 256x256 RGBA, drawn by
+        // Mii Edit), saved as a PNG: works offline, and Nintendo's render
+        // server is blocked on most modded consoles.
+        bool MiiSystemImage(const u8 *cid, const char *png) {
+#ifdef SL_SIMULATOR
+            (void)cid; (void)png;
+            return false;
+#else
+            Result rc = miiimgInitialize();
+            s32 n = 0;
+            if (R_SUCCEEDED(rc)) rc = miiimgGetCount(&n);
+            bool ok = false;
+            for (s32 i = 0; R_SUCCEEDED(rc) && i < n && !ok; i++) {
+                MiiimgImageAttribute a{};
+                if (R_FAILED(miiimgGetAttribute(i, &a)) || memcmp(&a.create_id, cid, 16)) continue;
+                std::vector<u8> px(256 * 256 * 4);
+                if (R_FAILED(miiimgLoadImage(a.image_id, px.data(), px.size()))) break;
+                if (SDL_Surface *sf = SDL_CreateSurfaceFrom(256, 256, SDL_PIXELFORMAT_RGBA32, px.data(), 256 * 4)) {
+                    ok = IMG_SavePNG(sf, png);
+                    SDL_DestroySurface(sf);
+                }
+            }
+            if (FILE *f = fopen("sdmc:/slaunch/boot.log", "a")) { fprintf(f, "mii: miiimg rc=0x%x count=%d local=%d\n", rc, n, ok); fclose(f); }
+            if (R_SUCCEEDED(rc) || n) miiimgExit();
+            return ok;
 #endif
         }
     }
@@ -1932,9 +2042,16 @@ namespace sl::menu::ui {
             m_mii_running = false;
             struct stat st {};
             if (stat(m_mii_path.c_str(), &st) == 0) m_mii_tex[m_mii_job] = m_gfx->LoadImage(m_mii_path.c_str());
+            // The first try runs before the network is up on boot; without a
+            // retry the Mii stayed blank for the whole session.
+            if (!m_mii_tex[m_mii_job]) {
+                m_mii_tried[m_mii_job] = false;
+                m_mii_retry = armGetSystemTick() + 30 * armGetSystemTickFreq();
+            }
         }
-        if (m_mii_tried[which] || m_mii_running) return m_mii_tex[which];
-        if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = AccountMiiHex(m_user); }
+        if (m_mii_tried[which] || m_mii_running || armGetSystemTick() < m_mii_retry) return m_mii_tex[which];
+        if (!m_mii_hex_read) MiiDumpModel();
+        if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = AccountMiiHex(m_user, m_mii_cid); }
         m_mii_tried[which] = true;
         if (m_mii_hex.empty()) return nullptr;
         // Named by the Mii's look, so an edit in Mii Edit renders it again.
@@ -1944,9 +2061,14 @@ namespace sl::menu::ui {
         mkdir("sdmc:/slaunch/cache/mii", 0777);
         m_mii_path = std::string("sdmc:/slaunch/cache/mii/") + name;
         struct stat st {};
-        if (stat(m_mii_path.c_str(), &st) == 0 && net::ImageLooksWhole(m_mii_path.c_str())) {
+        if (stat(m_mii_path.c_str(), &st) == 0 && st.st_size > 0 && net::ImageLooksWhole(m_mii_path.c_str()))
             m_mii_tex[which] = m_gfx->LoadImage(m_mii_path.c_str());
-            return m_mii_tex[which];
+        if (m_mii_tex[which]) return m_mii_tex[which];
+        remove(m_mii_path.c_str());   // an empty or broken cache file used to hide the Mii for good
+        // The face is in the system's image database; only the body needs the server.
+        if (which == 1 && MiiSystemImage(m_mii_cid, m_mii_path.c_str())) {
+            m_mii_tex[1] = m_gfx->LoadImage(m_mii_path.c_str());
+            if (m_mii_tex[1]) return m_mii_tex[1];
         }
         m_mii_url = "https://studio.mii.nintendo.com/miis/image.png?data=" + m_mii_hex + "&type=" + kType[which] +
                     "&width=512&expression=normal&bgColor=FFFFFF00";
@@ -1957,6 +2079,88 @@ namespace sl::menu::ui {
             m_mii_running = true;
         }
         return nullptr;
+    }
+
+    // The 3D Mii's files: the head from the console's MiiModel archive, the
+    // body and animations copied to the card by the user (Nintendo's and
+    // Microsoft's, never shipped; see scripts/mii/).
+    void Menu::Mii3DLoad(void *self) {
+        Menu *m = (Menu *)self;
+        mii::Parts p;
+        bool ok = mii::PartsFromStudioHex(m->m_mii_hex, p);
+        std::string dir = "sdmc:/slaunch/miimodel/";   // a dump (dump_miimodel), and the simulator's copy
+#ifndef SL_SIMULATOR
+        FsStorage sto;
+        bool mounted = false;
+        if (R_SUCCEEDED(fsOpenDataStorageByDataId(&sto, 0x0100000000000802ull, NcmStorageId_BuiltInSystem)) &&
+            R_SUCCEEDED(romfsMountFromStorage(sto, 0, "mii3d"))) {
+            mounted = true;
+            dir = "mii3d:/";
+        }
+#endif
+        auto file = [](const std::string &a, const char *b) {
+            struct stat st {};
+            return stat(a.c_str(), &st) == 0 ? a : std::string("sdmc:/slaunch/miimodel/") + b;
+        };
+        const std::string shape = file(dir + "ShapeHigh.dat", "ShapeHigh.dat"), tex = file(dir + "NXTextureMidSRGB.dat", "NXTextureMidSRGB.dat");
+        ok = ok && m->m_mii3d.Load(shape.c_str(), tex.c_str(), "sdmc:/slaunch/mii/MiiBody.dat", "sdmc:/slaunch/mii/anims.bin", p);
+#ifndef SL_SIMULATOR
+        if (mounted) romfsUnmount("mii3d");
+#endif
+        if (FILE *f = fopen("sdmc:/slaunch/boot.log", "a")) {
+            fprintf(f, "mii: 3d %s (%s)\n", ok ? "ready" : "failed", shape.c_str());
+            fclose(f);
+        }
+        m->m_mii3d_state.store(ok ? 2 : 3, std::memory_order_release);
+    }
+
+    bool Menu::Mii3DReady() {
+        int st = m_mii3d_state.load(std::memory_order_acquire);
+        if (st == 0) {
+            m_mii3d_state.store(3);
+            struct stat fs {};
+            if (stat("sdmc:/slaunch/mii/MiiBody.dat", &fs) != 0) return false;   // no body on the card: the studio picture
+            if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = AccountMiiHex(m_user, m_mii_cid); }
+            if (m_mii_hex.empty()) return false;
+            m_mii3d_state.store(1);
+            if (R_FAILED(threadCreate(&m_mii3d_thread, &Menu::Mii3DLoad, this, nullptr, 0x20000, 0x3E, -2)) ||
+                R_FAILED(threadStart(&m_mii3d_thread))) {
+                m_mii3d_state.store(3);
+                return false;
+            }
+            return false;
+        }
+        if (st != 2) return false;
+        if (!m_mii3d_tex) {
+            threadWaitForExit(&m_mii3d_thread);
+            threadClose(&m_mii3d_thread);
+            const mii::Image &a = m_mii3d.Atlas();
+            m_mii3d_tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, a.w, a.h);
+            if (!m_mii3d_tex || !SDL_UpdateTexture(m_mii3d_tex, nullptr, a.px.data(), a.w * 4)) {
+                if (m_mii3d_tex) { m_gfx->FreeImage(m_mii3d_tex); m_mii3d_tex = nullptr; }
+                m_mii3d_state.store(3);
+                return false;
+            }
+            m_mii3d.DropAtlas();   // 8 MB the GPU now holds
+            SDL_SetTextureBlendMode(m_mii3d_tex, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(m_mii3d_tex, SDL_SCALEMODE_LINEAR);
+        }
+        return true;
+    }
+
+    bool Menu::MiiDraw(int x, int y, int size, Uint8 alpha) {
+        if (Mii3DReady()) {
+            static_assert(sizeof(mii::Vertex) == sizeof(SDL_Vertex), "mii::Vertex mirrors SDL_Vertex");
+            const double t = (double)armGetSystemTick() / (double)armGetSystemTickFreq();
+            m_mii3d.Build(t, (float)x, (float)y, (float)size, alpha / 255.0f, m_mii3d_verts);
+            m_gfx->DrawGeometry(m_mii3d_tex, (const SDL_Vertex *)m_mii3d_verts.data(), (int)m_mii3d_verts.size());
+            return true;
+        }
+        if (SDL_Texture *tex = m_mii3d_state.load() == 3 ? MiiBody() : nullptr) {   // no 3D Mii: the studio picture
+            m_gfx->DrawImage(tex, x, y, size, size, alpha);
+            return true;
+        }
+        return false;
     }
 
     // One panel of a channel's row. The library entry and anything without
@@ -1998,7 +2202,7 @@ namespace sl::menu::ui {
             const SDL_Color ink = WithAlpha(kWhite, A);
             const int px = (int)(x + 22 * sc);
             int ty = (int)(y + 16 * sc);
-            if (!MiiBody()) {   // no Mii to stand there: the account picture, top right
+            if (!MiiHave()) {   // no Mii to stand there: the account picture, top right
                 const int ps = (int)(76 * sc);
                 if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, (int)(x + w - 18 * sc) - ps, ty, ps, ps, A);
             }
@@ -2067,11 +2271,9 @@ namespace sl::menu::ui {
         // front, over a dark fade so it reads on any picture.
         if (sc > 0.45f && !prof && (!art || front)) {
             const int pt = (int)lroundf(26.0f * sc);
-            if (art) {
-                for (int k = 0; k < 8; k++)
-                    m_gfx->FillRect((int)x, (int)(y + h - 70 * sc + k * 70 * sc / 8), (int)w, (int)(70 * sc / 8) + 1,
-                                    SDL_Color{ 0, 0, 0, (Uint8)(A * (k * 18) / 255) });
-            }
+            if (art)   // one smooth quad: stacked bands overlapped a row each and drew dark lines
+                m_gfx->FillRectGradientV((int)x, (int)(y + h - 70 * sc), (int)w, (int)(70 * sc) + 1,
+                                         SDL_Color{ 0, 0, 0, 0 }, SDL_Color{ 0, 0, 0, (Uint8)(A * 140 / 255) });
             std::string name = it.kind == ItemKind::GameLibrary ? std::string(T("Game Library"))
                              : it.kind == ItemKind::VideoLibrary ? std::string(T("Video Library"))
                              : it.kind == ItemKind::MusicPlayer ? std::string(T("Music Library"))
@@ -2128,7 +2330,7 @@ namespace sl::menu::ui {
             }
             // The Mii stands on the floor in front of the profile panel's right
             // edge, taller than the row, over the panel after it.
-            SDL_Texture *mii = MiiBody();
+            const bool mii = MiiHave();
             for (int i = first; mii && i <= last; i++) {
                 if (m_items[items[i]].kind != ItemKind::UserPage) continue;
                 float x, y, w, h, al, lit;
@@ -2141,7 +2343,7 @@ namespace sl::menu::ui {
                 if (sk.av_shadow) m_gfx->DrawImage(sk.av_shadow, (int)(cx - ms * 0.14f), (int)(foot - ms * 0.045f),
                                                    (int)(ms * 0.28f), (int)(ms * 0.08f), A);
                 else m_gfx->FillRect((int)(cx - ms * 0.07f), (int)(foot - 3), (int)(ms * 0.14f), 5, SDL_Color{ 0, 0, 0, (Uint8)(A * 50 / 255) });
-                m_gfx->DrawImage(mii, (int)(cx - ms / 2), (int)(foot - ms * 0.975f), (int)ms, (int)ms, A);
+                MiiDraw((int)(cx - ms / 2), (int)(foot - ms * 0.975f), (int)ms, A);
                 break;
             }
         }

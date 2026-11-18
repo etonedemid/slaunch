@@ -5,10 +5,12 @@
 #include <sl/menu/net/ContentFilter.hpp>
 #include <sl/smi/Protocol.hpp>
 #include <SDL3_image/SDL_image.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <malloc.h>
 #include <ctime>
 #include <algorithm>
 #include <dirent.h>
@@ -224,7 +226,9 @@ namespace sl::menu::ui {
         const bool prev = (b == Btn::Left || b == Btn::Up);
         const bool next = (b == Btn::Right || b == Btn::Down);
         if (m_oobe_step == 1 && (prev || next)) {          // layout gallery
+            const UiMode old = m_ui_mode;
             m_ui_mode = StepUiMode(m_ui_mode, next ? 1 : -1);
+            LayoutLeft(old);
             RebuildItems();   // the list contents depend on the mode
         }
         if (m_oobe_step == 2 && (prev || next)) {          // theme, applied live
@@ -542,6 +546,7 @@ namespace sl::menu::ui {
             m_shots.erase(g);
         }
         m_cover_tried[m_pick_id] = true;   // do not let the auto-fetch undo this
+        for (auto &kv : m_folder_art) kv.second.have = 0;   // a folder made of box art shows the new one
 
         SetStatus(T("Cover updated"));
         m_screen = BackTarget();
@@ -1233,6 +1238,58 @@ namespace sl::menu::ui {
         DrawHint({ {{"a"}, CanOta() && !m_upd_zip.empty() ? "Update now" : "Check for updates"},
                    {{"up","down"}, "Scroll"}, {{"b"}, "Back"} });
     }
+    // A switch of layout: what only the one left behind holds goes (it all
+    // loads again lazily on the way back), and its half-finished state is
+    // reset, so no layout ever comes back mid-animation or with an overlay
+    // open over a list that has since been rebuilt.
+    void Menu::LayoutLeft(UiMode old) {
+        if (FILE *fp = fopen("sdmc:/slaunch/boot.log", "a")) {   // what a switch costs, for the next crash
+#ifdef SL_QEXT
+            fprintf(fp, "layout %d -> %d: malloc %u MB, arena %lu of %lu MB used\n", (int)old, (int)m_ui_mode,
+                    (unsigned)mallinfo().uordblks >> 20, (qext_arena_size() - qext_arena_free_bytes()) >> 20, qext_arena_size() >> 20);
+#else
+            fprintf(fp, "layout %d -> %d: malloc %u MB\n", (int)old, (int)m_ui_mode, (unsigned)mallinfo().uordblks >> 20);
+#endif
+            fclose(fp);
+        }
+        auto drop = [&](SDL_Texture *&t) { if (t) m_gfx->FreeImage(t); t = nullptr; };
+        auto dropAll = [&](auto &map) { for (auto &kv : map) drop(kv.second); map.clear(); };
+        const auto uses = [&](UiMode m, std::initializer_list<UiMode> ms) {
+            return std::find(ms.begin(), ms.end(), m) != ms.end();
+        };
+        // Flow, Shelf and Deck's boxes, wraps, hero art and screenshots.
+        if (uses(old, { UiMode::Flow, UiMode::Shelf, UiMode::Deck }) && !uses(m_ui_mode, { UiMode::Flow, UiMode::Shelf, UiMode::Deck })) {
+            dropAll(m_covers);
+            dropAll(m_game_wraps);
+            dropAll(m_hero_art);
+            for (auto &kv : m_shots) { drop(kv.second.a); drop(kv.second.b); }
+            m_shots.clear();
+            drop(m_flow_wrap);
+            m_flow_wrap_tried = false;
+        }
+        if (old == UiMode::Deck) DeckFreeArt();
+        if (old == UiMode::Metro) {
+            dropAll(m_metro_fill);
+            drop(m_metro_bg);
+            m_metro_guide = m_metro_guide_game = false;
+            m_metro_hdr = false;
+            m_metro_cam = -1.0f;   // snap, not a slide from where it was
+        }
+        // NXE, Blades and Metro in its own colours draw their own backdrop, so
+        // the theme's wallpaper (a playing video above all) would sit there
+        // unused. It opens again on the way back (m_wallpaper_theme = -1).
+        const bool ownBackdrop = (m_ui_mode == UiMode::NXE && !m_nxe_themed) || m_ui_mode == UiMode::Blades ||
+                                 (m_ui_mode == UiMode::Metro && !m_metro_themed);
+        if (ownBackdrop) {
+            m_video_player.Close();
+            drop(m_wallpaper);
+            drop(m_wallpaper_blur);
+            m_wallpaper_path.clear();
+            m_wallpaper_theme = -1;
+        }
+        if (old == UiMode::Deck) { m_deck_row = 0; m_deck_scroll = 0.0f; }
+    }
+
     Menu::Action Menu::OnButtonTheming(Btn b) {
         auto openWidgets = [&]() {
             m_screen = Screen::Widgets;
@@ -1249,7 +1306,9 @@ namespace sl::menu::ui {
         }
         auto cycleUiMode = [&]() {
             const int dir = (b == Btn::Right) ? +1 : -1;
+            const UiMode old = m_ui_mode;
             m_ui_mode = StepUiMode(m_ui_mode, dir);
+            LayoutLeft(old);
             // The item list itself depends on the mode now: XMB carries the full
             // scanned-homebrew category, the other layouts only pinned homebrew.
             // Rebuild before syncing the bar, so the bar points into the list it
@@ -1309,8 +1368,18 @@ namespace sl::menu::ui {
             toggleShelfStyle();
         if (m_theming_cursor == TH_MetroColors &&
             (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
-            m_metro_themed = !m_metro_themed;
+            if (m_ui_mode == UiMode::NXE) {
+                m_nxe_themed = !m_nxe_themed;
+                m_wallpaper_theme = -1;   // the theme's backdrop comes (or goes) on the next frame
+                if (!m_nxe_themed) { m_video_player.Close(); }
+            } else {
+                m_metro_themed = !m_metro_themed;
+            }
             SaveSettings();
+        }
+        if ((m_theming_cursor == TH_NxeTint || m_theming_cursor == TH_NxeIcon) && b == Btn::A) {
+            m_pick_nxe = true;
+            OpenColorPicker(m_theming_cursor == TH_NxeTint ? &m_nxe_tint : &m_nxe_icon, Screen::Theming, false);
         }
         auto toggleWrap    = [&]() { m_wrap_nav     = !m_wrap_nav;     SaveSettings(); };
         auto toggleHints   = [&]() { m_show_hints   = !m_show_hints;   SaveSettings(); };
@@ -1422,6 +1491,11 @@ namespace sl::menu::ui {
             PlayNotifySound();   // a preview
             SaveSettings();
         }
+        if (m_theming_cursor == TH_Lock && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
+            m_lock_on = !m_lock_on;
+            LockSave();
+        }
+        if (m_theming_cursor == TH_Passcode && b == Btn::A) LockSetPasscode();
         if (m_theming_cursor == TH_DiscordRpc && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
             m_discord_rpc = !m_discord_rpc;
 #ifdef SL_QEXT
@@ -1920,6 +1994,7 @@ namespace sl::menu::ui {
             if (b == Btn::B) *m_pick_target = m_pick_original;
             m_pick_target = nullptr;
             if (m_pick_tile) { SaveTileCfg(); m_pick_tile = false; }
+            if (m_pick_nxe)  { SaveSettings(); m_pick_nxe = false; }   // the skin is rebuilt in the new colour
             m_screen = m_pick_return;
         }
         return Action::None;
@@ -2374,7 +2449,8 @@ namespace sl::menu::ui {
             if (i == TH_FlowSet && m_ui_mode != UiMode::Flow) continue;
             if (i == TH_ShelfVert && (m_ui_mode != UiMode::Shelf || m_shelf_ps)) continue;
             if (i == TH_ShelfStyle && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::XMB) continue;
-            if (i == TH_MetroColors && m_ui_mode != UiMode::Metro) continue;
+            if (i == TH_MetroColors && m_ui_mode != UiMode::Metro && m_ui_mode != UiMode::NXE) continue;
+            if ((i == TH_NxeTint || i == TH_NxeIcon) && !(m_ui_mode == UiMode::NXE && m_nxe_themed)) continue;
             if (i == TH_Backdrop && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::Line &&
                 m_ui_mode != UiMode::Deck) continue;
             // The wall shape is only meaningful where there is a wall.
@@ -2383,6 +2459,7 @@ namespace sl::menu::ui {
             if (i == TH_DiscordAlerts || i == TH_DiscordGame || i == TH_DiscordSound || i == TH_DiscordRpc) continue;   // no Discord outside the qext build
 #endif
             if (i == TH_DiscordGame && !m_discord_alerts) continue;   // a part of notifications
+            if (i == TH_Passcode && !m_lock_on) continue;
             v.push_back(i);
         }
         return v;
@@ -2413,7 +2490,7 @@ namespace sl::menu::ui {
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Metro colours"), T("Vertical covers"), T("Background art"),
+            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Metro colours"), T("Panel tint"), T("Icon colour"), T("Vertical covers"), T("Background art"),
             T("Columns"), T("Rows"),
             T("Box art region"), T("SteamGridDB"), T("SteamGridDB key"), T("Flow layout"),
             T("Wrap around"), T("Button hints"), T("Position counter"),
@@ -2421,7 +2498,7 @@ namespace sl::menu::ui {
             T("Show hidden games"), T("Fonts"), T("Language"),
             T("Music"), T("Widgets"),
             T("Menu entries"),
-            T("Screen timeout"), T("Screen timeout (TV)"), T("Ask who's playing"), T("Start as user"),
+            T("Screen timeout"), T("Screen timeout (TV)"), T("Ask who's playing"), T("Start as user"), T("Lock screen"), T("Lock passcode"),
             T("Welcome screen"), T("Check for updates"), T("Online count"), T("Nextendo players"), T("Discord notifications"), T("Discord in games"), T("Discord sound"), T("Discord game status"), T("USB file transfer"),
             T("About"), T("Back")
         };
@@ -2440,7 +2517,11 @@ namespace sl::menu::ui {
             labels[TH_ShelfStyle] = T("XMB style");
             values[TH_ShelfStyle] = m_xmb_ps3 ? "PS3" : "PSP";
         }
-        values[TH_MetroColors] = m_metro_themed ? T("Theme") : "Xbox 360";
+        if (m_ui_mode == UiMode::NXE) labels[TH_MetroColors] = T("NXE colours");
+        values[TH_MetroColors] = (m_ui_mode == UiMode::NXE ? m_nxe_themed : m_metro_themed) ? T("Theme") : "Xbox 360";
+        auto hex = [](SDL_Color c) { char b[8]; snprintf(b, sizeof(b), "#%02X%02X%02X", c.r, c.g, c.b); return std::string(b); };
+        values[TH_NxeTint] = hex(m_nxe_tint);
+        values[TH_NxeIcon] = hex(m_nxe_icon);
         values[TH_Backdrop]    = m_backdrop == Backdrop::Off ? T("Off")
                                : m_backdrop == Backdrop::Icon ? T("Game icon") : T("Screenshot");
         {
@@ -2466,6 +2547,8 @@ namespace sl::menu::ui {
         values[TH_SleepTv]     = SleepPlanText(true);
         values[TH_AskUser]     = AskUserEnabled() ? T("On") : T("Off");
         values[TH_AutoUser]    = AutoUserName();
+        values[TH_Lock]        = m_lock_on ? T("On") : T("Off");
+        values[TH_Passcode]    = m_lock_hash ? T("Set") : T("None");
         values[TH_Welcome]     = m_welcome_enabled ? T("On") : T("Off");
         values[TH_Updates]     = m_check_updates ? T("On") : T("Off");
         values[TH_Online]      = m_online_count ? T("On") : T("Off");

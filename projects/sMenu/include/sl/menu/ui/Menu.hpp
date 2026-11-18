@@ -18,6 +18,7 @@
 #include <sl/menu/cfg/UserCfg.hpp>
 #include <sl/menu/usb/Mtp.hpp>
 #include <sl/menu/net/Ota.hpp>
+#include <sl/menu/mii/MiiScene.hpp>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -200,6 +201,14 @@ namespace sl::menu::ui {
         // suspended game, if there is one - a quick way back into it that
         // doesn't care what screen is currently up. Does nothing otherwise.
         Action OnHomeButton(u64 &out_app_id);
+
+        // The lock screen (Menu_Lock.cpp): shown on waking (and at a cold
+        // boot) when it is on, over every layout. resume: a game had the
+        // screen when the console slept, so unlocking goes back to it.
+        // Returns false when the lock is off (nothing shown).
+        void MemoryLow() { m_mem_low = true; }   // new failed: drop every cache it can
+        bool Lock(bool resume);
+        bool Locked() const { return m_locked || m_lock_mode != 0; }
 #ifdef SL_QEXT
         void ShowPendingError() { ShowPowerError(); }   // the menu is not restarted to show it
 #endif
@@ -810,6 +819,7 @@ namespace sl::menu::ui {
         std::string m_xb_font;                        // the skin's font.ttf, "" = Selawik
         XboxSkin   &Skin();                           // the current layout's, loaded on first use
         void        XboxSkinDrop();                   // free it; the next Skin() reloads
+        void        LayoutLeft(UiMode old);           // free and reset what only that layout used
         void        XboxSoundsReload();               // the layout's sounds, after a skin or layout change
         std::string XboxSoundPack() const;            // where the Xbox layouts' sounds come from
         std::string &XboxSkinName() { return m_ui_mode == UiMode::NXE ? m_skin_nxe : m_skin_blades; }
@@ -1439,7 +1449,8 @@ namespace sl::menu::ui {
         // Members of a folder leave the top level; each folder keeps its first
         // four for the mosaic face (built lazily, rebuilt as icons stream in).
         struct FolderArt { std::vector<MenuItem> peek; int count = 0;
-                           SDL_Texture *tex = nullptr; int have = 0; SDL_Color plate{}; };
+                           SDL_Texture *tex = nullptr; int have = 0; SDL_Color plate{};
+                           int covers = -1; };   // members drawn by their box art (-1: built from icons)
         std::unordered_map<std::string, FolderArt> m_folder_art;
         std::vector<MenuItem> m_tucked;       // games filed in folders (Random still picks them)
         // Hidden games (ItemKeys, per user); Theming > Show hidden brings them back.
@@ -1457,6 +1468,7 @@ namespace sl::menu::ui {
         // back panels) to the titles around the cursor in every layout, and
         // drops all of it when the heap runs low. See Menu.cpp.
         void TrimArt();
+        bool m_mem_low = false;                // MemoryLow: trim as hard as it goes, now
         bool m_safe_mode = false;
         // Periodic memory snapshot; see the trace block in Render().
         bool m_memtrace_on   = false;
@@ -1786,6 +1798,10 @@ namespace sl::menu::ui {
         void   DrawMetroDialog();
         bool   m_tile_names = true;       // Grid: names under the tiles by default
         bool   m_metro_themed = false;    // theme colours instead of the 360's
+        bool   m_nxe_themed = false;      // NXE the same way: theme colours, grey panels in one tint
+        SDL_Color m_nxe_tint { 150, 210, 40, 255 };   // ...the panels' tint
+        SDL_Color m_nxe_icon { 255, 255, 255, 255 };  // ...and the one colour every icon takes
+        bool   m_pick_nxe = false;        // the colour picker is editing one of those
         SDL_Color m_mt_accent{}, m_mt_on{}, m_mt_fg{};
         int    m_metro_panel = MP_Home;
         int    m_metro_last[MP_Count] = {};   // focused tile, per panel
@@ -1805,6 +1821,13 @@ namespace sl::menu::ui {
         // which: 0 the whole body (NXE, Metro), 1 the head (Blades' gamer card).
         SDL_Texture *MiiRender(int which);
         SDL_Texture *MiiBody() { return MiiRender(0); }
+        // The Mii standing in a size square at (x, y), feet near its foot (the
+        // studio render's framing): the 3D one when its files are on the card,
+        // else the studio picture. false when there is no Mii to draw.
+        bool MiiDraw(int x, int y, int size, Uint8 alpha);
+        bool MiiHave() { return Mii3DReady() || (m_mii3d_state.load() == 3 && MiiBody()); }
+        bool Mii3DReady();
+        static void Mii3DLoad(void *self);
         static void MiiTrampoline(void *self);
         SDL_Texture *m_mii_tex[2] = {};
         bool   m_mii_tried[2] = {}, m_mii_running = false;
@@ -1813,6 +1836,26 @@ namespace sl::menu::ui {
         Thread m_mii_thread{};
         std::string m_mii_hex, m_mii_url, m_mii_path;
         bool   m_mii_hex_read = false;
+        u8     m_mii_cid[16] = {};                    // the Mii's create id, to find it in miiimg
+        u64    m_mii_retry = 0;                       // tick before which a failed render is not fetched again
+        // Lock screen. m_lock_mode: 0 unlocking, 1 new passcode, 2 its repeat.
+        bool   m_lock_on = false;
+        uint64_t m_lock_hash = 0;                     // 0: no passcode
+        bool   m_locked = false, m_lock_resume = false;
+        int    m_lock_mode = 0;
+        std::string m_lock_in, m_lock_first;          // presses so far (U D L R X Y l r)
+        u64    m_lock_shake = 0, m_lock_since = 0;    // ticks: wrong code, shown
+        void   LockLoad();
+        void   LockSave();
+        void   LockSetPasscode();                     // from the settings row
+        Action OnButtonLock(Btn b);
+        void   DrawLock();
+        // The 3D Mii (mii/MiiScene): loaded on a thread, drawn in the scene.
+        mii::Scene m_mii3d;
+        std::atomic<int> m_mii3d_state{0};            // 0 not tried, 1 loading, 2 ready, 3 none
+        Thread m_mii3d_thread{};
+        SDL_Texture *m_mii3d_tex = nullptr;           // its atlas
+        std::vector<mii::Vertex> m_mii3d_verts;
         std::unordered_map<u64, SDL_Texture *> m_metro_fill;
         // The Guide: a panel of tabs over whatever is behind it, on HOME.
         enum { MG_Games, MG_User, MG_Media, MG_Settings, MG_Count };

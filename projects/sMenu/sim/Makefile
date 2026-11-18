@@ -32,6 +32,7 @@ MENU_SRCS := \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Shelf.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Xmb.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Xbox.cpp \
+	$(MENU_DIR)/source/sl/menu/ui/Menu_Lock.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Update.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Flow.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Deck.cpp \
@@ -55,7 +56,11 @@ MENU_SRCS := \
 	$(MENU_DIR)/source/sl/menu/play/PlayStats.cpp \
 	$(MENU_DIR)/source/sl/menu/widgets/Widgets.cpp \
 	$(MENU_DIR)/source/sl/menu/cfg/UserCfg.cpp \
-	$(MENU_DIR)/source/sl/menu/dbg/Debug.cpp
+	$(MENU_DIR)/source/sl/menu/dbg/Debug.cpp \
+	$(MENU_DIR)/source/sl/menu/mii/MiiModel.cpp \
+	$(MENU_DIR)/source/sl/menu/mii/MiiBody.cpp \
+	$(MENU_DIR)/source/sl/menu/mii/MiiScene.cpp \
+	$(MENU_DIR)/source/sl/menu/mii/texcompress_astc.cpp
 
 SIM_SRCS  := \
 	$(SIM_DIR)src/main_sim.cpp \

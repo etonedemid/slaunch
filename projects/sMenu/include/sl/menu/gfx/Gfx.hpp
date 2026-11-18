@@ -6,6 +6,7 @@
 #include <vector>
 #include <SDL3_ttf/SDL_ttf.h>
 #include <string>
+#include <map>
 #include <unordered_map>
 
 // Thin SDL3 rendering wrapper for sLaunch's menu.
@@ -42,6 +43,10 @@ namespace sl::menu::gfx {
 
         // Primitives
         void FillRect(int x, int y, int w, int h, SDL_Color c);
+        // One quad fading from `top` to `bottom` (per-vertex colour, no banding).
+        void FillRectGradientV(int x, int y, int w, int h, SDL_Color top, SDL_Color bottom);
+        // Triangles, 3 vertices each, textured by tex (blended).
+        void DrawGeometry(SDL_Texture *tex, const SDL_Vertex *v, int n);
         void FillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, SDL_Color c);
 
         // Many rects, one colour, one draw call. The backgrounds build a shape
@@ -69,6 +74,8 @@ namespace sl::menu::gfx {
 
         // Images
         SDL_Texture *LoadImage(const char *path);   // nullptr on failure
+        // The picture in grey (its own light and shade kept), drawn in `tint`.
+        SDL_Texture *LoadImageTinted(const char *path, SDL_Color tint);
         // A full-screen still wallpaper, from a pre-scaled copy in the card's
         // cache when there is one (see the .cpp).
         SDL_Texture *LoadWallpaper(const char *path);
@@ -196,6 +203,7 @@ namespace sl::menu::gfx {
         // game name still renders. nullptr if the file will not open: draw
         // with a FontSize instead.
         TTF_Font *Face(const char *path, int pt);
+        TTF_Font *Covering(TTF_Font *f, const char *text);   // f, or the console's font if f lacks a letter
         int  TextWidth(TTF_Font *f, const char *text);
         int  LineHeight(TTF_Font *f);
         void Text(TTF_Font *f, int x, int y, SDL_Color c, const char *text);
@@ -396,6 +404,8 @@ namespace sl::menu::gfx {
         // and TextDown's rasterised labels. All live until Exit.
         std::unordered_map<std::string, TTF_Font *> m_faces;
         std::vector<TTF_Font *> m_faceFallbacks;
+        std::unordered_map<TTF_Font *, TTF_Font *> m_fallbackOf;   // face -> its console-font fallback
+        std::map<std::pair<TTF_Font *, Uint32>, bool> m_ownGlyph;   // Covering's per-face answers
         std::unordered_map<std::string, SDL_Texture *> m_downText;
         const void *m_plFontAddr = nullptr;
         size_t      m_plFontSize = 0;

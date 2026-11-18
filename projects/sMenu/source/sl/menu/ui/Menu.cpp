@@ -130,6 +130,8 @@ namespace sl::menu::ui {
         LoadHbFavourites();
         LoadHbDonor();
         LoadSettings();
+        LockLoad();
+        if (start_oobe) m_locked = false;   // nothing to protect yet
         { struct stat st;
           m_memtrace_on = (stat("sdmc:/slaunch/config/memtrace.txt", &st) == 0); }
         LoadSysEntries();
@@ -253,6 +255,10 @@ namespace sl::menu::ui {
             threadWaitForExit(&m_hb_thread);
             threadClose(&m_hb_thread);
             m_hb_scan_running = false;
+        }
+        if (m_mii3d_state.load() == 1) {   // the 3D Mii still loading into m_mii3d
+            threadWaitForExit(&m_mii3d_thread);
+            threadClose(&m_mii3d_thread);
         }
         if (m_pin_running) {
             threadWaitForExit(&m_pin_thread);
@@ -799,16 +805,25 @@ namespace sl::menu::ui {
         FolderArt &fa = f->second;
         // Rebuilt when another member's icon has streamed in (or the theme's
         // plate changed), so the face fills in rather than staying half empty.
-        SDL_Texture *src[4]; int n = 0;
-        for (const auto &m : fa.peek)
-            if (SDL_Texture *s = ItemArt(m)) src[n++] = s;
+        // Where the games inside are drawn by their box art (Flow, the tall
+        // Shelf), the folder is made of that art too, so it shows what the
+        // folder holds (issue #23); each cell is stretched back to a box's
+        // shape with the tile. A member without its cover yet keeps its icon.
+        const bool boxes = m_ui_mode == UiMode::Flow || (m_ui_mode == UiMode::Shelf && m_shelf_vertical);
+        SDL_Texture *src[4]; int n = 0, covers = boxes ? 0 : -1;
+        for (const auto &m : fa.peek) {
+            SDL_Texture *s = boxes ? FlowCover(m) : nullptr;
+            if (s) covers++;
+            else s = ItemArt(m);
+            if (s) src[n++] = s;
+        }
         const SDL_Color plate = IconPlate(m_theme.Current(), 255);
         const bool same_plate = fa.plate.r == plate.r && fa.plate.g == plate.g &&
                                 fa.plate.b == plate.b;
-        if (n > 0 && (n > fa.have || !same_plate || !fa.tex)) {
+        if (n > 0 && (n > fa.have || covers != fa.covers || !same_plate || !fa.tex)) {
             if (fa.tex) m_gfx->FreeImage(fa.tex);
             fa.tex = m_gfx->Mosaic(src, n, 256, plate);
-            fa.have = n; fa.plate = plate;
+            fa.have = n; fa.plate = plate; fa.covers = covers;
         }
         return fa.tex;
     }
@@ -1017,6 +1032,12 @@ namespace sl::menu::ui {
                 m_tile_names = (v != 0);
             else if (sscanf(line, "metro_theme=%d", &v) == 1)
                 m_metro_themed = (v != 0);
+            else if (sscanf(line, "nxe_theme=%d", &v) == 1)
+                m_nxe_themed = (v != 0);
+            else if (unsigned c; sscanf(line, "nxe_tint=%x", &c) == 1)
+                m_nxe_tint = SDL_Color{ (Uint8)(c >> 16), (Uint8)(c >> 8), (Uint8)c, 255 };
+            else if (unsigned c; sscanf(line, "nxe_icon=%x", &c) == 1)
+                m_nxe_icon = SDL_Color{ (Uint8)(c >> 16), (Uint8)(c >> 8), (Uint8)c, 255 };
             else if (sscanf(line, "backdrop=%d", &v) == 1 && v >= 0 && v <= 2)
                 m_backdrop = (Backdrop)v;
             else if (sscanf(line, "wrap_nav=%d", &v) == 1)
@@ -1099,6 +1120,8 @@ namespace sl::menu::ui {
         fprintf(fp, "xmb_ps3=%d\n", m_xmb_ps3 ? 1 : 0);
         fprintf(fp, "tile_names=%d\n", m_tile_names ? 1 : 0);
         fprintf(fp, "metro_theme=%d\n", m_metro_themed ? 1 : 0);
+        fprintf(fp, "nxe_theme=%d\nnxe_tint=%02x%02x%02x\nnxe_icon=%02x%02x%02x\n", m_nxe_themed ? 1 : 0,
+                m_nxe_tint.r, m_nxe_tint.g, m_nxe_tint.b, m_nxe_icon.r, m_nxe_icon.g, m_nxe_icon.b);
         // Tells the daemon to capture the game on HOME (see HomeFrameFlag):
         // only Metro shows it, and the capture costs the HOME press time.
         if (m_ui_mode == UiMode::Metro) { if (FILE *ff = fopen(sl::smi::HomeFrameFlag, "w")) fclose(ff); }
@@ -1351,12 +1374,14 @@ namespace sl::menu::ui {
         out_app_id = 0;
         if (m_sd_removed) return Action::None;   // frozen: awaiting reboot
         if (m_boom_state != 0) { BoomReassemble(); return Action::None; }
+        if (Locked()) return OnButtonLock(b);
         return DispatchButton(b, out_app_id);
     }
 
     Menu::Action Menu::OnHomeButton(u64 &out_app_id) {
         out_app_id = 0;
         if (m_sd_removed)                 return Action::None;
+        if (Locked())                     return Action::None;
         if (m_launch_tick != 0)           return Action::None;  // already launching
         if (m_options_open)               return Action::None;
         if (m_dialog != Dialog::None)     return Action::None;
@@ -2631,7 +2656,7 @@ namespace sl::menu::ui {
             if (m_screen != Screen::Main || m_items.empty() || m_xmb_cols.empty()) DrawBladesFrame();
             return;
         }
-        if (NxeUi()) { DrawNxeFrame(); return; }
+        if (NxeUi() && !m_nxe_themed) { DrawNxeFrame(); return; }
         m_gfx->GradientV(t.bg_top, t.bg_bottom);
 
         // Wallpaper first (when set), so ribbons draw on top.
@@ -3148,9 +3173,11 @@ namespace sl::menu::ui {
     // selection. Everything dropped reloads on demand.
     void Menu::TrimArt() {
         static u32 tick = 0;
-        if (++tick % 30) return;
+        const bool forced = m_mem_low;
+        m_mem_low = false;
+        if (!forced && ++tick % 30) return;
         constexpr size_t kArtKeep = 48;
-        bool low = false;
+        bool low = forced;
 #ifndef SL_SIMULATOR
 #ifdef SL_QEXT
         constexpr size_t kLowHeap = 24u << 20;   // the arena is big blocks only, little waste
@@ -3165,7 +3192,7 @@ namespace sl::menu::ui {
         const size_t heap = (size_t)(fake_heap_end - fake_heap_start);
         const size_t used = (size_t)(unsigned)mallinfo().uordblks;
 #endif
-        low = heap > used && heap - used < kLowHeap;
+        low = forced || (heap > used && heap - used < kLowHeap);
 #ifdef SL_QEXT
         // The arena only grows when it runs out (and takes that from the applet
         // pool): this is what says whether the size set at boot is big enough.
@@ -3190,7 +3217,7 @@ namespace sl::menu::ui {
         // Dropping what is on screen only for it to load straight back made Flow's
         // boxes flip between their cover and the square icon, twice a second, for
         // as long as the arena stayed low. Only the last resort touches those.
-        const bool critical = low && heap - used < (size_t)(8u << 20);
+        const bool critical = forced || (low && heap - used < (size_t)(8u << 20));
         const int radius = critical ? 0 : low ? 8 : 12;
 #else
         const int radius = low ? 0 : 12;
@@ -3538,6 +3565,7 @@ namespace sl::menu::ui {
             }
         }
 
+        DrawLock();   // over everything
         m_gfx->Present();
         // First frame is up: write the phase breakdown out once. Everything
         // after this is a no-op.

@@ -6,6 +6,7 @@
 <img width="1280" height="720" alt="2026101522331400-A082AE4E5DA891D87084ACEACFDFF4A9" src="https://github.com/user-attachments/assets/25b4fedb-23fb-4c87-9cf6-0260a3c94ac2" />
 <img width="1280" height="720" alt="2026111020494400-57B4628D2267231D57E0FC1078C0596D" src="docs/screenshots/blades.jpg" />
 <img width="1280" height="720" alt="2026111020500400-57B4628D2267231D57E0FC1078C0596D" src="docs/screenshots/metro.jpg" />
+<img width="1280" height="720" alt="2026111816142000-57B4628D2267231D57E0FC1078C0596D" src="docs/screenshots/nxe.jpg" />
 
 
 ## Support

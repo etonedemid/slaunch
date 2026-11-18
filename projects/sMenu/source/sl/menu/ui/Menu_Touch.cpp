@@ -59,6 +59,7 @@ namespace sl::menu::ui {
         if (m_sd_removed) return Action::None;   // frozen: awaiting reboot
         if (m_ota != OtaStep::Off) return Action::None;   // the updater is buttons only
         if (m_boom_state != 0) { if (phase == 0) BoomReassemble(); return Action::None; }
+        if (Locked()) return phase == 0 && m_locked && !m_lock_hash ? OnButtonLock(Btn::A) : Action::None;   // a tap opens it
 #ifdef SL_QEXT
         // The notification banner sits over every screen: a tap opens its chat.
         if (phase == 0 && m_dialog == Dialog::None && m_screen != Screen::Keyboard && DiscordBannerTouch(x, y))

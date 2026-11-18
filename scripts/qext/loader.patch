@@ -10,8 +10,20 @@ index d90a851..575bf0f 100644
      --enable-decoder='h264,aac' \
      --enable-parser='h264,aac' \
      --enable-bsf='h264_mp4toannexb,aac_adtstoasc' \
+diff --git a/loader/Makefile b/loader/Makefile
+index 35dd388..79ab9fb 100644
+--- a/loader/Makefile
++++ b/loader/Makefile
+@@ -86,6 +86,7 @@ WA_LIBS := $(LIBNX)/lib/libnx.a
+ # normally below and forced via HOST_NEEDS/hostapi.cpp/QEXT_EXTRA_UNDEF; add
+ # unresolved menu symbols to menu.undef or QEXT_EXTRA_UNDEF to pull them in.
+ LDFLAGS += -Wl,--whole-archive $(WA_LIBS) -Wl,--no-whole-archive
++LDFLAGS += -Wl,--wrap=_malloc_r,--wrap=_calloc_r,--wrap=_realloc_r,--wrap=_memalign_r,--wrap=_free_r,--wrap=_malloc_usable_size_r
+ LDFLAGS += -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--export-dynamic $(foreach s,$(HOST_NEEDS),-Wl$(comma)-u$(s))
+ 
+ LIBS	:= -ldlink -lnx -lstdc++ -lsupc++ -lm -lz
 diff --git a/loader/src/main.cpp b/loader/src/main.cpp
-index 3322000..a425620 100644
+index 3322000..fe1e067 100644
 --- a/loader/src/main.cpp
 +++ b/loader/src/main.cpp
 @@ -38,8 +38,12 @@ extern "C" {
@@ -29,7 +41,22 @@ index 3322000..a425620 100644
  static size_t g_heapSize = 0;
  extern char *fake_heap_start;
  extern char *fake_heap_end;
-@@ -216,12 +220,11 @@ static unsigned heap_release_arena(FILE *also)
+@@ -56,9 +60,12 @@ static inline bool InArena(void *p)
+ 
+ static Result heap_set_total(size_t target);
+ 
+-static void *ArenaAlloc(size_t n, size_t align)
++/* any: a small block too - the spill once malloc's own heap is full. Without
++   it a menu holding many small things (a Discord store) dies of OOM at 48 MB
++   with the arena half empty. */
++static void *ArenaAlloc(size_t n, size_t align, bool any = false)
+ {
+-    if (n < kBigAlloc || !s_arenaReady || s_arenaEnd == s_arenaStart)
++    if ((!any && n < kBigAlloc) || !s_arenaReady || s_arenaEnd == s_arenaStart)
+         return nullptr;
+     mutexLock(&s_arenaLock);
+     void *p = arena::Alloc(n, align);
+@@ -216,12 +223,11 @@ static unsigned heap_release_arena(FILE *also)
          if (highest > s_arenaStart)
              logging::LogLine("[heap] highest live block ends at +%zu KB (top free tail +%zu KB)", (size_t)(highest - s_arenaStart) >> 10, (size_t)(top - s_arenaStart) >> 10);
      }
@@ -47,16 +74,140 @@ index 3322000..a425620 100644
      char *targetEnd = fake_heap_start + (((size_t)(top - fake_heap_start) + 0x1FFFFFu) & ~(size_t)0x1FFFFFu);
      if (targetEnd < fake_heap_start + kHeapFloor)
          targetEnd = fake_heap_start + kHeapFloor;
-@@ -406,7 +409,7 @@ void *realloc(void *p, size_t n)
+@@ -337,7 +343,8 @@ extern "C" {
+ void *malloc(size_t n)
+ {
+     void *p = ArenaAlloc(n ? n : 1, 16);
+-    return p ? p : _malloc_r(_REENT, n);
++    if (!p) p = _malloc_r(_REENT, n);
++    return p ? p : ArenaAlloc(n ? n : 1, 16, true);
+ }
+ 
+ void free(void *p)
+@@ -363,13 +370,18 @@ void *calloc(size_t a, size_t b)
+         memset(p, 0, n);
+         return p;
+     }
+-    return _calloc_r(_REENT, a, b);
++    if ((p = _calloc_r(_REENT, a, b)))
++        return p;
++    if ((p = ArenaAlloc(n ? n : 1, 16, true)))
++        memset(p, 0, n);
++    return p;
+ }
+ 
+ void *memalign(size_t align, size_t n)
+ {
+     void *p = ArenaAlloc(n ? n : 1, align);
+-    return p ? p : _memalign_r(_REENT, align, n);
++    if (!p) p = _memalign_r(_REENT, align, n);
++    return p ? p : ArenaAlloc(n ? n : 1, align, true);
+ }
+ 
+ void *aligned_alloc(size_t align, size_t n)
+@@ -390,6 +402,82 @@ int posix_memalign(void **out, size_t align, size_t n)
+     return 0;
+ }
+ 
++/* newlib's own internals (fopen's FILE, printf's dtoa, strdup) call the _r
++   functions directly, past the overrides above, so they need the spill too:
++   linked with --wrap=_malloc_r etc. Without it a full small heap fails the
++   next "%f" in a log line and newlib asserts -> abort -> qlaunch exits. */
++void *__real__malloc_r(struct _reent *, size_t);
++void *__real__realloc_r(struct _reent *, void *, size_t);
++void *__real__memalign_r(struct _reent *, size_t, size_t);
++void __real__free_r(struct _reent *, void *);
++size_t __real__malloc_usable_size_r(struct _reent *, void *);
++
++/* Set while newlib's own realloc/memalign run: they call _malloc_r and then
++   treat the result as a newlib chunk (header, size), so an arena block there
++   is garbage to them. Their wrappers spill afterwards instead. */
++static thread_local bool s_inNewlib = false;
++
++void *__wrap__malloc_r(struct _reent *r, size_t n)
++{
++    void *p = __real__malloc_r(r, n);
++    return p || s_inNewlib ? p : ArenaAlloc(n ? n : 1, 16, true);
++}
++
++void *__wrap__calloc_r(struct _reent *r, size_t a, size_t b)
++{
++    size_t n;
++    if (__builtin_mul_overflow(a, b, &n))
++        return nullptr;
++    /* Not newlib's calloc: it would zero by a chunk header an arena block lacks. */
++    void *p = __wrap__malloc_r(r, n);
++    if (p)
++        memset(p, 0, n);
++    return p;
++}
++
++void *__wrap__memalign_r(struct _reent *r, size_t align, size_t n)
++{
++    s_inNewlib = true;
++    void *p = __real__memalign_r(r, align, n);
++    s_inNewlib = false;
++    return p ? p : ArenaAlloc(n ? n : 1, align, true);
++}
++
++void __wrap__free_r(struct _reent *r, void *p)
++{
++    if (InArena(p)) {
++        mutexLock(&s_arenaLock);
++        arena::Release(p);
++        mutexUnlock(&s_arenaLock);
++        return;
++    }
++    __real__free_r(r, p);
++}
++
++size_t __wrap__malloc_usable_size_r(struct _reent *r, void *p)
++{
++    return InArena(p) ? arena::Usable(p) : __real__malloc_usable_size_r(r, p);
++}
++
++void *__wrap__realloc_r(struct _reent *r, void *p, size_t n)
++{
++    if (p && InArena(p))
++        return realloc(p, n);   /* the public one handles arena blocks */
++    s_inNewlib = true;
++    void *q = __real__realloc_r(r, p, n);
++    s_inNewlib = false;
++    if (q || !n)
++        return q;
++    if (!(q = ArenaAlloc(n, 16, true)))
++        return nullptr;
++    if (p) {
++        const size_t old = __real__malloc_usable_size_r(r, p);
++        memcpy(q, p, old < n ? old : n);
++        __real__free_r(r, p);
++    }
++    return q;
++}
++
+ size_t malloc_usable_size(void *p)
+ {
+     if (!p)
+@@ -406,8 +494,16 @@ void *realloc(void *p, size_t n)
          return nullptr;
      }
      const size_t old = malloc_usable_size(p);
 -    if (!InArena(p) && !s_arenaReady)
-+    if (!InArena(p) && (!s_arenaReady || n < kBigAlloc))
-         return _realloc_r(_REENT, p, n);
+-        return _realloc_r(_REENT, p, n);
++    if (!InArena(p) && (!s_arenaReady || n < kBigAlloc)) {
++        if (void *q = _realloc_r(_REENT, p, n))
++            return q;
++        void *q = ArenaAlloc(n, 16, true);   /* malloc's heap is full: spill */
++        if (!q)
++            return nullptr;
++        memcpy(q, p, old < n ? old : n);
++        _free_r(_REENT, p);
++        return q;
++    }
      if (InArena(p) && n <= old)
          return p;
-@@ -437,6 +440,10 @@ static bool g_vi = false;
+     void *q = malloc(n);
+@@ -437,6 +533,10 @@ static bool g_vi = false;
  static bool g_layerLive = false;
  static bool g_winLive = false;
  
@@ -67,7 +218,31 @@ index 3322000..a425620 100644
  /* Pointers to dynamic libraries */
  static void *g_neko;
  static void *g_sdl;
-@@ -924,6 +931,10 @@ static void reopen_menu(const char *source)
+@@ -454,6 +554,7 @@ static void (*s_onPowerButton)(void);
+ static void (*s_onOpen)(void);
+ static int (*s_loop)(void);
+ static void (*s_onHomeButton)(void);
++static void (*s_onWake)(int inGame);   /* optional */
+ static bool g_booted;
+ 
+ static void gfx_exit(void)
+@@ -619,6 +720,7 @@ static void menu_unload(void)
+     s_onOpen = nullptr;
+     s_loop = nullptr;
+     s_onHomeButton = nullptr;
++    s_onWake = nullptr;
+ 
+     /* Close dynamic libs */
+     if (g_menu) {
+@@ -804,6 +906,7 @@ static Result boot_step(void)
+             s_onOpen = (void (*)(void))dlsym(g_menu, "onOpen");
+             s_loop = (int (*)(void))dlsym(g_menu, "loop");
+             s_onHomeButton = (void (*)(void))dlsym(g_menu, "onHomeButton");
++            s_onWake = (void (*)(int))dlsym(g_menu, "onWake");
+             if (!s_onBoot || !s_onReload || !s_onShutdown || !s_onPowerButton || !s_onOpen || !s_loop ||
+                 !s_onHomeButton) {
+                 logging::LogLine("[qlaunch-ext] can't load menu symbols");
+@@ -924,6 +1027,10 @@ static void reopen_menu(const char *source)
                       (unsigned long long)now_ms());
  }
  
@@ -78,7 +253,7 @@ index 3322000..a425620 100644
  static void do_home(const char *source)
  {
      logging::LogLine("[qlaunch-ext] Home request (%s) t=%llu", source,
-@@ -934,6 +945,8 @@ static void do_home(const char *source)
+@@ -934,6 +1041,8 @@ static void do_home(const char *source)
          return;
      }
      if (app::IsActive() && app::HasForeground()) {
@@ -87,7 +262,7 @@ index 3322000..a425620 100644
          Result rc = sys::SetForeground();
          logging::LogLine("[qlaunch-ext] fg request rc=0x%X", rc);
          if (R_SUCCEEDED(rc)) {
-@@ -951,6 +964,9 @@ static void do_sleep(const char *source)
+@@ -951,6 +1060,9 @@ static void do_sleep(const char *source)
      logging::LogLine("[qlaunch-ext] sleep request (%s) t=%llu", source,
                       (unsigned long long)now_ms());
      plugins::PowerAll();
@@ -97,6 +272,35 @@ index 3322000..a425620 100644
      sys::EnterSleep();
  }
  
+@@ -1042,9 +1154,27 @@ static void pump_applet_messages(void)
+             do_sleep("ae");
+             break;
+         case AppletMessage::FinishedSleepSequence:
++            /* Woken with a game on screen: the system hands us the
++               foreground, but app::HasForeground() still says the game has
++               it, so the menu loop never ran and its last frame sat frozen
++               until HOME. Take it properly; the menu then shows its lock
++               screen and gives the game back (or does at once without one). */
++            if (app::IsActive() && app::HasForeground()) {
++                if (g_booted && s_onWake) {
++                    sys::SetForeground();
++                    reopen_menu("wake");
++                    s_onWake(1);
++                } else {
++                    app::SetForeground();
++                }
++                break;
++            }
+             appletRequestToGetForeground();
+-            if (g_booted)
++            if (g_booted) {
+                 g_menuRefreshPending = true;
++                if (s_onWake)
++                    s_onWake(0);
++            }
+             break;
+         case AppletMessage::RequestToDisplay:
+             if (!g_displayApproved) {
 diff --git a/loader/src/qext.cpp b/loader/src/qext.cpp
 index 68d2662..6b6bb69 100644
 --- a/loader/src/qext.cpp

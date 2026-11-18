@@ -310,6 +310,8 @@ void main() {
         m_faces.clear();
         for (TTF_Font *f : m_faceFallbacks) TTF_CloseFont(f);
         m_faceFallbacks.clear();
+        m_fallbackOf.clear();
+        m_ownGlyph.clear();
         for (auto &f : m_sysFonts) { if (f) TTF_CloseFont(f); f = nullptr; }
         if (m_renderer) SDL_DestroyRenderer(m_renderer);
         if (m_window)   SDL_DestroyWindow(m_window);
@@ -503,6 +505,25 @@ void main() {
         SDL_RenderFillRect(m_renderer, &r);
     }
 
+    void Gfx::FillRectGradientV(int x, int y, int w, int h, SDL_Color top, SDL_Color bottom) {
+        FxClose();
+        // Textured by the white pixel: untextured geometry does not draw on this backend.
+        SDL_Texture *tex = WhiteTexture();
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        const SDL_FRect r = F(x, y, w, h);
+        auto fc = [](SDL_Color c) { return SDL_FColor{ c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f }; };
+        const SDL_Vertex v[4] = {
+            { { r.x, r.y }, fc(top), { 0, 0 } },           { { r.x + r.w, r.y }, fc(top), { 1, 0 } },
+            { { r.x + r.w, r.y + r.h }, fc(bottom), { 1, 1 } }, { { r.x, r.y + r.h }, fc(bottom), { 0, 1 } } };
+        static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+        SDL_RenderGeometry(m_renderer, tex, v, 4, idx, 6);
+    }
+
+    void Gfx::DrawGeometry(SDL_Texture *tex, const SDL_Vertex *v, int n) {
+        FxClose();
+        if (tex && n >= 3) SDL_RenderGeometry(m_renderer, tex, v, n, nullptr, 0);
+    }
+
     void Gfx::GradientV(SDL_Color top, SDL_Color bottom) {
         FxClose();   // an open GPU pass must end before SDL draws again
         // Rebuild the baked gradient only when the Colors actually change.
@@ -572,8 +593,45 @@ void main() {
     // on the console's CPU, not on a PC. Capped, and emptied whenever the
     // fonts change (ClearTextCache).
     int Gfx::TextWidth(FontSize s, const char *text) { return TextWidth(Font(s), text); }
+    // A face without some of a string's letters (Selawik has no Cyrillic) would
+    // take just those from its fallback, whose metrics differ: "Мой" and
+    // "Switch" then sit on two baselines. Such a string is drawn wholly in the
+    // console's font instead, at the same size.
+    TTF_Font *Gfx::Covering(TTF_Font *font, const char *text) {
+        if (!font || !text || !m_plFontAddr) return font;
+        const unsigned char *p = (const unsigned char *)text;
+        bool wide = false;
+        for (const unsigned char *q = p; *q; q++) if (*q >= 0x80) { wide = true; break; }
+        if (!wide) return font;
+        while (*p) {
+            Uint32 cp = *p++;
+            int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+            cp &= more == 3 ? 0x07 : more == 2 ? 0x0F : more == 1 ? 0x1F : 0x7F;
+            for (; more && (*p & 0xC0) == 0x80; more--) cp = (cp << 6) | (*p++ & 0x3F);
+            if (cp <= ' ') continue;
+            // TTF_FontHasGlyph searches the fallback chain too, so ask with
+            // the fallback detached (once per face and codepoint: detaching
+            // flushes the face's glyph cache).
+            auto key = std::make_pair(font, cp);
+            auto it = m_ownGlyph.find(key);
+            if (it == m_ownGlyph.end()) {
+                auto fb = m_fallbackOf.find(font);
+                if (fb != m_fallbackOf.end()) TTF_RemoveFallbackFont(font, fb->second);
+                const bool has = TTF_FontHasGlyph(font, cp);
+                if (fb != m_fallbackOf.end()) TTF_AddFallbackFont(font, fb->second);
+                it = m_ownGlyph.emplace(key, has).first;
+            }
+            if (!it->second) {
+                TTF_Font *sys = Face("@sys", (int)(TTF_GetFontSize(font) / m_ts + 0.5f));
+                return sys ? sys : font;
+            }
+        }
+        return font;
+    }
+
     int Gfx::TextWidth(TTF_Font *font, const char *text) {
         if (!text || !text[0] || !font) return 0;
+        font = Covering(font, text);
         std::string key((const char *)&font, sizeof(font));
         key += text;
         auto it = m_widthCache.find(key);
@@ -595,6 +653,7 @@ void main() {
     void Gfx::Text(TTF_Font *font, int x, int y, SDL_Color c, const char *text) {
         FxClose();   // an open GPU pass must end before SDL draws again
         if (c.a == 0) return;   // see FillRect: 0 means invisible
+        font = Covering(font, text);
         TTF_Text *t = GetText(font, text);
         if (!t) return;
         if (m_capturing) {
@@ -636,15 +695,21 @@ void main() {
         std::string key = std::string(path) + "@" + std::to_string(pt);
         auto it = m_faces.find(key);
         if (it != m_faces.end()) return it->second;   // a failed open is cached too
-        TTF_Font *f = TTF_OpenFont(path, pt * m_ts);
-        if (f) {
+        // "@sys": the console's own shared font, from memory.
+        TTF_Font *f = strcmp(path, "@sys") == 0
+            ? (m_plFontAddr ? TTF_OpenFontIO(SDL_IOFromConstMem(m_plFontAddr, m_plFontSize), true, pt * m_ts) : nullptr)
+            : TTF_OpenFont(path, pt * m_ts);
+        if (f && strcmp(path, "@sys") == 0) {
+            TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
+            TTF_SetFontKerning(f, true);
+        } else if (f) {
             TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
             TTF_SetFontKerning(f, true);
             if (m_plFontAddr) {
                 SDL_IOStream *rw = SDL_IOFromConstMem(m_plFontAddr, m_plFontSize);
                 if (TTF_Font *fb = TTF_OpenFontIO(rw, true, pt * m_ts)) {
                     TTF_SetFontHinting(fb, TTF_HINTING_LIGHT);
-                    if (TTF_AddFallbackFont(f, fb)) m_faceFallbacks.push_back(fb);
+                    if (TTF_AddFallbackFont(f, fb)) { m_faceFallbacks.push_back(fb); m_fallbackOf[f] = fb; }
                     else TTF_CloseFont(fb);
                 }
             }
@@ -658,6 +723,7 @@ void main() {
     void Gfx::TextDown(TTF_Font *f, int x, int y, SDL_Color c, const char *text, bool up) {
         FxClose();
         if (!f || !text || !text[0] || c.a == 0) return;
+        f = Covering(f, text);
         std::string key((const char *)&f, sizeof(f));
         key += text;
         SDL_Texture *tex = nullptr;
@@ -873,6 +939,20 @@ void main() {
     SDL_Texture *Gfx::LoadImage(const char *path) {
         SDL_Surface *raw = IMG_Load(path);
         return raw ? ScaleToTexture(raw, raw->w, raw->h) : nullptr;
+    }
+
+    SDL_Texture *Gfx::LoadImageTinted(const char *path, SDL_Color tint) {
+        SDL_Surface *raw = IMG_Load(path);
+        SDL_Surface *s = raw ? ScaleSurface(raw, raw->w, raw->h) : nullptr;
+        if (!s) return nullptr;
+        for (int y = 0; y < s->h; y++) {
+            Uint8 *p = (Uint8 *)s->pixels + y * s->pitch;
+            for (int x = 0; x < s->w; x++, p += 4)
+                p[0] = p[1] = p[2] = (Uint8)((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 8);
+        }
+        SDL_Texture *tex = ScaleToTexture(s, s->w, s->h);
+        if (tex) SDL_SetTextureColorMod(tex, tint.r, tint.g, tint.b);
+        return tex;
     }
 
     SDL_Texture *Gfx::LoadImageScaled(const char *path, int w, int h) {
