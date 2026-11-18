@@ -1917,24 +1917,31 @@ namespace sl::menu::ui {
         }
 #endif
 
-        // The Mii the account's picture was made from, as studio data; "" when
-        // the picture is a character, or there is no Mii service.
-        std::string AccountMiiHex(AccountUid uid, u8 *cid) {
+        // Every Mii in Mii Edit, as studio data with its name; returns the one
+        // the account's picture was made from (-1: a character picture, or no
+        // Mii service).
+        int MiiReadList(AccountUid uid, std::vector<MiiEntry> &out) {
 #ifdef SL_SIMULATOR
-            (void)uid; (void)cid;
-            return "000d142a303f434b717a7b84939ba6b2bbbec5cbc9d0e2ea010d15252b3250535960736f726870757f8289a0a7aeb1";
+            (void)uid;
+            static const char *kNames[] = { "Sim", "Ana", "Kenji", "Lea", "Omar", "Ines", "Yuki", "Bo" };
+            for (int i = 0; i < 8; i++) {
+                MiiEntry e;
+                e.hex = "000d142a303f434b717a7b84939ba6b2bbbec5cbc9d0e2ea010d15252b3250535960736f726870757f8289a0a7aeb1";
+                e.name = kNames[i];
+                memset(e.cid, i, sizeof(e.cid));
+                out.push_back(e);
+            }
+            return 0;
 #else
             #define MIILOG(...) do { if (FILE *f_ = fopen("sdmc:/slaunch/boot.log", "a")) { fputs("mii: ", f_); fprintf(f_, __VA_ARGS__); fputc('\n', f_); fclose(f_); } } while (0)
-            // The account's own Mii when its picture was made from one; a
-            // character picture has none, so then the first Mii in Mii Edit.
             AccountUserData ud{};
             AccountProfile p;
             Result rc = accountUidIsValid(&uid) ? accountGetProfile(&p, uid) : MAKERESULT(Module_Libnx, LibnxError_BadInput);
             if (R_SUCCEEDED(rc)) { rc = accountProfileGet(&p, &ud, nullptr); accountProfileClose(&p); }
             if (R_FAILED(rc)) MIILOG("profile rc=0x%x", rc);
-            std::string out;
             rc = miiInitialize(MiiServiceType_System);
-            if (R_FAILED(rc)) { MIILOG("init rc=0x%x", rc); return ""; }
+            if (R_FAILED(rc)) { MIILOG("init rc=0x%x", rc); return -1; }
+            int hit = -1;
             MiiDatabase db;
             rc = miiOpenDatabase(&db, MiiSpecialKeyCode_Normal);
             if (R_SUCCEEDED(rc)) {
@@ -1942,18 +1949,23 @@ namespace sl::menu::ui {
                 s32 n = 0;
                 rc = miiDatabaseGet1(&db, MiiSourceFlag_Database, all.data(), (s32)all.size(), &n);
                 if (R_FAILED(rc)) n = 0;
-                s32 hit = -1;
-                for (s32 i = 0; i < n && i < (s32)all.size() && hit < 0; i++)
-                    if (!memcmp(&all[i].create_id, ud.miiID, 16)) hit = i;
+                for (s32 i = 0; i < n && i < (s32)all.size(); i++) {
+                    if (hit < 0 && !memcmp(&all[i].create_id, ud.miiID, 16)) hit = i;
+                    MiiEntry e;
+                    e.hex = MiiStudioHex((const u8 *)&all[i]);
+                    memcpy(e.cid, &all[i].create_id, 16);
+                    char name[48] = {};
+                    utf16_to_utf8((uint8_t *)name, all[i].mii_name, sizeof(name) - 1);
+                    e.name = name;
+                    out.push_back(e);
+                }
                 MIILOG("get rc=0x%x count=%d account=%d", rc, n, hit);
-                if (hit < 0 && n > 0) hit = 0;
-                if (hit >= 0) { out = MiiStudioHex((const u8 *)&all[hit]); memcpy(cid, &all[hit].create_id, 16); }
                 miiDatabaseClose(&db);
             } else {
                 MIILOG("open rc=0x%x", rc);
             }
             miiExit();
-            return out;
+            return hit;
             #undef MIILOG
 #endif
         }
@@ -2051,7 +2063,7 @@ namespace sl::menu::ui {
         }
         if (m_mii_tried[which] || m_mii_running || armGetSystemTick() < m_mii_retry) return m_mii_tex[which];
         if (!m_mii_hex_read) MiiDumpModel();
-        if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = AccountMiiHex(m_user, m_mii_cid); }
+        if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = MiiChosenHex(m_mii_cid); }
         m_mii_tried[which] = true;
         if (m_mii_hex.empty()) return nullptr;
         // Named by the Mii's look, so an edit in Mii Edit renders it again.
@@ -2084,34 +2096,102 @@ namespace sl::menu::ui {
     // The 3D Mii's files: the head from the console's MiiModel archive, the
     // body and animations copied to the card by the user (Nintendo's and
     // Microsoft's, never shipped; see scripts/mii/).
+    namespace {
+        // One Mii's scene from its studio data: the head from the console's
+        // MiiModel archive (mounted as mount), else a dump on the card.
+        // variant: the simulator's stand-ins, made to differ.
+        bool LoadMiiScene(mii::Scene &sc, const std::string &hex, const char *mount, int variant) {
+            mii::Parts p;
+            if (!mii::PartsFromStudioHex(hex, p)) return false;
+#ifdef SL_SIMULATOR
+            if (variant > 0) {
+                p.hair_type = (uint8_t)((p.hair_type + variant * 23) % 132);
+                p.hair_color = (uint8_t)((p.hair_color + variant * 3) % 100);
+                p.favorite_color = (uint8_t)((p.favorite_color + variant * 4) % 12);
+                p.height = (uint8_t)(30 + (variant * 37) % 70);
+                p.glass_type = 0;
+            }
+#else
+            (void)variant;
+#endif
+            std::string dir = "sdmc:/slaunch/miimodel/";   // a dump (dump_miimodel), and the simulator's copy
+#ifndef SL_SIMULATOR
+            FsStorage sto;
+            bool mounted = false;
+            if (R_SUCCEEDED(fsOpenDataStorageByDataId(&sto, 0x0100000000000802ull, NcmStorageId_BuiltInSystem)) &&
+                R_SUCCEEDED(romfsMountFromStorage(sto, 0, mount))) {
+                mounted = true;
+                dir = std::string(mount) + ":/";
+            }
+#else
+            (void)mount;
+#endif
+            auto file = [](const std::string &a, const char *b) {
+                struct stat st {};
+                return stat(a.c_str(), &st) == 0 ? a : std::string("sdmc:/slaunch/miimodel/") + b;
+            };
+            const std::string shape = file(dir + "ShapeHigh.dat", "ShapeHigh.dat"), tex = file(dir + "NXTextureMidSRGB.dat", "NXTextureMidSRGB.dat");
+            const bool ok = sc.Load(shape.c_str(), tex.c_str(), "sdmc:/slaunch/mii/MiiBody.dat", "sdmc:/slaunch/mii/anims.bin", p);
+#ifndef SL_SIMULATOR
+            if (mounted) romfsUnmount(mount);
+#endif
+            if (FILE *f = fopen("sdmc:/slaunch/boot.log", "a")) {
+                fprintf(f, "mii: 3d %s (%s)\n", ok ? "ready" : "failed", shape.c_str());
+                fclose(f);
+            }
+            return ok;
+        }
+    }
+
+    // The 3D Mii's files: the head from the console's MiiModel archive, the
+    // body and animations copied to the card by the user (Nintendo's and
+    // Microsoft's, never shipped; see scripts/mii/).
     void Menu::Mii3DLoad(void *self) {
         Menu *m = (Menu *)self;
-        mii::Parts p;
-        bool ok = mii::PartsFromStudioHex(m->m_mii_hex, p);
-        std::string dir = "sdmc:/slaunch/miimodel/";   // a dump (dump_miimodel), and the simulator's copy
-#ifndef SL_SIMULATOR
-        FsStorage sto;
-        bool mounted = false;
-        if (R_SUCCEEDED(fsOpenDataStorageByDataId(&sto, 0x0100000000000802ull, NcmStorageId_BuiltInSystem)) &&
-            R_SUCCEEDED(romfsMountFromStorage(sto, 0, "mii3d"))) {
-            mounted = true;
-            dir = "mii3d:/";
-        }
-#endif
-        auto file = [](const std::string &a, const char *b) {
-            struct stat st {};
-            return stat(a.c_str(), &st) == 0 ? a : std::string("sdmc:/slaunch/miimodel/") + b;
-        };
-        const std::string shape = file(dir + "ShapeHigh.dat", "ShapeHigh.dat"), tex = file(dir + "NXTextureMidSRGB.dat", "NXTextureMidSRGB.dat");
-        ok = ok && m->m_mii3d.Load(shape.c_str(), tex.c_str(), "sdmc:/slaunch/mii/MiiBody.dat", "sdmc:/slaunch/mii/anims.bin", p);
-#ifndef SL_SIMULATOR
-        if (mounted) romfsUnmount("mii3d");
-#endif
-        if (FILE *f = fopen("sdmc:/slaunch/boot.log", "a")) {
-            fprintf(f, "mii: 3d %s (%s)\n", ok ? "ready" : "failed", shape.c_str());
-            fclose(f);
-        }
+        const bool ok = LoadMiiScene(m->m_mii3d, m->m_mii_hex, "mii3d", m->m_mii_pick);   // the variant: the simulator's stand-ins only
         m->m_mii3d_state.store(ok ? 2 : 3, std::memory_order_release);
+    }
+
+    void Menu::MiiEnsureList() {
+        if (m_mii_list_read) return;
+        m_mii_list_read = true;
+        m_mii_account = MiiReadList(m_user, m_mii_list);
+    }
+    std::string Menu::MiiChosenHex(u8 *cid) {
+        MiiEnsureList();
+        const int n = (int)m_mii_list.size();
+        const int i = (m_mii_pick > 0 && m_mii_pick <= n) ? m_mii_pick - 1
+                    : m_mii_account >= 0 ? m_mii_account : (n > 0 ? 0 : -1);
+        if (i < 0) return "";
+        memcpy(cid, m_mii_list[i].cid, 16);
+        return m_mii_list[i].hex;
+    }
+    std::string Menu::MiiPickName(int pick) {
+        MiiEnsureList();
+        if (pick <= 0 || pick > (int)m_mii_list.size()) return T("Account's Mii");
+        const std::string &n = m_mii_list[pick - 1].name;
+        return n.empty() ? std::string("Mii ") + std::to_string(pick) : n;
+    }
+    void Menu::MiiReset() {
+        if (m_mii_running) {
+            threadWaitForExit(&m_mii_thread);
+            threadClose(&m_mii_thread);
+            m_mii_running = false;
+        }
+        if (m_mii3d_started) {
+            threadWaitForExit(&m_mii3d_thread);
+            threadClose(&m_mii3d_thread);
+            m_mii3d_started = false;
+        }
+        for (SDL_Texture *&t : m_mii_tex) if (t) { m_gfx->FreeImage(t); t = nullptr; }
+        if (m_mii3d_tex) { m_gfx->FreeImage(m_mii3d_tex); m_mii3d_tex = nullptr; }
+        m_mii_tried[0] = m_mii_tried[1] = false;
+        m_mii_hex_read = false;
+        m_mii_hex.clear();
+        m_mii_retry = 0;
+        m_mii3d = mii::Scene{};
+        m_mii3d_verts.clear();
+        m_mii3d_state.store(0);
     }
 
     bool Menu::Mii3DReady() {
@@ -2120,20 +2200,28 @@ namespace sl::menu::ui {
             m_mii3d_state.store(3);
             struct stat fs {};
             if (stat("sdmc:/slaunch/mii/MiiBody.dat", &fs) != 0) return false;   // no body on the card: the studio picture
-            if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = AccountMiiHex(m_user, m_mii_cid); }
+            if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = MiiChosenHex(m_mii_cid); }
             if (m_mii_hex.empty()) return false;
             m_mii3d_state.store(1);
-            if (R_FAILED(threadCreate(&m_mii3d_thread, &Menu::Mii3DLoad, this, nullptr, 0x20000, 0x3E, -2)) ||
-                R_FAILED(threadStart(&m_mii3d_thread))) {
+            if (R_FAILED(threadCreate(&m_mii3d_thread, &Menu::Mii3DLoad, this, nullptr, 0x20000, 0x3E, -2))) {
                 m_mii3d_state.store(3);
                 return false;
             }
+            if (R_FAILED(threadStart(&m_mii3d_thread))) {
+                threadClose(&m_mii3d_thread);
+                m_mii3d_state.store(3);
+                return false;
+            }
+            m_mii3d_started = true;
             return false;
         }
         if (st != 2) return false;
         if (!m_mii3d_tex) {
-            threadWaitForExit(&m_mii3d_thread);
-            threadClose(&m_mii3d_thread);
+            if (m_mii3d_started) {
+                threadWaitForExit(&m_mii3d_thread);
+                threadClose(&m_mii3d_thread);
+                m_mii3d_started = false;
+            }
             const mii::Image &a = m_mii3d.Atlas();
             m_mii3d_tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, a.w, a.h);
             if (!m_mii3d_tex || !SDL_UpdateTexture(m_mii3d_tex, nullptr, a.px.data(), a.w * 4)) {
@@ -2148,11 +2236,23 @@ namespace sl::menu::ui {
         return true;
     }
 
+    namespace {
+        // A changed face expression: the new mask over the atlas's mask rect.
+        void MiiMaskUpload(mii::Scene &sc, SDL_Texture *tex, int res) {
+            if (!tex) return;
+            if (const mii::Image *m = sc.MaskUpdate(res)) {
+                const SDL_Rect r{ 0, res, m->w, m->h };
+                SDL_UpdateTexture(tex, &r, m->px.data(), m->w * 4);
+            }
+        }
+    }
+
     bool Menu::MiiDraw(int x, int y, int size, Uint8 alpha) {
         if (Mii3DReady()) {
             static_assert(sizeof(mii::Vertex) == sizeof(SDL_Vertex), "mii::Vertex mirrors SDL_Vertex");
             const double t = (double)armGetSystemTick() / (double)armGetSystemTickFreq();
             m_mii3d.Build(t, (float)x, (float)y, (float)size, alpha / 255.0f, m_mii3d_verts);
+            MiiMaskUpload(m_mii3d, m_mii3d_tex, 512);
             m_gfx->DrawGeometry(m_mii3d_tex, (const SDL_Vertex *)m_mii3d_verts.data(), (int)m_mii3d_verts.size());
             return true;
         }
@@ -2469,6 +2569,246 @@ namespace sl::menu::ui {
             if (al > 0.1f && x >= px && x < px + w && y >= py && y < py + h) return items[i];
         }
         return -1;
+    }
+
+    // ---------------------------------------------------------------------------
+    // The Mii picker (Theming > Mii)
+    // ---------------------------------------------------------------------------
+    namespace {
+        // Half size, colour weighted by alpha so transparent texels do not
+        // darken the edges. The picker's Miis are small: 2 MB each, not 8.
+        mii::Image Halve(const mii::Image &a) {
+            mii::Image o;
+            o.w = a.w / 2; o.h = a.h / 2;
+            o.px.resize((size_t)o.w * o.h * 4);
+            for (int y = 0; y < o.h; y++)
+                for (int x = 0; x < o.w; x++) {
+                    unsigned c[3] = {}, al = 0;
+                    for (int k = 0; k < 4; k++) {
+                        const uint8_t *p = &a.px[((size_t)(2 * y + (k >> 1)) * a.w + 2 * x + (k & 1)) * 4];
+                        for (int i = 0; i < 3; i++) c[i] += p[i] * p[3];
+                        al += p[3];
+                    }
+                    uint8_t *q = &o.px[((size_t)y * o.w + x) * 4];
+                    for (int i = 0; i < 3; i++) q[i] = al ? (uint8_t)(c[i] / al) : 0;
+                    q[3] = (uint8_t)(al / 4);
+                }
+            return o;
+        }
+    }
+
+    void Menu::MiiPickLoad(void *self) {
+        Menu *m = (Menu *)self;
+        MiiPickSlot &sl = m->m_mp_slot[m->m_mp_job];
+        sl.failed = !LoadMiiScene(sl.scene, m->m_mp_hex, "miipk", sl.idx);
+        if (!sl.failed) { sl.small = Halve(sl.scene.Atlas()); sl.scene.DropAtlas(); }
+        m->m_mp_state.store(2, std::memory_order_release);
+    }
+
+    void Menu::OpenMiiPicker() {
+        MiiEnsureList();
+        const int n = (int)m_mii_list.size() + 1;   // entry 0: the account's own
+        m_mp_cursor = std::clamp(m_mii_pick, 0, n - 1);
+        m_mp_pos = (float)(m_mp_cursor % kMiiPickPage);
+        m_mp_open = true;
+        if (m_screen != Screen::MiiPicker) m_mp_from = m_screen;
+        m_screen = Screen::MiiPicker;
+    }
+    void Menu::MiiPickFree() {
+        if (m_mp_state.load() != 0) {
+            threadWaitForExit(&m_mp_thread);
+            threadClose(&m_mp_thread);
+            m_mp_state.store(0);
+        }
+        for (MiiPickSlot &sl : m_mp_slot) {
+            if (sl.tex) m_gfx->FreeImage(sl.tex);
+            sl = MiiPickSlot{};
+        }
+        m_mp_job = -1;
+        m_mp_open = false;
+    }
+    void Menu::CloseMiiPicker() {
+        MiiPickFree();
+        m_screen = m_mp_from;
+    }
+
+    Menu::Action Menu::OnButtonMiiPicker(Btn b) {
+        const int n = (int)m_mii_list.size() + 1;
+        if (b == Btn::Left && m_mp_cursor > 0) m_mp_cursor--;
+        else if (b == Btn::Right && m_mp_cursor < n - 1) m_mp_cursor++;
+        else if (b == Btn::L && m_mp_cursor >= kMiiPickPage) m_mp_cursor -= kMiiPickPage;
+        else if (b == Btn::R && m_mp_cursor / kMiiPickPage < (n - 1) / kMiiPickPage)
+            m_mp_cursor = std::min(n - 1, m_mp_cursor + kMiiPickPage);
+        else if (b == Btn::A) {
+            if (m_mp_cursor != m_mii_pick) {
+                m_mii_pick = m_mp_cursor;
+                SaveSettings();
+                MiiReset();
+            }
+            CloseMiiPicker();
+        } else if (b == Btn::B) {
+            CloseMiiPicker();
+        }
+        return Action::None;
+    }
+
+    namespace {
+        // The picker's row: five places, and the silhouettes beyond them.
+        constexpr int kMpX0 = 294, kMpStep = 173, kMpGround = 548, kMpSize = 420;
+        inline int MpX(int slot) { return kMpX0 + slot * kMpStep; }
+    }
+
+    int Menu::MiiPickAt(int x) const {
+        // -1 / kMiiPickPage: the silhouettes (the page before / after).
+        const int i = (int)std::floor((x - (kMpX0 - kMpStep / 2)) / (float)kMpStep);
+        return std::clamp(i, -1, kMiiPickPage);
+    }
+
+    void Menu::DrawMiiPicker() {
+        const XboxSkin &sk = Skin();
+        const int n = (int)m_mii_list.size() + 1;
+        const int page = m_mp_cursor / kMiiPickPage, first = page * kMiiPickPage;
+        const int last = std::min(n, first + kMiiPickPage) - 1, pages = (n + kMiiPickPage - 1) / kMiiPickPage;
+        // Collect a finished load; start the next one of this page, nearest the cursor first.
+        if (m_mp_state.load(std::memory_order_acquire) == 2) {
+            threadWaitForExit(&m_mp_thread);
+            threadClose(&m_mp_thread);
+            MiiPickSlot &sl = m_mp_slot[m_mp_job];
+            if (!sl.failed) {
+                sl.tex = SDL_CreateTexture(m_gfx->Renderer(), SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, sl.small.w, sl.small.h);
+                if (sl.tex && SDL_UpdateTexture(sl.tex, nullptr, sl.small.px.data(), sl.small.w * 4)) {
+                    SDL_SetTextureBlendMode(sl.tex, SDL_BLENDMODE_BLEND);
+                    SDL_SetTextureScaleMode(sl.tex, SDL_SCALEMODE_LINEAR);
+                } else {
+                    if (sl.tex) { m_gfx->FreeImage(sl.tex); sl.tex = nullptr; }
+                    sl.failed = true;
+                }
+            }
+            sl.small = mii::Image{};
+            m_mp_job = -1;
+            m_mp_state.store(0);
+        }
+        if (m_mp_state.load() == 0) {
+            auto held = [&](int e) { for (const MiiPickSlot &sl : m_mp_slot) if (sl.idx == e) return true; return false; };
+            int want = -1;
+            for (int d = 0; d < kMiiPickPage * 2 && want < 0; d++) {
+                const int e = m_mp_cursor + ((d & 1) ? -(d + 1) / 2 : d / 2);
+                if (e >= first && e <= last && !held(e)) want = e;
+            }
+            int slot = -1;
+            for (int i = 0; want >= 0 && i < kMiiPickSlots && slot < 0; i++)
+                if (m_mp_slot[i].idx < first || m_mp_slot[i].idx > last) slot = i;   // free, or another page's
+            if (slot >= 0) {
+                MiiPickSlot &sl = m_mp_slot[slot];
+                if (sl.tex) m_gfx->FreeImage(sl.tex);
+                sl = MiiPickSlot{};
+                sl.idx = want;
+                const int li = want > 0 ? want - 1 : (m_mii_account >= 0 ? m_mii_account : 0);
+                m_mp_hex = li < (int)m_mii_list.size() ? m_mii_list[li].hex : "";
+                m_mp_job = slot;
+                struct stat fs {};
+                if (m_mp_hex.empty() || stat("sdmc:/slaunch/mii/MiiBody.dat", &fs) != 0) {
+                    sl.failed = true;   // nothing to draw it with: the name alone
+                    m_mp_job = -1;
+                } else if (R_SUCCEEDED(threadCreate(&m_mp_thread, &Menu::MiiPickLoad, this, nullptr, 0x20000, 0x3E, -2))) {
+                    m_mp_state.store(1);
+                    if (R_FAILED(threadStart(&m_mp_thread))) { threadClose(&m_mp_thread); m_mp_state.store(0); sl.failed = true; m_mp_job = -1; }
+                } else {
+                    sl.failed = true;
+                    m_mp_job = -1;
+                }
+            }
+        }
+
+        const SDL_Color ink = sk.has_text ? sk.text : kNxInk;
+        const char *title = T("Choose your Mii");
+        MText(XF_Semi, 20, 640 - MWidth(XF_Semi, 20, title) / 2, 74, WithAlpha(ink, 225), title);
+        const double t = (double)armGetSystemTick() / (double)armGetSystemTickFreq();
+
+        // The beam: a soft column of light from the top of the screen to the
+        // floor, gliding to the selected place.
+        m_mp_pos += ((m_mp_cursor - first) - m_mp_pos) * 0.22f;
+        {
+            const float bx = MpX(0) + m_mp_pos * kMpStep, hw = 62.0f, fy = kMpGround - 8.0f;
+            const float x[4] = { bx - hw, bx - hw * 0.45f, bx + hw * 0.45f, bx + hw };
+            const float a[4] = { 0.0f, 0.62f, 0.62f, 0.0f };
+            SDL_Vertex v[18];
+            int k = 0;
+            for (int c = 0; c < 3; c++) {
+                auto put = [&](float px, float py, float al) {
+                    const float glow = 1.0f - py / fy * 0.55f;   // fades towards the floor
+                    v[k++] = SDL_Vertex{ { px, py }, { 0.55f, 0.82f, 1.0f, al * glow }, { 0, 0 } };
+                };
+                put(x[c], 0, a[c]); put(x[c + 1], 0, a[c + 1]); put(x[c + 1], fy, a[c + 1]);
+                put(x[c], 0, a[c]); put(x[c + 1], fy, a[c + 1]); put(x[c], fy, a[c]);
+            }
+            m_gfx->DrawGeometry(nullptr, v, k);
+        }
+
+        // The silhouettes: a Mii of this page in black, for the pages either side.
+        const MiiPickSlot *anyMii = nullptr;
+        for (const MiiPickSlot &sl : m_mp_slot) if (sl.tex && sl.idx >= first && sl.idx <= last) { anyMii = &sl; break; }
+        auto silhouette = [&](int at, bool next) {
+            if (!anyMii) return;
+            MiiPickSlot &sl = const_cast<MiiPickSlot &>(*anyMii);
+            std::vector<mii::Vertex> vs;
+            const float ms = kMpSize * 0.86f, cx = (float)MpX(at);
+            sl.scene.SetFloat(0);
+            sl.scene.Build(t + sl.idx * 3.7, cx - ms / 2, kMpGround - ms * 0.975f, ms, 1.0f, vs);
+            for (mii::Vertex &q : vs) { q.r = q.g = q.b = 0.04f; }
+            m_gfx->DrawGeometry(sl.tex, (const SDL_Vertex *)vs.data(), (int)vs.size());
+            // |< or >| on its chest.
+            const float y = kMpGround - ms * 0.42f, s = 11.0f, d = next ? 1.0f : -1.0f;
+            SDL_Vertex tri[9] = {
+                { { cx - d * s, y - s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx - d * s, y + s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx + d * s * 0.7f, y }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx + d * s * 0.8f, y - s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx + d * s * 1.15f, y - s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx + d * s * 1.15f, y + s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx + d * s * 0.8f, y - s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx + d * s * 1.15f, y + s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+                { { cx + d * s * 0.8f, y + s }, { 1, 1, 1, 0.9f }, { 0, 0 } },
+            };
+            m_gfx->DrawGeometry(nullptr, tri, 9);
+        };
+
+        // The page: the selected one last, over its neighbours' hands.
+        MiiPickSlot *order[kMiiPickSlots];
+        int cnt = 0;
+        for (MiiPickSlot &sl : m_mp_slot) if (sl.tex && sl.idx >= first && sl.idx <= last) order[cnt++] = &sl;
+        std::sort(order, order + cnt, [&](MiiPickSlot *a, MiiPickSlot *b) {
+            return (a->idx == m_mp_cursor) < (b->idx == m_mp_cursor); });
+        for (int i = 0; i < cnt; i++) {
+            MiiPickSlot &sl = *order[i];
+            sl.fade = std::min(1.0f, sl.fade + 0.07f);
+            sl.up += ((sl.idx == m_mp_cursor ? 1.0f : 0.0f) - sl.up) * 0.12f;
+            const float up = sl.up, ms = (float)kMpSize, cx = (float)MpX(sl.idx - first);
+            const float lift = up * (ms * 0.17f + 5.0f * (float)std::sin(t * 1.6));
+            const Uint8 A = (Uint8)(255.0f * sl.fade);
+            const float sw = ms * 0.27f * (1.0f - 0.25f * up);   // the shadow stays on the floor, smaller
+            if (sk.av_shadow) m_gfx->DrawImage(sk.av_shadow, (int)(cx - sw / 2), (int)(kMpGround - ms * 0.04f), (int)sw, (int)(ms * 0.075f), (Uint8)(A * (1.0f - 0.35f * up)));
+            else m_gfx->FillRect((int)(cx - sw / 4), kMpGround - 3, (int)(sw / 2), 5, SDL_Color{ 0, 0, 0, (Uint8)(A * 50 / 255) });
+            sl.scene.SetFloat(up);
+            sl.scene.Build(t + sl.idx * 3.7, cx - ms / 2, kMpGround - lift - ms * 0.975f, ms, sl.fade, sl.verts);
+            MiiMaskUpload(sl.scene, sl.tex, 256);
+            // In the beam the Mii takes its colour: lavender.
+            const float tr = 1.0f - 0.22f * up, tg = 1.0f - 0.30f * up;
+            for (mii::Vertex &v : sl.verts) { v.r = v.r * tr + 0.06f * up; v.g = v.g * tg + 0.04f * up; v.b = std::min(1.0f, v.b + 0.22f * up); }
+            m_gfx->DrawGeometry(sl.tex, (const SDL_Vertex *)sl.verts.data(), (int)sl.verts.size());
+        }
+        if (page > 0) silhouette(-1, false);
+        if (page < pages - 1) silhouette(kMiiPickPage, true);
+
+        // The selected one's name, and the page.
+        const std::string name = MiiPickName(m_mp_cursor);
+        const char *sub = m_mp_cursor == m_mii_pick ? T("In use") : m_mp_cursor == 0 ? T("Follows the account's picture") : "";
+        std::string line = name + (*sub ? std::string("  -  ") + sub : std::string());
+        MText(XF_Light, 26, 640 - MWidth(XF_Light, 26, line.c_str()) / 2, 584, ink, line.c_str());
+        char pg[48];
+        snprintf(pg, sizeof(pg), T("Page %d of %d"), page + 1, pages);
+        MText(XF_Semi, 16, 640 - MWidth(XF_Semi, 16, pg) / 2, 632, WithAlpha(ink, 170), pg);
+        DrawStatusHint({ {{"a"}, "Select"}, {{"b"}, "Back"} });
     }
 
     int Menu::XboxItemPitch() const { return m_ui_mode == UiMode::NXE ? kNxPitch : kBlRowH; }

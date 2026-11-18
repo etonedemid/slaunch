@@ -408,9 +408,15 @@ namespace sl::menu::mii {
             const float res = (float)dst.w, sx = w * kTexScaleX, sy = h * kTexScaleY;
             const float baseX = o == O_Center ? -0.5f : o == O_Right ? -1.0f : 0.0f;
             const float a = deg * 3.14159265f / 180.0f, ca = std::cos(a), sa = std::sin(a);
-            const float reach = std::sqrt(sx * sx + sy * sy) + 2;
-            const int x0 = std::max(0, (int)(x - reach)), x1 = std::min(dst.w - 1, (int)(x + reach));
-            const int y0 = std::max(0, (int)(y - reach)), y1 = std::min(dst.h - 1, (int)(y + reach));
+            // Bounds of the turned quad: local (lx, ly) -> screen offset (dx, -dy).
+            float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f, by1 = -1e9f;
+            for (int c = 0; c < 4; c++) {
+                const float lx = (baseX + (c & 1)) * sx, ly = ((c >> 1) - 0.5f) * sy;
+                const float dx = lx * ca + ly * sa, dy = -lx * sa + ly * ca;
+                bx0 = std::min(bx0, dx); bx1 = std::max(bx1, dx); by0 = std::min(by0, -dy); by1 = std::max(by1, -dy);
+            }
+            const int x0 = std::max(0, (int)(x + bx0) - 2), x1 = std::min(dst.w - 1, (int)(x + bx1) + 2);
+            const int y0 = std::max(0, (int)(y + by0) - 2), y1 = std::min(dst.h - 1, (int)(y + by1) + 2);
             for (int py = y0; py <= y1; py++)
                 for (int px = x0; px <= x1; px++) {
                     // y-up offset from the anchor, turned back by +deg (the quad turns by -deg).
@@ -421,6 +427,7 @@ namespace sl::menu::mii {
                     const float v = 0.5f - ly;                                // image rows run top down
                     float s[4];
                     Sample(src, sw, sh, u, v, s);
+                    if (s[3] <= 0) continue;
                     Over(&dst.px[((size_t)py * dst.w + px) * 4], s);
                 }
         }
@@ -434,7 +441,7 @@ namespace sl::menu::mii {
     }
 
     bool BuildFaceTextures(const Resources &r, const Parts &p, FaceTextures &out) {
-        static const float kWhite[4] = { 1, 1, 1, 1 }, kBlack[4] = { 0, 0, 0, 1 };
+        static const float kBlack[4] = { 0, 0, 0, 1 };
         out = {};
         std::vector<uint8_t> px;
         int w = 0, h = 0;
@@ -463,46 +470,87 @@ namespace sl::menu::mii {
             DrawFull(out.glasses, px, w, h);
         }
 
-        // Mask: the parts at their RFL positions on a 512 target.
-        Fill(out.mask, 512, 512, nullptr);
-        const float bs = TexUnit(512.0f);
-        if (Tex(r, TexKind::Eye, p.eye_type, px, w, h)) {
-            Modulate(px, M_LayeredRgb, kBlack, kWhite, kCommonColor[p.eye_color]);
+        MaskKit kit;
+        BuildMaskKit(r, p, kit);
+        DrawMask(kit, Expression{}, out.mask);
+        return true;
+    }
+
+    bool BuildMaskKit(const Resources &r, const Parts &p, MaskKit &out) {
+        static const float kWhite[4] = { 1, 1, 1, 1 }, kBlack[4] = { 0, 0, 0, 1 };
+        out = {};
+        out.p = p;
+        auto get = [&](Image &img, TexKind k, int i, Mode m, const float *c0, const float *c1 = nullptr, const float *c2 = nullptr) {
+            if (!Tex(r, k, i, img.px, img.w, img.h)) { img = {}; return false; }
+            Modulate(img.px, m, c0, c1, c2);
+            return true;
+        };
+        const float *ec = kCommonColor[p.eye_color], *mc = kCommonColor[p.mouth_color], *lc = kUpperLipColor[p.mouth_color];
+        get(out.eye[Expression::OwnEyes], TexKind::Eye, p.eye_type, M_LayeredRgb, kBlack, kWhite, ec);
+        get(out.eye[Expression::SmileEyes], TexKind::Eye, 60, M_LayeredRgb, kBlack, kWhite, ec);   // the ^ arc
+        get(out.eye[Expression::WideEyes], TexKind::Eye, 61, M_LayeredRgb, kBlack, kWhite, ec);    // the round eye
+        // Closed: the arc upside down, the lids lowered.
+        Image &cl = out.eye[Expression::ClosedEyes];
+        cl = out.eye[Expression::SmileEyes];
+        for (int y = 0; y < cl.h / 2; y++)
+            for (int x = 0; x < cl.w * 4; x++) std::swap(cl.px[(size_t)y * cl.w * 4 + x], cl.px[(size_t)(cl.h - 1 - y) * cl.w * 4 + x]);
+        static const int kMouthTex[Expression::kMouths] = { -1, 19, 22, 36, 36, 30, 35 };
+        for (int m = 0; m < Expression::kMouths; m++)
+            get(out.mouth[m], TexKind::Mouth, m ? kMouthTex[m] : p.mouth_type, M_LayeredRgb, mc, lc, kWhite);
+        get(out.brow, TexKind::Eyebrow, p.eyebrow_type, M_Alpha, kCommonColor[p.eyebrow_color]);
+        if (p.mustache_type) get(out.mustache, TexKind::Mustache, p.mustache_type, M_Alpha, kCommonColor[p.beard_color]);
+        if (p.mole_type) get(out.mole, TexKind::Mole, 1, M_Alpha, kBlack);
+        return true;
+    }
+
+    void DrawMask(const MaskKit &k, const Expression &e, Image &mask, int res) {
+        const Parts &p = k.p;
+        Fill(mask, res, res, nullptr);
+        const float bs = TexUnit((float)res);
+        auto part = [&](const Image &img, float x, float y, float w, float h, float deg, Origin o) {
+            if (!img.px.empty()) DrawPart(mask, img.px, img.w, img.h, x, y, w, h, deg, o);
+        };
+        {
+            const Image &eye = k.eye[e.eyes].px.empty() ? k.eye[Expression::OwnEyes] : k.eye[e.eyes];
+            const int tex = e.eyes == Expression::OwnEyes ? p.eye_type : e.eyes == Expression::WideEyes ? 61 : 60;
             const float sc = Scale2Dim(p.eye_scale), sy = 0.12f * p.eye_aspect + 0.64f;
             const float sx = kTexScaleX * p.eye_x, ey = 18.451525f + kMagicY * kTexScaleY * p.eye_y;
             const float ew = TexUnit(342.0f) * sc, eh = TexUnit(288.0f) * sc * sy;
-            const float ang = Rot2Ang(p.eye_rotate + 32 - kEyeRotOffset[p.eye_type % 62]);
-            DrawPart(out.mask, px, w, h, bs * (32 + sx), ey * bs, ew * bs, eh * bs, 360 - ang, O_Left);
-            DrawPart(out.mask, px, w, h, bs * (32 - sx), ey * bs, ew * bs, eh * bs, ang, O_Right);
+            const float ang = Rot2Ang(p.eye_rotate + 32 - kEyeRotOffset[tex % 62]);
+            part(eye, bs * (32 + sx), ey * bs, ew * bs, eh * bs, 360 - ang, O_Left);
+            part(eye, bs * (32 - sx), ey * bs, ew * bs, eh * bs, ang, O_Right);
         }
-        if (Tex(r, TexKind::Eyebrow, p.eyebrow_type, px, w, h)) {
-            Modulate(px, M_Alpha, kCommonColor[p.eyebrow_color]);
+        {
             const float sc = Scale2Dim(p.eyebrow_scale), sy = 0.12f * p.eyebrow_aspect + 0.64f;
-            const float sx = kTexScaleX * p.eyebrow_x, ey = 16.549807f + kMagicY * kTexScaleY * p.eyebrow_y;
+            const float sx = kTexScaleX * p.eyebrow_x, ey = 16.549807f + kMagicY * kTexScaleY * (p.eyebrow_y + e.brow_y);
             const float ew = TexUnit(324.0f) * sc, eh = TexUnit(288.0f) * sc * sy;
-            const float ang = Rot2Ang(p.eyebrow_rotate + kBrowRotOffset[p.eyebrow_type % 24]);
-            DrawPart(out.mask, px, w, h, bs * (32 + sx), ey * bs, ew * bs, eh * bs, 360 - ang, O_Left);
-            DrawPart(out.mask, px, w, h, bs * (32 - sx), ey * bs, ew * bs, eh * bs, ang, O_Right);
+            const float ang = Rot2Ang(p.eyebrow_rotate + 32 + e.brow_rot + kBrowRotOffset[p.eyebrow_type % 24]);
+            part(k.brow, bs * (32 + sx), ey * bs, ew * bs, eh * bs, 360 - ang, O_Left);
+            part(k.brow, bs * (32 - sx), ey * bs, ew * bs, eh * bs, ang, O_Right);
         }
-        if (Tex(r, TexKind::Mouth, p.mouth_type, px, w, h)) {
-            Modulate(px, M_LayeredRgb, kCommonColor[p.mouth_color], kUpperLipColor[p.mouth_color], kWhite);
-            const float sc = Scale2Dim(p.mouth_scale), sy = 0.12f * p.mouth_aspect + 0.64f;
+        {
+            const Image &mouth = k.mouth[e.mouth].px.empty() ? k.mouth[Expression::OwnMouth] : k.mouth[e.mouth];
+            // The stand-ins are drawn a little larger than the Mii's own mouth
+            // so a small mouth still shows the expression.
+            static const float kGrow[Expression::kMouths] = { 1.0f, 1.35f, 1.35f, 1.1f, 0.75f, 1.35f, 1.35f };
+            const float sc = std::max(Scale2Dim(p.mouth_scale), 2.2f) * kGrow[e.mouth];
+            const float own = Scale2Dim(p.mouth_scale);
+            const bool o = e.mouth == Expression::Open || e.mouth == Expression::Talk;
+            const float sy = o ? 1.0f : 0.12f * p.mouth_aspect + 0.64f;
             const float my = 29.25885f + kMagicY * kTexScaleY * p.mouth_y;
-            DrawPart(out.mask, px, w, h, bs * 32, my * bs, TexUnit(396.0f) * sc * bs, TexUnit(288.0f) * sc * sy * bs, 0, O_Center);
+            const float ms = e.mouth == Expression::OwnMouth ? own : sc;
+            part(mouth, bs * 32, my * bs, TexUnit(396.0f) * ms * bs, TexUnit(288.0f) * ms * sy * bs, 0, O_Center);
         }
-        if (p.mustache_type && Tex(r, TexKind::Mustache, p.mustache_type, px, w, h)) {
-            Modulate(px, M_Alpha, kCommonColor[p.beard_color]);
+        if (!k.mustache.px.empty()) {
             const float sc = Scale2Dim(p.mustache_scale), my = 31.763554f + kMagicY * kTexScaleY * p.mustache_y;
             const float mw = TexUnit(288.0f) * sc, mh = TexUnit(576.0f) * sc;
-            DrawPart(out.mask, px, w, h, bs * 32, my * bs, mw * bs, mh * bs, 0, O_Left);
-            DrawPart(out.mask, px, w, h, bs * 32, my * bs, mw * bs, mh * bs, 0, O_Right);
+            part(k.mustache, bs * 32, my * bs, mw * bs, mh * bs, 0, O_Left);
+            part(k.mustache, bs * 32, my * bs, mw * bs, mh * bs, 0, O_Right);
         }
-        if (p.mole_type && Tex(r, TexKind::Mole, 1, px, w, h)) {
-            Modulate(px, M_Alpha, kBlack);
+        if (!k.mole.px.empty()) {
             const float sc = Scale2Dim(p.mole_scale);
             const float mx = 17.766165f + 2 * kTexScaleX * p.mole_x, my = 17.95986f + kMagicY * kTexScaleY * p.mole_y;
-            DrawPart(out.mask, px, w, h, mx * bs, my * bs, sc * bs, sc * bs, 0, O_Center);
+            part(k.mole, mx * bs, my * bs, sc * bs, sc * bs, 0, O_Center);
         }
-        return true;
     }
 }

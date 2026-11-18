@@ -5,6 +5,7 @@
 // texture the head uses sits in one atlas, so the whole Mii is one draw call.
 #pragma once
 #include <sl/menu/mii/MiiBody.hpp>
+#include <sl/menu/mii/MiiModel.hpp>
 #include <cstdint>
 #include <vector>
 
@@ -26,6 +27,17 @@ namespace sl::menu::mii {
         // that only goes up), framed like the studio all_body render: a size
         // square at (x, y), feet near its foot. alpha fades the whole Mii.
         void Build(double t, float x, float y, float size, float alpha, std::vector<Vertex> &out);
+        // 0..1: how far into the hovering pose of the Xbox's avatar picker -
+        // arms half raised from the stand, swaying - instead of idling. The
+        // pack has no such animation, so it is made from the stand and the
+        // bind (T) pose.
+        void SetFloat(float k) { m_float = k; }
+        // The face follows the animations' face keys (and blinks on its own),
+        // which redraws the mask. After a Build that changed it this returns
+        // the new mask, doubled like the atlas (2res x res), to upload over
+        // the atlas rect (0, res, 2res, res) of an atlas scaled to res/512;
+        // nullptr when it is unchanged.
+        const Image *MaskUpdate(int res = 512);
 
     private:
         struct Part {
@@ -47,6 +59,7 @@ namespace sl::menu::mii {
         Anims m_anims;
         bool m_haveAnims = false;
         std::vector<int> m_idles;              // animations to idle through
+        std::vector<int> m_extras;             // and now and then one of these
         int m_anim = -1;
         double m_start = 0;
         Quat m_from[kAnimJoints];              // the pose a change blends out of
@@ -54,6 +67,12 @@ namespace sl::menu::mii {
         Quat m_last[kAnimJoints];
         float m_lastRoot[3] = {};
         bool m_blend = false;
+        float m_float = 0;
+        MaskKit m_kit;
+        Expression m_expr;
+        bool m_maskDirty = false;
+        double m_blinkAt = 0;
+        Image m_maskImg, m_maskDouble;
         uint32_t m_rng = 0x2545F491u;
         // Scratch kept between frames.
         struct Tri { int layer; float depth, z[3]; Vertex v[3]; };

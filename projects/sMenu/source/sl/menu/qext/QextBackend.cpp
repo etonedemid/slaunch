@@ -356,6 +356,8 @@ void RenameTitle(u64 tid, const char *name) {
     }
 }
 
+AccountUid SelectedUser() { return g_User; }
+
 bool TakeRestart() {
     const bool r = g_Restart;
     g_Restart = false;
@@ -413,6 +415,11 @@ Result QextCommand(SystemMessage msg, const void *payload, size_t) {
         case SystemMessage::RebootToPayload: {
             auto *p = static_cast<const PayloadReboot *>(payload);
             Fail(pwr::PayloadResultText(pwr::RebootToPayload(p->payload_path)));
+            return 0;
+        }
+        case SystemMessage::SwitchUser: {
+            AccountUid u;
+            if (PickUser(u)) { g_User = u; g_Restart = true; }
             return 0;
         }
         case SystemMessage::RestartMenu:

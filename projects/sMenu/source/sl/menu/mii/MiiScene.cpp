@@ -1,4 +1,5 @@
 #include <sl/menu/mii/MiiScene.hpp>
+#include <cstdint>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -79,6 +80,8 @@ namespace sl::menu::mii {
         if (!r.Load(shape, tex)) return false;
         FaceTextures ft;
         BuildFaceTextures(r, p, ft);
+        BuildMaskKit(r, p, m_kit);
+        m_expr = Expression{};
 
         m_atlas.w = kAW; m_atlas.h = kAH;
         m_atlas.px.assign((size_t)kAW * kAH * 4, 0);
@@ -132,12 +135,23 @@ namespace sl::menu::mii {
         m_haveAnims = anims && m_anims.Load(anims);
         if (m_haveAnims) {
             const char *mine = p.gender ? "female_idle_" : "male_idle_";
+            const std::string sex = p.gender ? "female_" : "male_";
             for (int i = 0; i < m_anims.Count(); i++) {
                 const std::string &nm = m_anims.Name(i);
                 if (!nm.compare(0, 14, "generic_stand_") || !nm.compare(0, strlen(mine), mine)) m_idles.push_back(i);
             }
+            // Now and then something livelier, as the 360's avatars did.
+            for (const std::string &nm : { std::string("generic_wave"), std::string("generic_clap"), sex + "laugh",
+                                           sex + "confused", sex + "shocked_surprised", sex + "yawn" })
+                if (const int i = m_anims.Find(nm.c_str()); i >= 0) m_extras.push_back(i);
             if (m_idles.empty()) m_haveAnims = false;
         }
+        // Each Mii its own sequence: from its looks and where it lives, so two
+        // copies of one Mii do not move in step either.
+        m_rng = 2166136261u;
+        for (size_t i = 0; i < sizeof(p); i++) m_rng = (m_rng ^ ((const uint8_t *)&p)[i]) * 16777619u;
+        m_rng ^= (uint32_t)(uintptr_t)this;
+        if (!m_rng) m_rng = 0x2545F491u;
         for (int j = 0; j < kAnimJoints; j++) m_last[j] = m_from[j] = { 0, 0, 0, 1 };
         return !m_head.empty();
     }
@@ -147,7 +161,9 @@ namespace sl::menu::mii {
         // Mostly standing about, now and then one of the gender's idles.
         std::vector<int> stands, others;
         for (int i : m_idles) (m_anims.Name(i).compare(0, 14, "generic_stand_") ? others : stands).push_back(i);
-        const std::vector<int> &pool = (!others.empty() && (m_rng % 100) < 30) || stands.empty() ? others : stands;
+        const unsigned roll = m_rng % 100;
+        const std::vector<int> &pool = !m_extras.empty() && roll < 15 ? m_extras
+                                     : (!others.empty() && roll < 45) || stands.empty() ? others : stands;
         int next = pool[(m_rng >> 8) % pool.size()];
         if (next == m_anim && pool.size() > 1) next = pool[((m_rng >> 8) + 1) % pool.size()];
         if (m_anim >= 0) {
@@ -157,6 +173,25 @@ namespace sl::menu::mii {
         }
         m_anim = next;
         m_start = t;
+    }
+
+    const Image *Scene::MaskUpdate(int res) {
+        if (!m_maskDirty) return nullptr;
+        m_maskDirty = false;
+        // Drawn at 256 at most and scaled up: the face is never that big on
+        // screen, and a 512 redraw costs a frame on the console.
+        const int dr = std::min(res, 256), k = res / dr;
+        DrawMask(m_kit, m_expr, m_maskImg, dr);
+        if (m_maskImg.w != dr) return nullptr;
+        m_maskDouble.w = 2 * res; m_maskDouble.h = res;
+        m_maskDouble.px.resize((size_t)4 * res * 2 * res);
+        for (int y = 0; y < res; y++)
+            for (int x = 0; x < res; x++) {
+                const uint8_t *p = &m_maskImg.px[((size_t)(y / k) * dr + x / k) * 4];
+                memcpy(&m_maskDouble.px[((size_t)y * 2 * res + x) * 4], p, 4);
+                memcpy(&m_maskDouble.px[((size_t)y * 2 * res + 2 * res - 1 - x) * 4], p, 4);
+            }
+        return &m_maskDouble;
     }
 
     void Scene::Build(double t, float x, float y, float size, float alpha, std::vector<Vertex> &out) {
@@ -173,8 +208,54 @@ namespace sl::menu::mii {
             } else {
                 m_blend = false;
             }
+            // The face: the Xbox codes mapped onto the Mii's own face parts.
+            Expression e;
+            int mouth = 0, brow = 0, eye = 0;
+            if (m_anims.Face(m_anim, at, mouth, brow, eye)) {
+                switch (eye) {
+                case 4: case 6: e.eyes = Expression::SmileEyes; break;
+                case 5: e.eyes = Expression::WideEyes; break;
+                case 7: case 8: case 13: e.eyes = Expression::ClosedEyes; break;
+                default: break;
+                }
+                switch (mouth) {
+                case 1: case 2: e.mouth = Expression::Frown; break;
+                case 3: e.mouth = Expression::Wavy; break;
+                case 4: e.mouth = Expression::Grin; break;
+                case 5: case 7: e.mouth = Expression::Open; break;
+                case 6: e.mouth = Expression::Smile; break;
+                default: if (mouth >= 8 && mouth <= 13) e.mouth = Expression::Talk; break;
+                }
+                switch (brow) {
+                case 1: e.brow_rot = -2; e.brow_y = -1; break;   // sad: inner ends up
+                case 2: e.brow_rot = 2; e.brow_y = 1; break;     // angry: inner ends down
+                case 3: e.brow_rot = -1; break;
+                case 4: e.brow_y = -2; break;
+                default: break;
+                }
+            }
+            // A blink every few seconds while the eyes are the Mii's own.
+            if (t >= m_blinkAt + 0.14) {
+                m_rng = m_rng * 1664525u + 1013904223u;
+                m_blinkAt = t + 2.5 + (m_rng >> 8) % 3000 / 1000.0;
+            }
+            if (e.eyes == Expression::OwnEyes && t >= m_blinkAt) e.eyes = Expression::ClosedEyes;
+            if (e != m_expr) { m_expr = e; m_maskDirty = true; }
             memcpy(m_last, rot, sizeof(m_last));
             memcpy(m_lastRoot, root, sizeof(m_lastRoot));
+            if (m_float > 0) {
+                const int st = m_anims.Find("generic_stand_0");
+                Quat hover[kAnimJoints];
+                float hroot[3] = { 0, 0, 0 };
+                if (st >= 0) m_anims.Sample(st, 0, hover, hroot);
+                else for (Quat &q : hover) q = { 0, 0, 0, 1 };
+                // The arms (clavicle, shoulder, elbow, hand on each side) part
+                // way back to the T pose, rising and falling a little.
+                const float arms = 0.42f + 0.06f * (float)std::sin(t * 1.8);
+                for (int j = 5; j <= 12; j++) hover[j] = Nlerp(hover[j], Quat{ 0, 0, 0, 1 }, arms);
+                for (int j = 0; j < kAnimJoints; j++) rot[j] = Nlerp(rot[j], hover[j], m_float);
+                for (int c = 0; c < 3; c++) root[c] += (hroot[c] - root[c]) * m_float;
+            }
         }
         Pose pose;
         ComputePose(m_body, m_parts, m_haveAnims ? rot : nullptr, m_haveAnims ? root : nullptr, pose);
@@ -245,7 +326,7 @@ namespace sl::menu::mii {
         // read from a coarse depth map of the faceline and forehead, drawn on
         // the CPU here each frame.
         {
-            constexpr int G = 48;
+            constexpr int G = 64;
             float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
             for (size_t i = nBody; i < m_tris.size(); i++)
                 for (const Vertex &v : m_tris[i].v) { x0 = std::fmin(x0, v.x); y0 = std::fmin(y0, v.y); x1 = std::fmax(x1, v.x); y1 = std::fmax(y1, v.y); }
@@ -270,6 +351,50 @@ namespace sl::menu::mii {
                         z = std::fmax(z, w0 * t.z[0] + w1 * t.z[1] + w2 * t.z[2]);
                     }
             }
+            // The face's own parts (mask, beard, nose, glasses) are painted
+            // over the faceline, which is only right from the front: turned
+            // away, or where the nose's root sinks into the head, they lie
+            // behind it. The nose and glasses are split finely and each piece
+            // tested; the flat decals only go under as a whole.
+            auto behind = [&](float x, float y, float z, float margin) {
+                const int gx = (int)((x - x0) / gw), gy = (int)((y - y0) / gh);
+                return gx >= 0 && gy >= 0 && gx < G && gy < G && z < m_faceZ[gy * G + gx] - margin;
+            };
+            auto lerp = [](const Vertex &a, const Vertex &b) {
+                return Vertex{ (a.x + b.x) / 2, (a.y + b.y) / 2, (a.r + b.r) / 2, (a.g + b.g) / 2, (a.b + b.b) / 2,
+                               (a.a + b.a) / 2, (a.u + b.u) / 2, (a.v + b.v) / 2 };
+            };
+            std::vector<Tri> pieces;
+            auto cut = [&](auto &&self, const Tri &t, int level) -> void {
+                int n = 0;
+                for (int k = 0; k < 3; k++) n += behind(t.v[k].x, t.v[k].y, t.z[k], 0.5f);
+                const float cz = (t.z[0] + t.z[1] + t.z[2]) / 3;
+                const bool cb = behind((t.v[0].x + t.v[1].x + t.v[2].x) / 3, (t.v[0].y + t.v[1].y + t.v[2].y) / 3, cz, 0.5f);
+                if (n == 0 && !cb) { pieces.push_back(t); return; }
+                if ((n == 3 && cb) || level == 3) { if (!cb) pieces.push_back(t); return; }
+                const Vertex m01 = lerp(t.v[0], t.v[1]), m12 = lerp(t.v[1], t.v[2]), m20 = lerp(t.v[2], t.v[0]);
+                const float z01 = (t.z[0] + t.z[1]) / 2, z12 = (t.z[1] + t.z[2]) / 2, z20 = (t.z[2] + t.z[0]) / 2;
+                const Tri kids[4] = {
+                    { t.layer, t.depth, { t.z[0], z01, z20 }, { t.v[0], m01, m20 } },
+                    { t.layer, t.depth, { z01, t.z[1], z12 }, { m01, t.v[1], m12 } },
+                    { t.layer, t.depth, { z20, z12, t.z[2] }, { m20, m12, t.v[2] } },
+                    { t.layer, t.depth, { z01, z12, z20 }, { m01, m12, m20 } },
+                };
+                for (const Tri &k : kids) self(self, k, level + 1);
+            };
+            for (size_t i = nBody; i < m_tris.size(); i++) {
+                Tri &t = m_tris[i];
+                if (t.layer == 3 || t.layer == 8) {   // nose, glasses
+                    cut(cut, t, 0);
+                    t.layer = -2;                     // replaced by its pieces
+                } else if (t.layer == 1 || t.layer == 2 || t.layer == 4) {
+                    int n = 0;
+                    for (int k = 0; k < 3; k++) n += behind(t.v[k].x, t.v[k].y, t.z[k], 3.0f);
+                    if (n >= 2) t.layer = -1;
+                }
+            }
+            m_tris.erase(std::remove_if(m_tris.begin() + nBody, m_tris.end(), [](const Tri &t) { return t.layer == -2; }), m_tris.end());
+            m_tris.insert(m_tris.end(), pieces.begin(), pieces.end());
             // All of the hair goes under the face (the forehead's edge is the
             // hairline, as with a depth buffer); what lies (mostly) in front of
             // the face (a fringe, the sides) is drawn again on top.

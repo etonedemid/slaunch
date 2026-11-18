@@ -280,6 +280,16 @@ namespace sl::menu::ui {
             threadClose(&m_mii_thread);
             m_mii_running = false;
         }
+        if (m_mii3d_started) {
+            threadWaitForExit(&m_mii3d_thread);
+            threadClose(&m_mii3d_thread);
+            m_mii3d_started = false;
+        }
+        if (m_mp_state.load() != 0) {
+            threadWaitForExit(&m_mp_thread);
+            threadClose(&m_mp_thread);
+            m_mp_state.store(0);
+        }
         if (m_info_running) {
             threadWaitForExit(&m_info_thread);
             threadClose(&m_info_thread);
@@ -1036,6 +1046,7 @@ namespace sl::menu::ui {
                 m_nxe_themed = (v != 0);
             else if (unsigned c; sscanf(line, "nxe_tint=%x", &c) == 1)
                 m_nxe_tint = SDL_Color{ (Uint8)(c >> 16), (Uint8)(c >> 8), (Uint8)c, 255 };
+            else if (sscanf(line, "mii_pick=%d", &v) == 1) m_mii_pick = v < 0 ? 0 : v;
             else if (unsigned c; sscanf(line, "nxe_icon=%x", &c) == 1)
                 m_nxe_icon = SDL_Color{ (Uint8)(c >> 16), (Uint8)(c >> 8), (Uint8)c, 255 };
             else if (sscanf(line, "backdrop=%d", &v) == 1 && v >= 0 && v <= 2)
@@ -1120,6 +1131,7 @@ namespace sl::menu::ui {
         fprintf(fp, "xmb_ps3=%d\n", m_xmb_ps3 ? 1 : 0);
         fprintf(fp, "tile_names=%d\n", m_tile_names ? 1 : 0);
         fprintf(fp, "metro_theme=%d\n", m_metro_themed ? 1 : 0);
+        fprintf(fp, "mii_pick=%d\n", m_mii_pick);
         fprintf(fp, "nxe_theme=%d\nnxe_tint=%02x%02x%02x\nnxe_icon=%02x%02x%02x\n", m_nxe_themed ? 1 : 0,
                 m_nxe_tint.r, m_nxe_tint.g, m_nxe_tint.b, m_nxe_icon.r, m_nxe_icon.g, m_nxe_icon.b);
         // Tells the daemon to capture the game on HOME (see HomeFrameFlag):
@@ -1335,6 +1347,7 @@ namespace sl::menu::ui {
             case Screen::Themes:        a = OnButtonThemes(b);        break;
             case Screen::ThemeEditor:   a = OnButtonEditor(b);        break;
             case Screen::ColorPicker:   a = OnButtonColorPicker(b);   break;
+            case Screen::MiiPicker:     a = OnButtonMiiPicker(b);     break;
             case Screen::Fonts:         a = OnButtonFonts(b);         break;
             case Screen::Widgets:       a = OnButtonWidgets(b);       break;
             case Screen::WidgetOptions: a = OnButtonWidgetOptions(b); break;
@@ -1475,7 +1488,15 @@ namespace sl::menu::ui {
                 if (m_album.empty()) { m_screen = Screen::Main; return Action::OpenAlbum; }
                 return Action::None;
             case ItemKind::MusicPlayer:  OpenMusicPlayer(false); return Action::None;
-            case ItemKind::UserPage:     return Action::OpenUserPage;
+            case ItemKind::UserPage:
+                if (m_ui_mode == UiMode::NXE) {   // the profile tile opens into its choices
+                    m_options_sub = Sub_Profile;
+                    BuildOptions();
+                    m_options_cursor = 0;
+                    m_options_open = true;
+                    return Action::None;
+                }
+                return Action::OpenUserPage;
             case ItemKind::WebBrowser:   return Action::OpenWebBrowser;
 #ifdef SL_QEXT
             case ItemKind::Discord:      OpenDiscord(); return Action::None;
@@ -1795,6 +1816,15 @@ namespace sl::menu::ui {
 
         // A submenu replaces the list rather than nesting a second overlay:
         // same box, same input handling, one flag.
+        if (m_options_sub == Sub_Profile) {
+            m_options.push_back({ T("Choose your Mii"), OptMiiPick });
+#if defined(SL_QEXT) || defined(SL_SIMULATOR)
+            m_options.push_back({ T("Switch account"), OptSwitchUser });
+#endif
+            m_options.push_back({ T("Mii Edit"), OptMiiEdit });
+            m_options.push_back({ T("User Page"), OptUserPage });
+            return;
+        }
         if (m_options_sub == Sub_Widgets) {
             for (int i = 0; i < m_widgets.Count(); i++) {
                 widgets::IWidget *w = m_widgets.At(i);
@@ -1899,6 +1929,7 @@ namespace sl::menu::ui {
             case Sub_Customize:   return T("Customize");
             case Sub_Tile:        return T("Tile");
             case Sub_More:        return T("More");
+            case Sub_Profile:     return m_nickname;
             case Sub_Collections: return T("Collections");
             case Sub_Widgets:     return T("Add widget");
             default: break;
@@ -1922,6 +1953,7 @@ namespace sl::menu::ui {
         if (b == Btn::Down) { m_options_cursor = (m_options_cursor + 1) % n; return Action::None; }
         if (b == Btn::Up)   { m_options_cursor = (m_options_cursor + n - 1) % n; return Action::None; }
         if (b == Btn::B || b == Btn::X) {
+            if (m_options_sub == Sub_Profile) { m_options_sub = Sub_None; m_options_open = false; return Action::None; }
             if (m_options_sub != Sub_None) {   // back to the entry's own options
                 m_options_sub = Sub_None;
                 BuildOptions();
@@ -2094,6 +2126,16 @@ namespace sl::menu::ui {
                 m_options_open = false;
                 m_options_sub = Sub_None;
                 return Action::None;
+            }
+            case OptMiiPick:
+            case OptSwitchUser:
+            case OptMiiEdit:
+            case OptUserPage: {
+                const int a = m_options[m_options_cursor].action;
+                m_options_open = false;
+                m_options_sub = Sub_None;
+                if (a == OptMiiPick) { OpenMiiPicker(); return Action::None; }
+                return a == OptSwitchUser ? Action::SwitchUser : a == OptMiiEdit ? Action::OpenMiiEdit : Action::OpenUserPage;
             }
             case OptSubBack:
                 m_options_sub = Sub_None;
@@ -3381,6 +3423,7 @@ namespace sl::menu::ui {
         PollBoom();
         if (DrawBoom()) { m_gfx->Present(); return; }
 
+        if (m_mp_open && m_screen != Screen::MiiPicker) MiiPickFree();   // left some other way (HOME)
         Phase("pre-frame");
         LayoutThemeSync();   // Blades' or Metro's own colours, or back to the theme's
         DrawBackground();
@@ -3392,6 +3435,7 @@ namespace sl::menu::ui {
             case Screen::Themes:      DrawThemes(); break;
             case Screen::ThemeEditor: DrawEditor(); break;
             case Screen::ColorPicker: DrawColorPicker(); break;
+            case Screen::MiiPicker:   DrawMiiPicker(); break;
             case Screen::Fonts:       DrawFonts();  break;
             case Screen::Widgets:       DrawWidgets(); break;
             case Screen::WidgetOptions: DrawWidgetOptions(); break;

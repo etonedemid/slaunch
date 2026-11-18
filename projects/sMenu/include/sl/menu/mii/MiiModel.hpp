@@ -89,6 +89,29 @@ namespace sl::menu::mii {
     };
     bool BuildFaceTextures(const Resources &r, const Parts &p, FaceTextures &out);
 
+    // A face expression, as the mask draws it: the console's special eye and
+    // mouth textures (the ^ arc, the round eye, the O) and a few of the
+    // regular mouths stand in for the Mii's own, and the brows tilt or lift.
+    struct Expression {
+        enum Eyes : uint8_t { OwnEyes, SmileEyes, ClosedEyes, WideEyes, kEyes };
+        enum Mouth : uint8_t { OwnMouth, Smile, Grin, Open, Talk, Frown, Wavy, kMouths };
+        uint8_t eyes = OwnEyes, mouth = OwnMouth;
+        int8_t brow_rot = 0, brow_y = 0;   // in the Mii's own rotation / position steps
+        bool operator==(const Expression &o) const {
+            return eyes == o.eyes && mouth == o.mouth && brow_rot == o.brow_rot && brow_y == o.brow_y;
+        }
+        bool operator!=(const Expression &o) const { return !(*this == o); }
+    };
+    // The mask's parts for one Mii, decoded and coloured once, so an
+    // expression is only a redraw (a few ms) and not a decode.
+    struct MaskKit {
+        Parts p;
+        Image eye[Expression::kEyes], mouth[Expression::kMouths], brow, mustache, mole;
+    };
+    bool BuildMaskKit(const Resources &r, const Parts &p, MaskKit &out);
+    // The mask (res x res, 512 being the console's) with that expression.
+    void DrawMask(const MaskKit &k, const Expression &e, Image &mask, int res = 512);
+
     // Half float bits to float.
     float HalfToFloat(uint16_t h);
 }

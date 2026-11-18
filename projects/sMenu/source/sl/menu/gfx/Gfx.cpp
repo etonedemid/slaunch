@@ -521,7 +521,7 @@ void main() {
 
     void Gfx::DrawGeometry(SDL_Texture *tex, const SDL_Vertex *v, int n) {
         FxClose();
-        if (tex && n >= 3) SDL_RenderGeometry(m_renderer, tex, v, n, nullptr, 0);
+        if (n >= 3) SDL_RenderGeometry(m_renderer, tex, v, n, nullptr, 0);   // tex may be null: vertex colours only
     }
 
     void Gfx::GradientV(SDL_Color top, SDL_Color bottom) {

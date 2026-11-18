@@ -571,10 +571,7 @@ namespace sl::menu::ui {
     // friends and messages, and the account picture beside them.
     void Menu::MetroDrawUser() {
         const int ax = 1128, ay = 30, as = 56;
-        if (SDL_Texture *mh = MiiRender(1)) {   // the Mii's head on the accent square
-            m_gfx->FillRect(ax, ay, as, as, m_mt_accent);
-            m_gfx->DrawImage(mh, ax, ay, as, as, 255);
-        } else if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, ax, ay, as, as, 255);
+        if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, ax, ay, as, as, 255);   // the account's own picture; the Mii stands on the gamer tile
         else {
             m_gfx->FillRect(ax, ay, as, as, m_mt_accent);
             if (SDL_Texture *ic = SystemIcon(ItemKind::UserPage))

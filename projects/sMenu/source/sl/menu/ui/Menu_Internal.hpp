@@ -62,7 +62,7 @@ namespace sl::menu::ui {
     // has; a stale hand-counted number there silently makes the last row
     // untappable.
     enum { TH_Themes = 0, TH_UiMode, TH_TextPos, TH_ListIcons,
-           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_MetroColors, TH_NxeTint, TH_NxeIcon, TH_ShelfVert, TH_Backdrop, TH_TileCols, TH_TileRows,
+           TH_IconPack, TH_Antialias, TH_ShelfStyle, TH_MetroColors, TH_NxeTint, TH_NxeIcon, TH_Mii, TH_ShelfVert, TH_Backdrop, TH_TileCols, TH_TileRows,
            TH_TdbRegion, TH_Sgdb, TH_SgdbKey, TH_FlowSet, TH_Wrap,
            TH_Hints, TH_Counter, TH_RetroArch, TH_Collections, TH_ShowHidden, TH_Fonts,
            TH_Language, TH_Music,
@@ -575,7 +575,8 @@ namespace sl::menu::ui {
                        OptRemoveWidget, OptCollMenu, OptCollToggle,
                        OptCollNew, OptCollRename, OptCollDelete, OptHide,
                        OptAddHomebrew, OptCustomMenu, OptTileMenu, OptMoreMenu,
-                       OptArtFile, OptArtReset };
+                       OptArtFile, OptArtReset,
+                       OptMiiPick, OptSwitchUser, OptMiiEdit, OptUserPage };
     // The art slots a game's own picture can fill (X > Customize), by the
     // file name CustomArt looks for.
     inline constexpr struct { const char *file, *label; } kArtKinds[] = {
@@ -748,6 +749,13 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.5.1" },
+            { false, "NXE: A on your profile opens Choose your Mii, Switch account, Mii Edit and User Page" },
+            { false, "Choose your Mii: a 3D picker where the Miis stand in a row and the chosen one floats up in a beam" },
+            { false, "Miis make faces as they move - smiles, laughs, frowns, yawns, talking - and blink" },
+            { false, "Idle Miis vary their animations, now and then waving, clapping or laughing" },
+            { false, "Metro's top-right picture is the account's own again; the Mii stays on the gamer tile" },
+            { false, "A Mii's nose no longer shows through its face from the side or behind" },
             { true,  "v2.5.0" },
             { false, "Your Mii is drawn in 3D on the NXE profile and Metro's gamer tile, and it moves" },
             { false, "Lock screen on wake, with an optional passcode (Theming > Lock screen), styled for every layout" },

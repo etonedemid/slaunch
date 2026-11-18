@@ -83,6 +83,7 @@ namespace sl::menu::ui {
     // translated label. `icons` are stems under sdmc:/slaunch/icons/buttons/
     // ("a", "b", "l", "r", "up", "down", "left", "right", "plus", "minus",
     // "dpad", "rstick"); `label` is a T() key, same as any other UI string.
+    struct MiiEntry { std::string hex, name; u8 cid[16]; };   // a Mii in Mii Edit, as studio data
     struct HintSeg { std::initializer_list<const char*> icons; const char *label; };
 
     // Main-screen layout. List is the original text carousel; Line is a
@@ -145,7 +146,7 @@ namespace sl::menu::ui {
             OpenWebBrowser, OpenControllers, OpenHomebrewMenu,
             PowerSleep, PowerReboot, PowerShutdown, PowerPayload,
             LaunchHomebrew, LaunchHomebrewApp, FinishSetup, Quit,
-            OpenSystemSettings,
+            OpenSystemSettings, SwitchUser,
         };
 
         // Path of the .nro to launch, valid when OnButton returns LaunchHomebrew[App].
@@ -264,7 +265,8 @@ namespace sl::menu::ui {
                             // reader a news card opens into.
                             DeckMenu, DeckLibrary, DeckNews,
                             MetroGames,     // Metro's "my games" card view
-                            Discord };
+                            Discord,
+                            MiiPicker };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower,
                             ConfirmRetroArch, ConfirmDelete, ConfirmUpdate,
                             CrashReport };   // a notice: one OK, no choice
@@ -1564,7 +1566,8 @@ namespace sl::menu::ui {
         std::vector<OptionEntry> m_options;
         // Which submenu the overlay is showing instead of the entry's own
         // options. B steps back out of one instead of closing the overlay.
-        enum OptSub { Sub_None = 0, Sub_Widgets, Sub_Collections, Sub_Customize, Sub_Tile, Sub_More };
+        enum OptSub { Sub_None = 0, Sub_Widgets, Sub_Collections, Sub_Customize, Sub_Tile, Sub_More,
+                      Sub_Profile };   // NXE's profile tile: Mii, account, Mii Edit
         int m_options_sub = Sub_None;
         bool m_options_open   = false;
         int  m_options_cursor = 0;
@@ -1856,6 +1859,47 @@ namespace sl::menu::ui {
         Thread m_mii3d_thread{};
         SDL_Texture *m_mii3d_tex = nullptr;           // its atlas
         std::vector<mii::Vertex> m_mii3d_verts;
+        bool m_mii3d_started = false;                 // its thread is to be joined
+        // Which Mii stands in: 0 the account's own (else the first in Mii
+        // Edit), n the nth Mii in Mii Edit. Per user (settings mii_pick).
+        std::vector<MiiEntry> m_mii_list;
+        int  m_mii_account = -1;                      // the account's own in m_mii_list
+        bool m_mii_list_read = false;
+        int  m_mii_pick = 0;
+        void MiiEnsureList();
+        std::string MiiChosenHex(u8 *cid);
+        std::string MiiPickName(int pick);
+        void MiiReset();                              // drop the drawn Mii; it reloads as chosen
+        // The Mii picker (Theming > Mii), after the Xbox 360's "Choose an
+        // avatar": a page of five in a row, the selected one hovering in a
+        // beam of light, silhouettes at the ends for the pages either side.
+        // Only the page's Miis are loaded, one at a time, at half texture size.
+        struct MiiPickSlot {
+            int idx = -1;                             // picker entry, -1 free
+            bool failed = false;
+            mii::Scene scene;
+            mii::Image small;                         // the halved atlas, until uploaded
+            SDL_Texture *tex = nullptr;
+            std::vector<mii::Vertex> verts;
+            float fade = 0, up = 0;                   // up: into the beam
+        };
+        static constexpr int kMiiPickSlots = 5, kMiiPickPage = 5;
+        MiiPickSlot m_mp_slot[kMiiPickSlots];
+        Thread m_mp_thread{};
+        std::atomic<int> m_mp_state{0};               // 0 idle, 1 loading, 2 done
+        int   m_mp_job = -1, m_mp_cursor = 0;
+        bool  m_mp_open = false;
+        int   m_mp_greeted = -1;                      // the entry that last waved on being selected                      // slots may hold Miis (freed when the screen is left)
+        float m_mp_pos = 0;
+        std::string m_mp_hex;                         // the job's Mii
+        static void MiiPickLoad(void *self);
+        void  OpenMiiPicker();
+        Screen m_mp_from = Screen::Theming;   // where B goes back to
+        void  CloseMiiPicker();
+        void  MiiPickFree();
+        void  DrawMiiPicker();
+        Action OnButtonMiiPicker(Btn b);
+        int   MiiPickAt(int x) const;                 // the row place under x
         std::unordered_map<u64, SDL_Texture *> m_metro_fill;
         // The Guide: a panel of tabs over whatever is behind it, on HOME.
         enum { MG_Games, MG_User, MG_Media, MG_Settings, MG_Count };

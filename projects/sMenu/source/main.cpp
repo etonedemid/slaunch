@@ -597,6 +597,8 @@ static void DispatchAction(Menu::Action action, u64 launch_id,
         case Menu::Action::OpenUserPage:     menu::smi::OpenUserPage();     HandOff(); break;
         case Menu::Action::OpenNetConnect:   menu::smi::OpenNetConnect();   HandOff(); break;
         case Menu::Action::OpenSystemSettings: menu::smi::OpenSystemSettings(); HandOff(); break;
+        // The account picker, then the menu starts again as whoever was picked.
+        case Menu::Action::SwitchUser: sl::smi::SendMenuCommand(sl::smi::SystemMessage::SwitchUser); break;
         case Menu::Action::OpenMiiEdit:      menu::smi::OpenMiiEdit();      HandOff(); break;
         case Menu::Action::OpenWebBrowser:   menu::smi::OpenWebBrowser();   HandOff(); break;
         case Menu::Action::OpenControllers:  menu::smi::OpenControllers();  HandOff(); break;
@@ -672,7 +674,9 @@ static bool MenuBoot() {
     smi::SystemStatus status = {};
 #ifdef SL_QEXT
     // Nobody hands this over in-process: the loader knows both already.
-    accountGetLastOpenedUser(&status.selected_user);
+    // The account picked last (Switch account), else the console's last one.
+    status.selected_user = menu::qext::SelectedUser();
+    if (!accountUidIsValid(&status.selected_user)) accountGetLastOpenedUser(&status.selected_user);
     status.suspended_app_id  = qext_suspended_title();
     status.has_suspended_app = status.suspended_app_id != 0;
 #else

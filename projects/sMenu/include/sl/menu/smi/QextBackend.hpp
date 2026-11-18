@@ -46,6 +46,8 @@ int qext_titles_changed(void);   // not extern "C" in the loader
 
 namespace sl::menu::qext {
 
+    // The account the menu runs as (set by the menu, or by Switch account).
+    AccountUid SelectedUser();
     // Removes a homebrew redirect a crash left behind in the album slot.
     void CleanUpLeftovers();
     // The screen came back to the menu: end the album redirect, run a queued homebrew.

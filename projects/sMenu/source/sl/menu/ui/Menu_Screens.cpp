@@ -1377,6 +1377,7 @@ namespace sl::menu::ui {
             }
             SaveSettings();
         }
+        if (m_theming_cursor == TH_Mii && b == Btn::A) OpenMiiPicker();
         if ((m_theming_cursor == TH_NxeTint || m_theming_cursor == TH_NxeIcon) && b == Btn::A) {
             m_pick_nxe = true;
             OpenColorPicker(m_theming_cursor == TH_NxeTint ? &m_nxe_tint : &m_nxe_icon, Screen::Theming, false);
@@ -2451,6 +2452,7 @@ namespace sl::menu::ui {
             if (i == TH_ShelfStyle && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::XMB) continue;
             if (i == TH_MetroColors && m_ui_mode != UiMode::Metro && m_ui_mode != UiMode::NXE) continue;
             if ((i == TH_NxeTint || i == TH_NxeIcon) && !(m_ui_mode == UiMode::NXE && m_nxe_themed)) continue;
+            if (i == TH_Mii && m_ui_mode != UiMode::NXE && m_ui_mode != UiMode::Metro) continue;
             if (i == TH_Backdrop && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::Line &&
                 m_ui_mode != UiMode::Deck) continue;
             // The wall shape is only meaningful where there is a wall.
@@ -2490,7 +2492,7 @@ namespace sl::menu::ui {
         const char *aligns[3] = { T("Left"), T("Center"), T("Right") };
         std::vector<std::string> labels = {
             T("Themes"), T("UI mode"), T("Text position"), T("List icons"),
-            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Metro colours"), T("Panel tint"), T("Icon colour"), T("Vertical covers"), T("Background art"),
+            T("Icon pack"), T("Anti-aliasing"), T("Shelf style"), T("Metro colours"), T("Panel tint"), T("Icon colour"), T("Mii"), T("Vertical covers"), T("Background art"),
             T("Columns"), T("Rows"),
             T("Box art region"), T("SteamGridDB"), T("SteamGridDB key"), T("Flow layout"),
             T("Wrap around"), T("Button hints"), T("Position counter"),
@@ -2522,6 +2524,7 @@ namespace sl::menu::ui {
         auto hex = [](SDL_Color c) { char b[8]; snprintf(b, sizeof(b), "#%02X%02X%02X", c.r, c.g, c.b); return std::string(b); };
         values[TH_NxeTint] = hex(m_nxe_tint);
         values[TH_NxeIcon] = hex(m_nxe_icon);
+        if (m_ui_mode == UiMode::NXE || m_ui_mode == UiMode::Metro) values[TH_Mii] = MiiPickName(m_mii_pick);
         values[TH_Backdrop]    = m_backdrop == Backdrop::Off ? T("Off")
                                : m_backdrop == Backdrop::Icon ? T("Game icon") : T("Screenshot");
         {

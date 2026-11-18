@@ -99,6 +99,17 @@ namespace sl::menu::ui {
             return Action::None;
         }
 
+        // ---- Mii picker: a side steps that way, the middle chooses ----
+        if (m_screen == Screen::MiiPicker) {
+            if (phase != 0) return Action::None;
+            const int at = MiiPickAt(x), first = m_mp_cursor / kMiiPickPage * kMiiPickPage;
+            if (at < 0) return OnButtonMiiPicker(Btn::L);
+            if (at >= kMiiPickPage) return OnButtonMiiPicker(Btn::R);
+            if (first + at == m_mp_cursor) return OnButtonMiiPicker(Btn::A);   // the selected one: choose it
+            if (first + at <= (int)m_mii_list.size()) m_mp_cursor = first + at;
+            return Action::None;
+        }
+
         // ---- colour picker: tap / drag an R/G/B slider ----
         if (m_screen == Screen::ColorPicker) {
             if (phase == 2 || !m_pick_target) return Action::None;  // act on down + drag
