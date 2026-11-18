@@ -2,6 +2,9 @@
 #include <haze.hpp>
 #include <haze/transfer_status.hpp>
 #include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <sys/stat.h>
 
 namespace sl::menu::usb {
 
@@ -25,6 +28,24 @@ namespace sl::menu::usb {
         bool                g_started = false;
         std::atomic<bool>   g_serving { false };   // USB is ours: safe to ask its state
         std::atomic<bool>   g_connected { false }; // last answer from MtpConnected
+        bool                g_take = false;        // MtpTakeUsb: the user wants USB anyway
+
+        // Read once: Switch Frame Tap reads its connection setting at boot too.
+        // Its launcher (0C21) has boot2.flag while "Start with the console" is on.
+        bool FrameTapOnUsb() {
+            static int on = -1;
+            if (on < 0) {
+                struct stat st;
+                on = stat("sdmc:/atmosphere/contents/0100000000000C21/flags/boot2.flag", &st) == 0;
+                if (FILE *fp = on ? fopen("sdmc:/config/switch-frame-tap/config.ini", "r") : nullptr) {
+                    char line[160], v[32];
+                    while (fgets(line, sizeof(line), fp))   // usb is its default
+                        if (sscanf(line, " connection = %31s", v) == 1) on = strcmp(v, "usb") == 0;
+                    fclose(fp);
+                }
+            }
+            return on == 1;
+        }
 
         void Run(void *) {
             if (R_FAILED(haze::LoadDeviceProperties())) return;
@@ -46,8 +67,15 @@ namespace sl::menu::usb {
 
     }
 
+    bool MtpYieldsToFrameTap() { return !g_take && FrameTapOnUsb(); }
+
+    void MtpTakeUsb() {
+        g_take = true;
+        MtpStart();
+    }
+
     void MtpStart() {
-        if (g_started) return;
+        if (g_started || MtpYieldsToFrameTap()) return;
         ueventCreate(&g_stop_event, false);
         g_reactor.SetResult(haze::ResultSuccess());
         // Core 2: the menu draws on 0 and decodes art on 1. A transfer is

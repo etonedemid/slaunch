@@ -120,7 +120,7 @@ namespace sl::menu::net {
     // JPEG to libjpeg, whose error path crashes the whole menu on the console
     // (SDL_image's longjmp out of it lands on garbage), so a download that is
     // not whole must never be kept. Anything that is not a JPEG or PNG passes.
-    static bool ImageLooksWhole(const char *path) {
+    bool ImageLooksWhole(const char *path) {
         FILE *fp = fopen(path, "rb");
         if (!fp) return false;
         unsigned char head[8] = {}, tail[64] = {};

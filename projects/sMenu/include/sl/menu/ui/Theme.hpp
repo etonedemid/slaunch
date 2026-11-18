@@ -28,6 +28,8 @@ namespace sl::menu::ui {
         BackgroundStyle_Grid     = 4,
         BackgroundStyle_RibbonHD = 5,   // the ribbon, finer and lit
         BackgroundStyle_Ocean    = 6,   // GL fragment shader
+        BackgroundStyle_Wave     = 7,   // PS3 XMB sheets, fragment shader
+        BackgroundStyle_Shader   = 8,   // a shader file from sdmc:/slaunch/shaders (Theme::shader)
         BackgroundStyle_Count
     };
 
@@ -69,6 +71,7 @@ namespace sl::menu::ui {
         int       wallpaper_blur_radius = 8;  // blur radius in px (2-32)
         int       wallpaper_snow = 0;         // snow overlay (0/1)
         int       background_style = BackgroundStyle_Gradient;
+        char      shader[48] = "";   // BackgroundStyle_Shader: the file's name, no folder or extension
 
         // Per-background settings.
         //
@@ -99,6 +102,8 @@ namespace sl::menu::ui {
             /* Grid      */ { 24, 4, 30, 45, 7, 380, 50, 50 },
             /* RibbonHD  */ {  1, 4, 22, 3,  3, 360, 50, 50 },
             /* Ocean     */ { 18, 6, 20, 0,  5, 300, 50, 50 },
+            /* Wave      */ {  3, 2, 22, 0,  4, 400, 50, 50 },
+            /* Shader    */ {  3, 4, 20, 0,  4, 360, 50, 50 },   // handed to the file as uFx / uFx2
         };
 
         FxParams       &Fx()       { return fx[Clamp(background_style)]; }
@@ -110,7 +115,9 @@ namespace sl::menu::ui {
         }
     };
 
-    constexpr int BuiltinThemeCount = 5;
+    // theme.cfg stores the selection as an index with the custom themes after
+    // the built-ins, so Load moves it along when this grows (see "builtins").
+    constexpr int BuiltinThemeCount = 12;
 
     class ThemeManager {
     public:

@@ -371,6 +371,8 @@ namespace sl::menu::usb {
     void MtpStart() {}
     void MtpStop() {}
     bool MtpConnected() { return getenv("SLAUNCH_SIM_MTP") != nullptr; }
+    bool MtpYieldsToFrameTap() { return false; }   // no Frame Tap on a PC
+    void MtpTakeUsb() {}
     void MtpGetStatus(MtpStatus &out) {
         const char *m = getenv("SLAUNCH_SIM_MTP");
         out = MtpStatus{};

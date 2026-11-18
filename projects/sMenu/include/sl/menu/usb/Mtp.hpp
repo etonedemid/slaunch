@@ -12,6 +12,13 @@ namespace sl::menu::usb {
     void MtpStop();        // waits for the server to let go of USB
     bool MtpConnected();   // asks USB; about once a second is plenty
 
+    // Switch Frame Tap streaming to its PC viewer over USB needs the same port,
+    // and the menu used to take it back on every return from a game. While it
+    // starts with the console set to connection = usb, MtpStart leaves USB to
+    // it; MtpTakeUsb takes the port anyway, until the menu restarts.
+    bool MtpYieldsToFrameTap();
+    void MtpTakeUsb();
+
     // What the server is doing, cheap enough to read every frame.
     enum class MtpOp { None, Receive, Send, Delete };   // Receive: computer -> console
     struct MtpStatus {

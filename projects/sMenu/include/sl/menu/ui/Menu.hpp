@@ -65,6 +65,8 @@ namespace sl::menu::ui {
         Bluetooth,     // radio on/off and audio device pairing (Menu_Screens.cpp)
         Collection,    // a user collection; A opens it (opt-in, Theming)
         Discord,       // the Discord screen (Menu_Discord.cpp), qext build only
+        GameLibrary,   // NXE: the panel the console's games sit behind; A opens them as a list
+        VideoLibrary,  // NXE: the album's clips only
     };
 
     // What the box-art worker is doing (see Menu::DrawFetchStatus). Stages run
@@ -93,10 +95,15 @@ namespace sl::menu::ui {
     // one button away. Appended like every mode before it - the active one is
     // persisted by number. Metro is the Xbox 360's last dashboard: pivot tabs
     // over panels of tiles, a card view of the library and the Guide on HOME.
+    // Cover (one big cover at a time) is retired; its number stays taken, and
+    // a saved Cover opens as Line.
     enum class UiMode { List, Line, Grid, Cover, Shelf, XMB, Flow, Deck, Metro, Blades, NXE, Count };
-    // NXE is shelved for now: its code stays, but it is not offered anywhere,
-    // and a saved choice of it opens Blades. The layouts before it can be chosen.
-    constexpr int kUiModeChoices = (int)UiMode::NXE;
+    // The next layout to choose, `dir` steps along, past the retired one.
+    inline UiMode StepUiMode(UiMode m, int dir) {
+        const int n = (int)UiMode::Count;
+        do m = (UiMode)(((int)m + dir + n) % n); while (m == UiMode::Cover);
+        return m;
+    }
 
     struct MenuItem {
         ItemKind    kind;
@@ -469,6 +476,14 @@ namespace sl::menu::ui {
         std::string m_discord_sound;
         void PlayNotifySound();
         bool   m_fm_pick = false;          // Files is choosing a file to send on Discord
+        // Files is choosing a picture for one of a game's art slots (CustomArt):
+        // the slot's file name, the game, and the screen to go back to.
+        const char *m_fm_art = nullptr;
+        u64    m_fm_art_id = 0;
+        Screen m_fm_art_back = Screen::Main;
+        void   PickArtFile(int kind);                    // kArtKinds index
+        void   ApplyArtFile(const std::string &src);     // copy it into custom/<id>/
+        void   DropArtFor(u64 id);                       // forget every cached picture of a game
         std::map<u64, int> m_players, m_players_result;
 #ifdef SL_QEXT
         struct DiscordUi *m_dc = nullptr;  // Menu_Discord.cpp
@@ -524,7 +539,7 @@ namespace sl::menu::ui {
         // thousands of 1280x720 JPEGs, so a thumbnail cache here would be a
         // straightforward way to run the menu out of memory.
         Action OnButtonAlbum(Btn b);
-        void   OpenAlbumViewer();         // scan (lazily) + show the browser
+        void   OpenAlbumViewer(bool videos = false);   // scan + show the browser; videos: clips only
         // ---- tiles (UiMode::Grid) -------------------------------------------
         // A Windows 8 / Windows Phone start screen: flat tiles on a fixed unit
         // grid, some of them live. Games are one unit; the Album and Music tiles
@@ -564,7 +579,9 @@ namespace sl::menu::ui {
             int       w = 0, h = 0;      // units; 0 means "use the kind's default"
             bool      has_color = false;
             SDL_Color color {};
+            int       name = 0;          // label: 0 follows m_tile_names, 1 shown, 2 hidden
         };
+        bool      TileNameShown(const std::string &key) const;
         std::unordered_map<std::string, TileCfg> m_tilecfg;
         void      LoadTileCfg();
         void      SaveTileCfg();
@@ -747,7 +764,6 @@ namespace sl::menu::ui {
         void DrawMainList();        // original text carousel
         void DrawMainLine();        // horizontal cover carousel (EmulationStation)
         void DrawMainGrid();        // page of icon tiles
-        void DrawMainCover();       // fullscreen single-cover pager
         void DrawMainShelf();       // Xbox-360-style uniform cover row
         void DrawMainShelfPs();     // PS4-style flat tile row (Shelf's default)
         void DrawMainXmb();          // PSP/PS3 cross-media bar
@@ -790,7 +806,7 @@ namespace sl::menu::ui {
         // that Blades and NXE draw from in place of their built-in look. See SKINS.md.
         struct XboxSkin;
         XboxSkin   *m_xskin = nullptr;                // the loaded one (current layout's)
-        std::string m_skin_blades, m_skin_nxe;        // setting (persisted): folder name, "" = built-in
+        std::string m_skin_blades, m_skin_nxe = "dashboard";   // setting (persisted): folder name, "" = built-in
         std::string m_xb_font;                        // the skin's font.ttf, "" = Selawik
         XboxSkin   &Skin();                           // the current layout's, loaded on first use
         void        XboxSkinDrop();                   // free it; the next Skin() reloads
@@ -830,6 +846,21 @@ namespace sl::menu::ui {
         int  BladesPopup(int cw, int ch, const std::string &title);  // dim, card, title bar; returns its x
         void DrawBladesOptions();
         void DrawBladesDialog();
+        // NXE, everywhere: the same idea as Blades, on NXE's dark glass.
+        bool NxeUi() const;
+        void NxeTheme(Theme &t);
+        void DrawNxeFrame();
+        void DrawNxeHeader(const char *title);
+        void DrawCarouselNxe(const std::vector<std::string> &labels,
+                             const std::vector<std::string> &values, int cursor, float &scroll_pos);
+        int  NxeListRowAt(int y, float scroll, int rows) const;
+        int  NxePopup(int cw, int ch, const std::string &title);     // returns its x
+        void DrawNxeRow(int x, int y, int w, bool sel, const char *label);
+        void DrawNxeOptions();
+        void DrawNxeDialog();
+        void NxePanel(const MenuItem &it, float x, float y, float w, float h, float a, float lit, bool front);
+        SDL_Texture *NxeIcon(const char *name);
+        void DrawNxeLibrary();
         void DrawMainFlow();         // WiiFlow-style 3D coverflow
         int  FlowItemAt(int px, int py) const;  // box under a touch, or -1
         float m_rstick_x = 0.0f, m_rstick_y = 0.0f;
@@ -1209,6 +1240,10 @@ namespace sl::menu::ui {
         // dropped icon still fits its space, just without the glyph.
         SDL_Texture *HintIcon(const char *name);
         void DrawOptions();
+        const char *OptionsTitle() const;   // the submenu's name, or the item's
+        // A rounded, shadowed panel (a plain rectangle where cards cannot draw).
+        void PanelCard(float x, float y, float w, float h, float r, float sh, SDL_Color fill, Uint8 a = 255);
+        void DrawStatusToast();             // SetStatus's message, in the layout's own style
         void DrawTheming();
         std::vector<int> ThemingRows() const;   // visible Theming rows
         bool SgdbKeyPresent();                  // loads the key on first ask
@@ -1364,6 +1399,8 @@ namespace sl::menu::ui {
         // Shelf's look: the PS4 home screen's flat tile row (default) or the
         // Xbox 360's 3D library.
         bool      m_shelf_ps = true;
+        // XMB's look: the PSP's bar (default) or the PS3's - see XmbRowY.
+        bool      m_xmb_ps3 = false;
         // What fills the background behind Line, Cover and Shelf: nothing, the
         // selected game's icon blurred, or one of its screenshots (PS4 style).
         enum class Backdrop { Off, Icon, Screenshot };
@@ -1515,7 +1552,7 @@ namespace sl::menu::ui {
         std::vector<OptionEntry> m_options;
         // Which submenu the overlay is showing instead of the entry's own
         // options. B steps back out of one instead of closing the overlay.
-        enum OptSub { Sub_None = 0, Sub_Widgets, Sub_Collections };
+        enum OptSub { Sub_None = 0, Sub_Widgets, Sub_Collections, Sub_Customize, Sub_Tile, Sub_More };
         int m_options_sub = Sub_None;
         bool m_options_open   = false;
         int  m_options_cursor = 0;
@@ -1570,6 +1607,9 @@ namespace sl::menu::ui {
         void XmbApplyCursor();      // m_cursor = the item the bar has selected
         int  XmbItemAt(int x, int y) const;   // item index under a touch, or -1
         int  XmbColAt(int x, int y) const;    // column under a touch, or -1
+        int   XmbTabY() const;                // centre y of the category row
+        float XmbRowY(float d) const;         // centre y of the row d from the cursor
+        float XmbFade(int cy) const;          // 0..1 brightness of a row at cy (0: not drawn)
         // One bare icon on the bar: artwork for games, a tinted glyph otherwise.
         void DrawXmbIcon(const MenuItem &it, int cx, int cy, int size, Uint8 alpha);
         int m_theme_cursor   = 0;
@@ -1744,6 +1784,7 @@ namespace sl::menu::ui {
         void   MetroHintSegs(std::initializer_list<HintSeg> segs);
         void   DrawMetroOptions();
         void   DrawMetroDialog();
+        bool   m_tile_names = true;       // Grid: names under the tiles by default
         bool   m_metro_themed = false;    // theme colours instead of the 360's
         SDL_Color m_mt_accent{}, m_mt_on{}, m_mt_fg{};
         int    m_metro_panel = MP_Home;
@@ -1759,6 +1800,19 @@ namespace sl::menu::ui {
         SDL_Texture *m_metro_bg = nullptr;
         SDL_Texture *m_metro_avatar = nullptr;
         bool   m_metro_avatar_tried = false;
+        // The account's Mii, full body (NXE's profile panel): rendered once by
+        // Mii Studio from the Mii's data, cached on the SD card.
+        // which: 0 the whole body (NXE, Metro), 1 the head (Blades' gamer card).
+        SDL_Texture *MiiRender(int which);
+        SDL_Texture *MiiBody() { return MiiRender(0); }
+        static void MiiTrampoline(void *self);
+        SDL_Texture *m_mii_tex[2] = {};
+        bool   m_mii_tried[2] = {}, m_mii_running = false;
+        int    m_mii_job = 0;                         // which one the worker is fetching
+        std::atomic<bool> m_mii_done{false};
+        Thread m_mii_thread{};
+        std::string m_mii_hex, m_mii_url, m_mii_path;
+        bool   m_mii_hex_read = false;
         std::unordered_map<u64, SDL_Texture *> m_metro_fill;
         // The Guide: a panel of tabs over whatever is behind it, on HOME.
         enum { MG_Games, MG_User, MG_Media, MG_Settings, MG_Count };

@@ -14,10 +14,38 @@
 // siblings via a quoted "Menu_Internal.hpp", not from include/.
 
 #include <sl/menu/ui/Menu.hpp>
+#include <sl/menu/net/Http.hpp>
 #include <sys/stat.h>
 #include <cstdio>
+#include <string>
+#include <algorithm>
+#include <dirent.h>
+#include <strings.h>
+#include <vector>
 
 namespace sl::menu::ui {
+
+    // Art the user supplies wins over anything downloaded or extracted:
+    // slaunch/custom/<TITLE ID>/<name>.png (or .jpg), name one of cover, hero
+    // (the wide background), shot1, shot2, wrap (a whole case scan) and icon.
+    // Nothing in custom/ is ever written or deleted by the menu. Empty when
+    // there is no such file, or it is cut short (libjpeg would crash on it).
+    inline constexpr const char *kCustomArtDir = "sdmc:/slaunch/custom";
+    inline constexpr const char *kCustomArtExts[] = { "png", "jpg", "jpeg", "bmp" };
+    // -1 until looked at; the folder is only stat'ed once, and ApplyArtFile
+    // sets it when it makes the folder. ponytail: one made by hand needs a restart.
+    inline int g_custom_art_any = -1;
+    inline std::string CustomArt(u64 id, const char *name) {
+        if (g_custom_art_any < 0) { struct stat st {}; g_custom_art_any = stat(kCustomArtDir, &st) == 0; }
+        if (!g_custom_art_any || id == 0) return {};
+        char p[96];
+        struct stat st {};
+        for (const char *ext : kCustomArtExts) {
+            snprintf(p, sizeof(p), "%s/%016llX/%s.%s", kCustomArtDir, (unsigned long long)id, name, ext);
+            if (stat(p, &st) == 0 && st.st_size > 0 && net::ImageLooksWhole(p)) return p;
+        }
+        return {};
+    }
 
     using gfx::FontSize;
 
@@ -376,6 +404,24 @@ namespace sl::menu::ui {
         return active + (edge - active) * d;
     }
 
+    // XMB, PS3 style. The bar sits a little higher, the rows under the cursor
+    // follow it at one even pitch with only the sublabel's line left between
+    // the cursor and the first of them (the PS3 has no wide band there), and
+    // the rows above the cursor climb past the bar towards the top of the
+    // screen instead of fading out behind it. Same contract as XmbRowOffset:
+    // an offset from the bar's centre.
+    inline constexpr int   kXmbTabYPs3     = 200;
+    inline constexpr float kXmbPitchPs3    = 64.0f;   // row to row, above and below
+    inline constexpr float kXmbAboveGapPs3 = 75.0f;   // bar centre up to the first row above
+    inline constexpr float kXmbBelowGapPs3 = 40.0f;   // the sublabel's line under the cursor
+    inline constexpr int   kXmbFadeEndPs3  = 40;      // rows above are gone at/above
+    inline float XmbRowOffsetPs3(float d) {
+        const float active = kXmbSpacingV * kXmbActiveItem;
+        if (d >= 0.0f)  return active + kXmbPitchPs3 * d + kXmbBelowGapPs3 * std::min(d, 1.0f);
+        if (d <= -1.0f) return -kXmbAboveGapPs3 + kXmbPitchPs3 * (d + 1.0f);
+        return active + (-kXmbAboveGapPs3 - active) * (-d);
+    }
+
     // On-screen distance between the centre cover and its neighbour in Flow, in
     // pixels. Shares the fate of the other layout pitches: the drag handler and
     // the renderer must agree on it, so it lives up here with them rather than
@@ -524,11 +570,24 @@ namespace sl::menu::ui {
     // ---- X "Options" overlay ------------------------------------------------
     enum { OptFav = 0, OptRename, OptMove, OptUnpinHb, OptSetDonor,
                        OptSort, OptCloseGame, OptPickCover, OptPickIcon, OptResetIcon, OptDismiss,
-                       OptTileSize, OptTileColor, OptTileReset,
+                       OptTileSize, OptTileColor, OptTileReset, OptTileName, OptTileNamesAll,
                        OptAddWidget, OptAddWidgetMenu, OptSubBack,
                        OptRemoveWidget, OptCollMenu, OptCollToggle,
                        OptCollNew, OptCollRename, OptCollDelete, OptHide,
-                       OptAddHomebrew }; 
+                       OptAddHomebrew, OptCustomMenu, OptTileMenu, OptMoreMenu,
+                       OptArtFile, OptArtReset };
+    // The art slots a game's own picture can fill (X > Customize), by the
+    // file name CustomArt looks for.
+    inline constexpr struct { const char *file, *label; } kArtKinds[] = {
+        { "cover", "Cover from file" },     { "hero", "Background from file" },
+        { "shot1", "Screenshot from file" }, { "icon", "Icon from file" },
+        { "wrap",  "Case scan from file" },
+    };
+    inline constexpr int kArtKindN = (int)(sizeof(kArtKinds) / sizeof(kArtKinds[0]));
+    inline bool HasCustomArt(u64 id) {
+        for (const auto &k : kArtKinds) if (!CustomArt(id, k.file).empty()) return true;
+        return !CustomArt(id, "shot2").empty();
+    }
 
     // ---- anonymous online count (opt-out) ----------------------------------
     inline constexpr const char *kPingUrl    = "https://hellmachine.tail10512b.ts.net/ping";
@@ -689,6 +748,16 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.3.0" },
+            { false, "NXE: the home channel is your profile, then your games, then your media, in the dashboard's own art, now shipped as NXE's default skin" },
+            { false, "Your Mii stands on the NXE profile and Metro's gamer tile, and its face is on Blades' gamer card" },
+            { false, "NXE: the game library shows each game's page - genre, publisher, release year, players and rating" },
+            { false, "NXE: a Video Library plays your Album's clips" },
+            { false, "Six new themes: Aurora, Synthwave, Deep Sea, Nebula, Rose Gold and Midnight Wave" },
+            { false, "Grid: hide the names under the tiles - all of them, or one tile at a time (X > Tile)" },
+            { false, "The setup wizard is redesigned, with new pictures of every layout" },
+            { false, "Cover layout removed - it showed one entry at a time; consoles using it move to Line" },
+            { false, "USB file transfer leaves USB to Switch Frame Tap when it is set to USB; Theming > USB file transfer takes it back" },
             { true,  "v2.2.3" },
             { false, "Updates install from the menu: it asks when one is out, with the download size, and fetches only the files that changed" },
             { false, "Theming > About: press A to check for updates, or to update when one is out" },
@@ -949,7 +1018,7 @@ uniform vec4 uCol;
 uniform float uStep;
 uniform float uGlow;
 varying vec4 vCol;
-varying float vAdd, vEdge, vHi;
+varying float vAdd, vEdge, vHi, vG;
 float Wave(float nx) {
     float w1 = sin((nx * uW1.x + uTime * uW1.y + uW1.z) * TAU);
     float w2 = sin((nx * uW2.x - uTime * uW2.y + uW1.z * 1.7) * TAU);
@@ -974,16 +1043,18 @@ void main() {
         if (sheen > 0.35) vHi = min(1.0, uCol.a * sheen * 1.6);
     }
     vEdge = aV.y * 2.0 * half_;                        // px below the top edge
+    vG = aV.y;
     gl_Position = Clip(vec2(x, y0 - half_ + vEdge));
 }
 )";
         inline constexpr const char *kRibbonFs = R"(
 varying vec4 vCol;
-varying float vAdd, vEdge, vHi;
+varying float vAdd, vEdge, vHi, vG;
 void main() {
     float a = vCol.a;
     if (vEdge < 1.0) a = vHi + a * (1.0 - vHi);        // leading-edge sheen
-    gl_FragColor = vec4(vCol.rgb * (a + vAdd), a);
+    float fall = 1.0 - abs(vG * 2.0 - 1.0);            // bloom fades out from the core
+    gl_FragColor = vec4(vCol.rgb * (a + vAdd * fall * fall * fall), a);
 }
 )";
 
@@ -1233,6 +1304,8 @@ void main() {
                 case BackgroundStyle_Grid:   return T("Retrowave");
                 case BackgroundStyle_RibbonHD: return T("Ribbon glow");
                 case BackgroundStyle_Ocean:  return T("Ocean");
+                case BackgroundStyle_Wave:   return T("PS3 wave");
+                case BackgroundStyle_Shader: return T("Shader file");
                 default:                     return T("Gradient");
             }
         }
@@ -1861,6 +1934,127 @@ void main() {
             gfx->FxSet("uSea2", (float)gfx::Gfx::Width * (float)t.Fx().x * 0.01f, 3.0f, 0.0f, 0.0f);
             gfx->FxStrip(2);
             gfx->FxEnd();
+        }
+
+        // PS3 wave: the XMB's translucent sheets, one full-screen pass. Each
+        // sheet is the band between two curves that pinch together and open
+        // up again as it twists, filled faintly, brighter toward its edges
+        // (seen through the curve of the surface), with a fine line along
+        // each edge and a few sparkles drifting through. No CPU fallback:
+        // without the GPU the plain ribbon stands in.
+        //
+        //   lines -> sheets   thickness -> edge width   amplitude -> height
+        //   seed  -> shape    layers    -> speed        y -> where it runs
+        inline constexpr const char *kWaveVs = R"(
+varying vec2 vQ;
+void main() {
+    vQ = aV.xy * vec2(1280.0, 720.0);   // the wave covers the screen
+    gl_Position = Clip(vQ);
+}
+)";
+        inline constexpr const char *kWaveFs = R"(
+uniform vec4 uTint;
+uniform vec4 uWa;     // centre y, height px, speed, sheets
+uniform vec4 uWb;     // edge px, seed
+varying vec2 vQ;
+float C(float x, float k) {
+    float s = x * 0.0049087, t = uTime * uWa.z, q = k * 2.39996 + uWb.y;
+    return sin(s * (0.62 + 0.11 * k) + t * (0.70 + 0.13 * k) + q)
+         + 0.55 * sin(s * (1.37 + 0.17 * k) - t * (0.45 + 0.09 * k) + q * 1.7)
+         + 0.22 * sin(s * 2.90 + t * 1.10 + q * 0.6);
+}
+float Wd(float x, float k) {
+    float s = x * 0.0049087, t = uTime * uWa.z;
+    float v = sin(s * (0.48 + 0.07 * k) - t * (0.35 + 0.05 * k) + k * 1.3 + uWb.y * 0.7);
+    return 0.10 + 0.90 * v * v;        // squared, not abs: the pinch stays round
+}
+void main() {
+    float ew = uWb.x;
+    float a  = 0.0;
+    if (abs(vQ.y - uWa.x) < uWa.y * 1.6 + ew * 30.0) {
+        for (int i = 0; i < 6; i++) {
+            float k = float(i);
+            if (k >= uWa.w) break;
+            float amp = uWa.y * (1.0 - 0.15 * k);
+            float c0  = uWa.x + C(vQ.x, k) * amp * 0.55;
+            float c1  = uWa.x + C(vQ.x + 1.0, k) * amp * 0.55;
+            float w   = Wd(vQ.x, k);
+            float hw  = w * amp * 0.45 + 1.0;
+            float inv = inversesqrt(1.0 + (c1 - c0) * (c1 - c0));
+            float dy  = vQ.y - c0;
+            float dt  = (dy + hw) * inv, db = (dy - hw) * inv;
+            float e    = exp(-dt * dt / (ew * ew)) + exp(-db * db / (ew * ew));
+            float halo = exp(-abs(dt) / (ew * 10.0)) + exp(-abs(db) / (ew * 10.0));
+            float r    = clamp(abs(dy) / hw, 0.0, 1.0);
+            float in_  = clamp(hw - abs(dy) + 0.5, 0.0, 1.0);
+            float fill = in_ * (0.04 + 0.16 * r * r * r * r) * (1.5 - 0.5 * w);
+            float ai   = clamp(e * 0.50 + halo * 0.03 + fill, 0.0, 1.0)
+                       * (1.0 - 0.45 * k / max(uWa.w - 1.0, 1.0));
+            a += ai * (1.0 - a);
+        }
+    }
+    vec2  q  = vQ + vec2(uTime * 14.0 * uWa.z, 0.0);
+    vec2  id = floor(q / 28.0);
+    float h  = fract(sin(dot(id, vec2(127.1, 311.7))) * 43758.5453);
+    if (h > 0.86) {
+        vec2  sp = (id + vec2(fract(h * 13.1), fract(h * 7.7))) * 28.0;
+        vec2  d  = q - sp;
+        float tw = 0.5 + 0.5 * sin(uTime * (1.5 + h * 3.0) + h * 40.0);
+        float by = (vQ.y - uWa.x) / (uWa.y * 1.3);
+        a += exp(-dot(d, d) / 1.8) * tw * exp(-by * by) * 0.7 * (1.0 - a);
+    }
+    vec3 c = mix(uTint.rgb, vec3(1.0), 0.35);
+    gl_FragColor = vec4(c * a, a) * uTint.a;
+}
+)";
+        inline void DrawWaveBackground(gfx::Gfx *gfx, const Theme &t) {
+            const Theme::FxParams &f = t.Fx();
+            if (!gfx->FxBegin(gfx->FxProgram(kWaveVs, kWaveFs))) {
+                DrawRibbonBackground(gfx, t);
+                return;
+            }
+            gfx->FxSet("uTint", t.fx_a);
+            gfx->FxSet("uWa", (float)std::clamp(f.y, -200, 920),
+                       (float)std::clamp(f.amplitude, 1, 60) * 4.0f,
+                       0.04f + (float)std::clamp(f.layers, 1, 12) * 0.03f,
+                       (float)std::clamp(f.lines, 1, 6));
+            gfx->FxSet("uWb", 0.6f + (float)std::clamp(f.thickness, 1, 20) * 0.35f,
+                       (float)std::clamp(f.seed, 0, 99) * 0.61f, 0.0f, 0.0f);
+            gfx->FxStrip(2);
+            gfx->FxEnd();
+        }
+
+        // A background from a shader file: see sdmc:/slaunch/shaders/README.txt.
+        inline constexpr const char *kShaderDir = "sdmc:/slaunch/shaders";
+        inline void DrawShaderBackground(gfx::Gfx *gfx, const Theme &t) {
+            if (!t.shader[0]) return;
+            const std::string base = std::string(kShaderDir) + "/" + t.shader;
+            if (!gfx->FxBegin(gfx->FxProgramFile(base.c_str()))) return;   // the gradient stands in
+            const Theme::FxParams &f = t.Fx();
+            gfx->FxSet("uColA", t.fx_a);
+            gfx->FxSet("uColB", t.fx_b);
+            gfx->FxSet("uTop", t.bg_top);
+            gfx->FxSet("uBot", t.bg_bottom);
+            gfx->FxSet("uFx", (float)f.lines, (float)f.thickness, (float)f.amplitude, (float)f.seed);
+            gfx->FxSet("uFx2", (float)f.layers, (float)f.y, (float)f.x, (float)f.cam);
+            gfx->FxStrip(2);
+            gfx->FxEnd();
+        }
+        // The shader files present, by name: .frag for GL, .dksh for the console.
+        inline std::vector<std::string> ShaderFiles() {
+            std::vector<std::string> out;
+            if (DIR *d = opendir(kShaderDir)) {
+                while (struct dirent *e = readdir(d)) {
+                    const char *dot = strrchr(e->d_name, '.');
+                    if (!dot || (strcasecmp(dot, ".frag") && strcasecmp(dot, ".dksh"))) continue;
+                    std::string n(e->d_name, (size_t)(dot - e->d_name));
+                    if (n.empty() || n.size() >= sizeof(Theme::shader)) continue;
+                    if (std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
+                }
+                closedir(d);
+            }
+            std::sort(out.begin(), out.end());
+            return out;
         }
 
         // Layout explosion fireball (Menu_Boom.cpp), drawn like the Ocean: flat

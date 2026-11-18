@@ -1079,15 +1079,16 @@ static void GrowHeap() {
     // Library applets share this pool. On hardware the framework's 384 MB cap
     // starved player select (os::OutOfMemory) and its 96 MB floor ran the menu
     // itself out while scrolling (DkResult_OutOfMemory). No size is known to be
-    // right on every firmware, so the file can override it: "total small".
-    // Small is malloc's own heap, which never shrinks, so it is what the browser
-    // has to live with; everything of 64 KB and up goes in the rest.
-    unsigned heap_mb = 256, small_mb = 48;
+    // right on every firmware, so the file can override it (MB; a second number,
+    // the old small-heap size, is ignored). The loader keeps blocks under 64 KB
+    // in a 48 MB heap of their own and the rest in an arena that grows on demand
+    // and shrinks back for applets (qext_heap_release; scripts/qext/loader.patch).
+    unsigned heap_mb = 256;
     if (FILE *fp = fopen("sdmc:/slaunch/config/qext_heap_mb.txt", "r")) {
-        fscanf(fp, "%u %u", &heap_mb, &small_mb);
+        fscanf(fp, "%u", &heap_mb);
         fclose(fp);
     }
-    const int heap_rc = qext_heap_setup(heap_mb, small_mb);
+    const int heap_rc = qext_heap_set_size(heap_mb);
     BootLog("qext: heap %u MB rc=0x%x", heap_mb, heap_rc);
 }
 
@@ -1135,10 +1136,7 @@ static void UnloadForApplet() {
     // would pin the heap. Refreshing them now puts them in the space just freed.
     qext_refresh_titles();
     qext_album_refresh();
-    // The loader's own log is not visible over MTP, this one is.
-    FILE *blog = fopen("sdmc:/slaunch/boot.log", "a");
-    const unsigned left = qext_heap_release(blog);
-    if (blog) fclose(blog);
+    const unsigned left = qext_heap_release();
     BootLog("qext: unloaded for an applet, heap %u MB", left);
     menu::qext::StartUnloadedApplet(left);
 }

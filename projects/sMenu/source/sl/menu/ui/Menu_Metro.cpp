@@ -366,7 +366,15 @@ namespace sl::menu::ui {
             // social hub stood your avatar on one.
             m_gfx->FillRect(x, y, w, h, Fade(SDL_Color{ 232, 233, 235, 255 }, a));
             const int s = std::min(w - 40, h - 90);
-            if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, x + (w - s) / 2, y + 26, s, s, a);
+            if (SDL_Texture *mii = MiiBody()) {
+                // The Mii standing on the plate, as the hub stood your avatar:
+                // the render is a square, the body its lower part, feet at the foot.
+                const int ms = (int)((h - 64) / 0.60f), foot = y + h - 44;
+                for (int k = 0; k < 4; k++)   // a soft shadow, narrower and darker toward its middle
+                    m_gfx->FillRect(x + w / 2 - ms * (9 - 2 * k) / 100, foot - 4 + k, ms * (18 - 4 * k) / 100, 8 - 2 * k,
+                                    Fade(SDL_Color{ 0, 0, 0, 14 }, a));
+                m_gfx->DrawImage(mii, x + (w - ms) / 2, foot - ms * 975 / 1000, ms, ms, a);
+            } else if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, x + (w - s) / 2, y + 26, s, s, a);
             else {
                 m_gfx->FillRect(x + (w - s) / 2, y + 26, s, s, Fade(SDL_Color{ 200, 202, 205, 255 }, a));
                 if (SDL_Texture *ic = SystemIcon(ItemKind::UserPage))
@@ -556,18 +564,17 @@ namespace sl::menu::ui {
             x += 2 * r + 7 + MWidth(MF_Semi, 19, T(h.second)) + 22;
         }
         // A fresh status line goes on the same row, out of the way.
-        if (m_status[0] && (armGetSystemTick() - m_status_tick) <
-                           m_status_secs * armGetSystemTickFreq()) {
-            const int sw = MWidth(MF_Semi, 19, m_status);
-            MText(MF_Semi, 19, gfx::Gfx::Width - 100 - sw, y, m_mt_fg, m_status);
-        }
+        DrawStatusToast();
     }
 
     // Top right: name, then the clock and battery where the dashboard kept
     // friends and messages, and the account picture beside them.
     void Menu::MetroDrawUser() {
         const int ax = 1128, ay = 30, as = 56;
-        if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, ax, ay, as, as, 255);
+        if (SDL_Texture *mh = MiiRender(1)) {   // the Mii's head on the accent square
+            m_gfx->FillRect(ax, ay, as, as, m_mt_accent);
+            m_gfx->DrawImage(mh, ax, ay, as, as, 255);
+        } else if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, ax, ay, as, as, 255);
         else {
             m_gfx->FillRect(ax, ay, as, as, m_mt_accent);
             if (SDL_Texture *ic = SystemIcon(ItemKind::UserPage))
@@ -792,6 +799,8 @@ namespace sl::menu::ui {
                 int left, right;
                 BladesSpan(left, right);
                 x = left; y = BladesHintY();
+            } else if (NxeUi() && !main) {   // NXE: along the bottom, under the glass
+                x = 110; y = 650;
             }
         }
         constexpr int r = 11;
@@ -888,8 +897,7 @@ namespace sl::menu::ui {
         const int by = std::max(20, (gfx::Gfx::Height - bh) / 2);
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{ 0, 0, 0, 120 });
         m_gfx->FillRect(0, by, gfx::Gfx::Width, bh, SDL_Color{ 34, 35, 38, 245 });
-        const std::string title = (m_cursor >= 0 && m_cursor < (int)m_items.size())
-                                ? MFit(MF_Light, 32, m_items[m_cursor].name, 820) : std::string();
+        const std::string title = MFit(MF_Light, 32, OptionsTitle(), 820);
         MText(MF_Light, 32, kMtGX, by + 18, kMtWhite, title.c_str());
         for (int i = 0; i < n; i++) {
             const int y = by + 76 + i * RH;
@@ -1320,6 +1328,7 @@ namespace sl::menu::ui {
     }
 
     void Menu::DrawMetroGames() {
+        if (m_ui_mode == UiMode::NXE) { DrawNxeLibrary(); return; }
         static const char *kShow[] = { "all games", "my pins", "recent", "game card", "homebrew" };
         static const char *kSort[] = { "recent", "title", "most played" };
         m_icons.SetScale(0);
@@ -1468,6 +1477,13 @@ namespace sl::menu::ui {
             return Action::None;
         }
         if (b == Btn::Y) { OpenSearch(); return Action::None; }
+        // NXE shows the library as a list running down: up and down walk it,
+        // and up from the top reaches the Show / Sort line above it.
+        if (m_ui_mode == UiMode::NXE && m_metro_lib_hdr < 0) {
+            if (b == Btn::Down) b = Btn::Right;
+            else if (b == Btn::Up) b = m_metro_lib_cur > 0 ? Btn::Left : Btn::Up;
+            else if (b == Btn::Left || b == Btn::Right) return Action::None;
+        }
 
         if (m_metro_lib_hdr >= 0) {
             if (b == Btn::Left || b == Btn::Right) m_metro_lib_hdr ^= 1;

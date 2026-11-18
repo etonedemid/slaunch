@@ -50,6 +50,43 @@ namespace sl::menu::gfx {
         fclose(fp);
     }
 
+    // A background shader from a file (sdmc:/slaunch/shaders): the user writes
+    // only the fragment shader's body; these declarations come first. Here as
+    // a built-in program too, so scripts/fx-spirv.py builds its vertex shader
+    // for deko3d, and so a file compiled by scripts/bg-shader.py lays its
+    // uniforms out the same way. The two copies of the declarations must match.
+    static constexpr const char *kBgFileHead =
+        "uniform vec4 uColA, uColB, uTop, uBot, uFx, uFx2;\n"
+        "varying vec2 vP;\n";
+    static constexpr const char *kBgFileVs = R"(
+varying vec2 vP;
+void main() {
+    vP = aV.xy * vec2(1280.0, 720.0);   // a shader file's whole screen
+    gl_Position = Clip(vP);
+}
+)";
+    static constexpr const char *kBgFileFs = R"(
+uniform vec4 uColA, uColB, uTop, uBot, uFx, uFx2;
+varying vec2 vP;
+void main() {
+    vec4 k = (uColA + uColB + uFx + uFx2) * 0.0;
+    gl_FragColor = vec4(mix(uTop.rgb, uBot.rgb, vP.y / 720.0), 1.0) + k;
+}
+)";
+    // The whole of a small file, or false.
+    [[maybe_unused]] static bool ReadSmall(const std::string &path, std::string &out, size_t cap) {
+        out.clear();
+        FILE *f = fopen(path.c_str(), "rb");
+        if (!f) return false;
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && out.size() <= cap) out.append(buf, n);
+        fclose(f);
+        return !out.empty() && out.size() <= cap;
+    }
+    // path -> program id, failures included, so a bad file is read once.
+    static std::vector<std::pair<std::string, int>> g_file_progs;
+
 #ifdef SL_QEXT
     extern "C" void qext_display_size(int *w, int *h);
     // The loader owns the layer; SDL draws into the window it hands the menu.
@@ -1015,9 +1052,10 @@ namespace sl::menu::gfx {
         constexpr int kFxVerts = 4096;   // as the GL path: vertex k = (k/2, k%2, k/6, corner)
         constexpr uint32_t kFxUboSize = 0x1000;
 
-        struct DkProg { DkShader vs, fs; std::vector<float> u; };
+        struct DkProg { DkShader vs, fs; std::vector<float> u; int names = 0; };   // names: kPrograms index
         std::vector<DkProg> g_progs;
         DkMemBlock g_code = nullptr, g_vbuf = nullptr, g_ubo = nullptr;
+        std::vector<DkMemBlock> g_file_code;   // one per shader file loaded
         DkCmdBuf g_cmd = nullptr;
         int g_cur = -1;
 
@@ -1028,7 +1066,7 @@ namespace sl::menu::gfx {
             return dkMemBlockCreate(&mk);
         }
         int FxLoc(const char *name) {
-            const fxspv::Program &p = fxspv::kPrograms[g_cur];
+            const fxspv::Program &p = fxspv::kPrograms[g_progs[g_cur].names];
             for (int i = 0; i < p.n_uniforms; i++)
                 if (!strcmp(p.uniforms[i], name)) return i;
             return -1;
@@ -1045,6 +1083,9 @@ namespace sl::menu::gfx {
         if (g_code) { dkMemBlockDestroy(g_code); g_code = nullptr; }
         if (g_vbuf) { dkMemBlockDestroy(g_vbuf); g_vbuf = nullptr; }
         if (g_ubo)  { dkMemBlockDestroy(g_ubo);  g_ubo  = nullptr; }
+        for (DkMemBlock b : g_file_code) dkMemBlockDestroy(b);
+        g_file_code.clear();
+        g_file_progs.clear();
     }
 
     bool Gfx::ShaderFxInit() {
@@ -1091,6 +1132,7 @@ namespace sl::menu::gfx {
             load(g_progs[i].vs, p.vs, p.vs_size);
             load(g_progs[i].fs, p.fs, p.fs_size);
             g_progs[i].u.assign((size_t)std::max(1, p.n_uniforms) * 4, 0.0f);
+            g_progs[i].names = (int)i;
         }
         m_fx_tex_ok = true;
         m_fx_tried = 1;
@@ -1106,6 +1148,41 @@ namespace sl::menu::gfx {
         for (int i = 0; i < count; i++)
             if (fxspv::kPrograms[i].hash == h) return i;
         return -1;
+    }
+
+    // deko3d cannot compile GLSL on the console, so a shader file comes as the
+    // fragment shader scripts/bg-shader.py built from it (name.dksh), run
+    // behind the built-in program's vertex shader and with its uniforms.
+    int Gfx::FxProgramFile(const char *base) {
+        if (!ShaderFxInit()) return -1;
+        for (auto &kv : g_file_progs) if (kv.first == base) return kv.second;
+        int id = -1;
+        const int bi = FxProgram(kBgFileVs, kBgFileFs);
+        std::string d;
+        if (bi >= 0 && ReadSmall(std::string(base) + ".dksh", d, 256u << 10) && d.compare(0, 4, "DKSH") == 0) {
+            SDL_PropertiesID props = SDL_GetRendererProperties(m_renderer);
+            DkDevice dev = (DkDevice)SDL_GetPointerProperty(props, SDL_PROP_RENDERER_DEKO3D_DEVICE_POINTER, nullptr);
+            const uint32_t size = (uint32_t)((d.size() + DK_SHADER_CODE_ALIGNMENT - 1) & ~(size_t)(DK_SHADER_CODE_ALIGNMENT - 1));
+            DkMemBlock b = dev ? FxBlock(dev, size + DK_SHADER_CODE_UNUSABLE_SIZE,
+                                         DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code)
+                               : nullptr;
+            if (b) {
+                memcpy(dkMemBlockGetCpuAddr(b), d.data(), d.size());
+                DkProg p;
+                p.vs = g_progs[bi].vs;
+                DkShaderMaker mk;
+                dkShaderMakerDefaults(&mk, b, 0);
+                dkShaderInitialize(&p.fs, &mk);
+                p.u = g_progs[bi].u;
+                p.names = g_progs[bi].names;
+                g_file_code.push_back(b);
+                g_progs.push_back(std::move(p));
+                id = (int)g_progs.size() - 1;
+            }
+        }
+        if (id < 0) GfxLog(base);
+        g_file_progs.push_back({ base, id });
+        return id;
     }
 
     bool Gfx::FxBegin(int prog) {
@@ -1469,6 +1546,34 @@ namespace sl::menu::gfx {
         return id;
     }
 
+    // GL compiles the file itself: name.frag, after the declarations it may use.
+    int Gfx::FxProgramFile(const char *base) {
+        if (!ShaderFxInit()) return -1;
+        for (auto &kv : g_file_progs) if (kv.first == base) return kv.second;
+        int id = -1;
+        std::string body;
+        if (ReadSmall(std::string(base) + ".frag", body, 64u << 10)) {
+            const std::string fs = std::string(kBgFileHead) + body;
+            GLuint_ v = Compile(GL_VERTEX_SHADER_, kVsPrelude, kBgFileVs);
+            GLuint_ f = v ? Compile(GL_FRAGMENT_SHADER_, kFsPrelude, fs.c_str()) : 0;
+            GLuint_ prog = (v && f) ? g_gl.CreateProgram() : 0;
+            if (prog) {
+                g_gl.AttachShader(prog, v);
+                g_gl.AttachShader(prog, f);
+                g_gl.BindAttribLocation(prog, 0, "aV");
+                g_gl.LinkProgram(prog);
+                GLint_ ok = 0;
+                g_gl.GetProgramiv(prog, GL_LINK_STATUS_, &ok);
+                if (ok) { g_progs.push_back({ prog, {} }); id = (int)g_progs.size() - 1; }
+            }
+            if (v) g_gl.DeleteShader(v);
+            if (f) g_gl.DeleteShader(f);
+        }
+        if (id < 0) GfxLog(base);
+        g_file_progs.push_back({ base, id });
+        return id;
+    }
+
     // Passes are lazy: one stays open across consecutive GPU draws (switching
     // program is cheap, the state was saved when it opened) and is closed by
     // the next SDL draw through Gfx, or by FxClose. Each open costs an SDL
@@ -1766,6 +1871,9 @@ namespace sl::menu::gfx {
         m_fx_tried = 1;
         return true;
     }
+
+    // Not on Vulkan yet: it would need SPIR-V from the file. The gradient stands in.
+    int Gfx::FxProgramFile(const char *) { return -1; }
 
     int Gfx::FxProgram(const char *vs, const char *fs) {
         if (!ShaderFxInit()) return -1;

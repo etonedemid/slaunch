@@ -66,6 +66,8 @@ namespace sl::menu::ui {
             closedir(d);
         }
         m_icons.SetPathFn([this](u64 id) {
+            std::string custom = CustomArt(id, "icon");
+            if (!custom.empty()) return custom;
             if (!m_custom_icons.count(id)) return std::string();
             char p[64];
             snprintf(p, sizeof(p), "sdmc:/slaunch/icons_custom/%016llX.jpg", (unsigned long long)id);
@@ -266,6 +268,11 @@ namespace sl::menu::ui {
             threadWaitForExit(&m_ping_thread);
             threadClose(&m_ping_thread);
             m_ping_running = false;
+        }
+        if (m_mii_running) {
+            threadWaitForExit(&m_mii_thread);
+            threadClose(&m_mii_thread);
+            m_mii_running = false;
         }
         if (m_info_running) {
             threadWaitForExit(&m_info_thread);
@@ -991,7 +998,7 @@ namespace sl::menu::ui {
                 m_align = (TextAlign)v;
             else if (sscanf(line, "ui_mode=%d", &v) == 1 &&
                      v >= 0 && v < (int)UiMode::Count)
-                m_ui_mode = v < kUiModeChoices ? (UiMode)v : UiMode::Blades;   // NXE is shelved
+                m_ui_mode = (UiMode)v == UiMode::Cover ? UiMode::Line : (UiMode)v;
             else if (sscanf(line, "antialias=%d", &v) == 1)
                 m_antialias = (v != 0);
             else if (sscanf(line, "tile_cols=%d", &v) == 1)
@@ -1004,6 +1011,10 @@ namespace sl::menu::ui {
                 m_shelf_vertical = (v != 0);
             else if (sscanf(line, "shelf_ps=%d", &v) == 1)
                 m_shelf_ps = (v != 0);
+            else if (sscanf(line, "xmb_ps3=%d", &v) == 1)
+                m_xmb_ps3 = (v != 0);
+            else if (sscanf(line, "tile_names=%d", &v) == 1)
+                m_tile_names = (v != 0);
             else if (sscanf(line, "metro_theme=%d", &v) == 1)
                 m_metro_themed = (v != 0);
             else if (sscanf(line, "backdrop=%d", &v) == 1 && v >= 0 && v <= 2)
@@ -1085,6 +1096,8 @@ namespace sl::menu::ui {
         fprintf(fp, "list_icons=%d\n", m_list_icons ? 1 : 0);
         fprintf(fp, "shelf_vertical=%d\n", m_shelf_vertical ? 1 : 0);
         fprintf(fp, "shelf_ps=%d\n", m_shelf_ps ? 1 : 0);
+        fprintf(fp, "xmb_ps3=%d\n", m_xmb_ps3 ? 1 : 0);
+        fprintf(fp, "tile_names=%d\n", m_tile_names ? 1 : 0);
         fprintf(fp, "metro_theme=%d\n", m_metro_themed ? 1 : 0);
         // Tells the daemon to capture the game on HOME (see HomeFrameFlag):
         // only Metro shows it, and the capture costs the HOME press time.
@@ -1467,6 +1480,11 @@ namespace sl::menu::ui {
                 return Action::None;
             case ItemKind::Power:        EnterPower(); return Action::None;
             case ItemKind::Collection:   OpenCollection(it.name); return Action::None;
+            case ItemKind::GameLibrary:  MetroOpenLib(0); return Action::None;
+            case ItemKind::VideoLibrary:
+                OpenAlbumViewer(true);
+                if (m_album.empty()) { m_screen = Screen::Main; SetStatus(T("No videos")); }
+                return Action::None;
         }
         return Action::None;
     }
@@ -1692,8 +1710,7 @@ namespace sl::menu::ui {
             // through to the shared handling below, which is what launches.
             Action da = Action::None;
             if (DeckNav(b, da, out_app_id)) return da;
-        } else if (m_ui_mode == UiMode::Line || m_ui_mode == UiMode::Cover ||
-                   m_ui_mode == UiMode::Shelf) {
+        } else if (m_ui_mode == UiMode::Line || m_ui_mode == UiMode::Shelf) {
             if (b == Btn::Right || b == Btn::Down) { wrapNext(); return Action::None; }
             if (b == Btn::Left  || b == Btn::Up)   { wrapPrev(); return Action::None; }
             if (b == Btn::R) { step(5);  return Action::None; }
@@ -1777,61 +1794,91 @@ namespace sl::menu::ui {
         }
 
         const MenuItem &it = m_items[m_cursor];
-        if (it.kind == ItemKind::Collection && !m_colls[CollIndex(it.name)].playlist) {
-            m_options.push_back({ T("Rename"), OptCollRename });
-            m_options.push_back({ T("Delete collection"), OptCollDelete });
-        }
-
-        if (it.kind == ItemKind::Game) {
-            m_options.push_back({ IsFavourite(it.app_id) ? T("Remove from Favourites")
-                                                         : T("Add to Favourites"), OptFav });
+        const bool game = it.kind == ItemKind::Game;
+        if (m_options_sub == Sub_Customize) {
             m_options.push_back({ T("Rename"), OptRename });
             m_options.push_back({ T("Choose cover"), OptPickCover });
             m_options.push_back({ T("Choose icon"), OptPickIcon });
             if (m_custom_icons.count(it.app_id))
                 m_options.push_back({ T("Restore icon"), OptResetIcon });
-            m_options.push_back({ m_hb_donor == it.app_id ? T("Homebrew donor (set)")
-                                                          : T("Use as homebrew donor"), OptSetDonor });
+            for (int i = 0; i < kArtKindN; i++)
+                m_options.push_back({ T(kArtKinds[i].label), OptArtFile, i });
+            if (HasCustomArt(it.app_id))
+                m_options.push_back({ T("Remove custom art"), OptArtReset });
+            m_options.push_back({ T("Back"), OptSubBack });
+            return;
         }
+        // Tile options only mean anything on the wall (Grid).
+        if (m_options_sub == Sub_Tile) {
+            const std::string key = ItemKey(it);
+            m_options.push_back({ std::string(T("Tile size: ")) + T(TileSizeLabel(key)), OptTileSize });
+            m_options.push_back({ T("Tile colour"), OptTileColor });
+            const auto tc = m_tilecfg.find(key);
+            if (tc != m_tilecfg.end() && tc->second.has_color)
+                m_options.push_back({ T("Default colour"), OptTileReset });
+            if (it.kind != ItemKind::WidgetTile)
+                m_options.push_back({ std::string(T("Name: ")) +
+                                      (TileNameShown(key) ? T("Shown") : T("Hidden")), OptTileName });
+            m_options.push_back({ std::string(T("All tile names: ")) +
+                                  (m_tile_names ? T("Shown") : T("Hidden")), OptTileNamesAll });
+            if (it.kind == ItemKind::WidgetTile)
+                m_options.push_back({ T("Remove tile"), OptRemoveWidget });
+            // Behind its own list: one line per widget would push everything
+            // else off the overlay as soon as a couple of scripts are on the card.
+            if (m_deferred_joined && UnplacedWidgets() > 0)
+                m_options.push_back({ T("Add widget"), OptAddWidgetMenu });
+            m_options.push_back({ T("Back"), OptSubBack });
+            return;
+        }
+        if (m_options_sub == Sub_More) {
+            if (game)
+                m_options.push_back({ m_hb_donor == it.app_id ? T("Homebrew donor (set)")
+                                                              : T("Use as homebrew donor"), OptSetDonor });
+            m_options.push_back({ std::string(T("Sort: ")) + SortLabel(), OptSort });
+            // Pinning lives in the homebrew list (X there); this is the way to it
+            // from wherever the cursor is.
+            m_options.push_back({ T("Add homebrew"), OptAddHomebrew });
+            m_options.push_back({ T("Back"), OptSubBack });
+            return;
+        }
+
+        // The entry's own list: what is used most, the rest one level down.
+        // The running game's Close comes first, so X then A closes it.
+        if (game && m_suspended != 0 && it.app_id == m_suspended)
+            m_options.push_back({ T("Close game"), OptCloseGame });
+        if (it.kind == ItemKind::Collection && !m_colls[CollIndex(it.name)].playlist) {
+            m_options.push_back({ T("Rename"), OptCollRename });
+            m_options.push_back({ T("Delete collection"), OptCollDelete });
+        }
+        if (game)
+            m_options.push_back({ IsFavourite(it.app_id) ? T("Remove from Favourites")
+                                                         : T("Add to Favourites"), OptFav });
         if (it.kind == ItemKind::Homebrew) {
             m_options.push_back({ IsHbFavourite(it.hb_path) ? T("Remove from Favourites")
                                                             : T("Add to Favourites"), OptFav });
             m_options.push_back({ T("Remove from menu"), OptUnpinHb });
         }
-        if (it.kind == ItemKind::Game || it.kind == ItemKind::Homebrew) {
+        if (game) m_options.push_back({ T("Customize"), OptCustomMenu });
+        if (game || it.kind == ItemKind::Homebrew) {
             // Always offered: making the first folder turns Collections on.
             m_options.push_back({ T("Collections"), OptCollMenu });
             m_options.push_back({ m_hidden.count(ItemKey(it)) ? T("Unhide") : T("Hide"), OptHide });
         }
-        // Any entry can be reordered.
-        m_options.push_back({ T("Move"), OptMove });
-
-        // Tile options only mean anything on the wall, so they are not offered
-        // in the layouts that have no tiles.
-        if (m_ui_mode == UiMode::Grid) {
-            const std::string key = ItemKey(it);
-            m_options.push_back({ std::string(T("Tile size: ")) + T(TileSizeLabel(key)),
-                                  OptTileSize });
-            m_options.push_back({ T("Tile colour"), OptTileColor });
-            const auto tc = m_tilecfg.find(key);
-            if (tc != m_tilecfg.end() && tc->second.has_color)
-                m_options.push_back({ T("Default colour"), OptTileReset });
-            if (it.kind == ItemKind::WidgetTile)
-                m_options.push_back({ T("Remove tile"), OptRemoveWidget });
-
-            // Behind a submenu: one line per widget would push everything else
-            // off the bottom of the overlay as soon as a couple of scripts are
-            // on the card.
-            if (m_deferred_joined && UnplacedWidgets() > 0)
-                m_options.push_back({ T("Add widget"), OptAddWidgetMenu });
-        }
-        if (it.kind == ItemKind::Game && m_suspended != 0 && it.app_id == m_suspended)
-            m_options.push_back({ T("Close game"), OptCloseGame });
-        m_options.push_back({ std::string(T("Sort: ")) + SortLabel(), OptSort });
-        // Pinning lives in the homebrew list (X there); this is the way to it
-        // from wherever the cursor is.
-        m_options.push_back({ T("Add homebrew"), OptAddHomebrew });
+        m_options.push_back({ T("Move"), OptMove });   // any entry can be reordered
+        if (m_ui_mode == UiMode::Grid) m_options.push_back({ T("Tile"), OptTileMenu });
+        m_options.push_back({ T("More"), OptMoreMenu });
         m_options.push_back({ T("Cancel"), OptDismiss });
+    }
+    const char *Menu::OptionsTitle() const {
+        switch (m_options_sub) {
+            case Sub_Customize:   return T("Customize");
+            case Sub_Tile:        return T("Tile");
+            case Sub_More:        return T("More");
+            case Sub_Collections: return T("Collections");
+            case Sub_Widgets:     return T("Add widget");
+            default: break;
+        }
+        return (m_cursor >= 0 && m_cursor < (int)m_items.size()) ? m_items[m_cursor].name.c_str() : T("Options");
     }
     const char *Menu::SortLabel() const {
         switch (m_sort) {
@@ -1958,23 +2005,71 @@ namespace sl::menu::ui {
                 m_options_open = false;
                 return Action::None;
             }
+            case OptTileName: {
+                // Flip what this tile shows; matching the global setting goes
+                // back to following it, so "all names" still reaches this tile.
+                TileCfg &c = TileCfgFor(sel_key);
+                const bool show = !TileNameShown(sel_key);
+                c.name = (show == m_tile_names) ? 0 : (show ? 1 : 2);
+                if (c.w == 0 && !c.has_color && c.name == 0) m_tilecfg.erase(sel_key);
+                SaveTileCfg();
+                m_options_open = false;
+                return Action::None;
+            }
+            case OptTileNamesAll:
+                m_tile_names = !m_tile_names;
+                // A fresh global choice applies to every tile, so drop the
+                // per-tile overrides that would otherwise contradict it.
+                for (auto c = m_tilecfg.begin(); c != m_tilecfg.end();) {
+                    c->second.name = 0;
+                    if (c->second.w == 0 && !c->second.has_color) c = m_tilecfg.erase(c);
+                    else ++c;
+                }
+                SaveTileCfg();
+                SaveSettings();
+                m_options_open = false;
+                return Action::None;
             case OptTileReset: {
                 auto c = m_tilecfg.find(sel_key);
                 if (c != m_tilecfg.end()) {
                     c->second.has_color = false;
                     // Drop only the entry that carries nothing else, so a widget
                     // tile is not deleted just by resetting its colour.
-                    if (c->second.w == 0) m_tilecfg.erase(c);
+                    if (c->second.w == 0 && c->second.name == 0) m_tilecfg.erase(c);
                     SaveTileCfg();
                 }
                 m_options_open = false;
                 return Action::None;
             }
             case OptAddWidgetMenu:
-                m_options_sub = Sub_Widgets;
+            case OptCustomMenu:
+            case OptTileMenu:
+            case OptMoreMenu: {
+                const int a = m_options[m_options_cursor].action;
+                m_options_sub = a == OptAddWidgetMenu ? Sub_Widgets : a == OptCustomMenu ? Sub_Customize
+                              : a == OptTileMenu ? Sub_Tile : Sub_More;
                 BuildOptions();
                 m_options_cursor = 0;
                 return Action::None;
+            }
+            case OptArtFile:
+                PickArtFile(m_options[m_options_cursor].arg);
+                return Action::None;
+            case OptArtReset: {
+                char p[96];
+                for (const char *k : { "cover", "hero", "shot1", "shot2", "icon", "wrap" })
+                    for (const char *ext : kCustomArtExts) {
+                        snprintf(p, sizeof(p), "%s/%016llX/%s.%s", kCustomArtDir, (unsigned long long)sel_id, k, ext);
+                        remove(p);
+                    }
+                snprintf(p, sizeof(p), "%s/%016llX", kCustomArtDir, (unsigned long long)sel_id);
+                rmdir(p);   // only goes when nothing else is in it
+                DropArtFor(sel_id);
+                SetStatus(T("Custom art removed"));
+                m_options_open = false;
+                m_options_sub = Sub_None;
+                return Action::None;
+            }
             case OptSubBack:
                 m_options_sub = Sub_None;
                 BuildOptions();
@@ -2536,6 +2631,7 @@ namespace sl::menu::ui {
             if (m_screen != Screen::Main || m_items.empty() || m_xmb_cols.empty()) DrawBladesFrame();
             return;
         }
+        if (NxeUi()) { DrawNxeFrame(); return; }
         m_gfx->GradientV(t.bg_top, t.bg_bottom);
 
         // Wallpaper first (when set), so ribbons draw on top.
@@ -2592,6 +2688,8 @@ namespace sl::menu::ui {
             case BackgroundStyle_Grid:   DrawGridBackground(m_gfx, t);   break;
             case BackgroundStyle_RibbonHD: DrawRibbonBackground(m_gfx, t, true); break;
             case BackgroundStyle_Ocean:  DrawOceanBackground(m_gfx, t);  break;
+            case BackgroundStyle_Wave:   DrawWaveBackground(m_gfx, t);   break;
+            case BackgroundStyle_Shader: DrawShaderBackground(m_gfx, t); break;
             default: break;   // Gradient: the gradient above is the whole of it
         }
     }
@@ -2621,6 +2719,25 @@ namespace sl::menu::ui {
         const int bw = m_gfx->TextWidth(FontSize::Small, batt);
         const int cw = m_gfx->TextWidth(FontSize::Small, clock);
         const int hy = kXmbTitleTop + 10;
+        if (m_xmb_ps3) {
+            // The PS3's clock: date, time and battery in a faint capsule whose
+            // right end runs off the edge of the screen.
+            char date[16];
+            strftime(date, sizeof(date), "%d/%m", &tm_now);
+            const std::string s = std::string(date) + "  " + clock + "     " + batt;
+            const int sw = m_gfx->TextWidth(FontSize::Small, s.c_str());
+            const int ph = m_gfx->LineHeight(FontSize::Small) + 12;
+            const int px = W - kXmbTitleLeft - sw - 24, py = hy - 6;
+            gfx::Gfx::CardStyle cs;
+            cs.radius = ph / 2.0f;
+            cs.shadow = 0.0f;
+            cs.fill   = WithAlpha(t.fg, 40);
+            if (!m_gfx->Card(nullptr, px, py, W - px + ph, ph, cs))
+                m_gfx->FillRect(px, py, W - px, ph, cs.fill);
+            m_gfx->Text(FontSize::Small, px + 20, hy, t.fg, s.c_str());
+            DrawUsbTag(px - 16, hy);
+            return;
+        }
         m_gfx->Text(FontSize::Small, W - kXmbTitleLeft - bw, hy, t.fg, batt);
         m_gfx->Text(FontSize::Small, W - kXmbTitleLeft - bw - 24 - cw, hy, t.dim, clock);
         DrawUsbTag(W - kXmbTitleLeft - bw - 24 - cw - 24, hy);
@@ -2640,6 +2757,10 @@ namespace sl::menu::ui {
         }
         if (BladesUi()) {
             DrawBladesHeader((center_title && *center_title) ? T(center_title) : "");
+            return;
+        }
+        if (NxeUi()) {
+            DrawNxeHeader((center_title && *center_title) ? T(center_title) : "");
             return;
         }
 
@@ -2735,11 +2856,12 @@ namespace sl::menu::ui {
     // own comment for why this ignores m_show_hints.
     void Menu::LayoutThemeSync() {
         m_theme.Override(nullptr);
-        const bool blades = BladesUi(), metro = MetroUi();
-        if (!blades && !metro) return;
+        const bool blades = BladesUi(), metro = MetroUi(), nxe = NxeUi();
+        if (!blades && !metro && !nxe) return;
         m_layout_theme = m_theme.Current();   // its wallpaper, icon plates and the rest stay
-        if (blades) BladesTheme(m_layout_theme);
-        else        MetroTheme(m_layout_theme);
+        if (blades)   BladesTheme(m_layout_theme);
+        else if (nxe) NxeTheme(m_layout_theme);
+        else          MetroTheme(m_layout_theme);
         m_theme.Override(&m_layout_theme);
     }
     void Menu::BackTapBox(int &x, int &y) const {
@@ -2753,6 +2875,7 @@ namespace sl::menu::ui {
             BladesSpan(left, right);
             x = right - 104; y = BladesHintY() + 13 - kBackTapH / 2;
         }
+        if (NxeUi()) { x = gfx::Gfx::Width - 214; y = 650 + 13 - kBackTapH / 2; }
     }
     void Menu::DrawBackTap() {
         const Theme &t = m_theme.Current();
@@ -2848,6 +2971,10 @@ namespace sl::menu::ui {
         }
         if (BladesUi()) {
             DrawCarouselBlades(labels, values, cursor, scroll_pos);
+            return;
+        }
+        if (NxeUi()) {
+            DrawCarouselNxe(labels, values, cursor, scroll_pos);
             return;
         }
 
@@ -3040,7 +3167,8 @@ namespace sl::menu::ui {
 #endif
         low = heap > used && heap - used < kLowHeap;
 #ifdef SL_QEXT
-        // The heap is a fixed size here: this is what says whether it is big enough.
+        // The arena only grows when it runs out (and takes that from the applet
+        // pool): this is what says whether the size set at boot is big enough.
         static bool was_low = false;
         if (low != was_low) {
             was_low = low;
@@ -3475,7 +3603,6 @@ namespace sl::menu::ui {
         switch (m_ui_mode) {
             case UiMode::Line:    DrawMainLine();    break;
             case UiMode::Grid:    DrawMainGrid();    break;
-            case UiMode::Cover:   DrawMainCover();   break;
             case UiMode::Shelf:   if (m_shelf_ps) DrawMainShelfPs(); else DrawMainShelf(); break;
             case UiMode::XMB:     DrawMainXmb();     break;
             case UiMode::Flow:    DrawMainFlow();    break;
@@ -3522,21 +3649,7 @@ namespace sl::menu::ui {
     }
     void Menu::DrawStatusHint(std::initializer_list<HintSeg> segs) {
         const Theme &t = m_theme.Current();
-        // Fresh status (< 3s) shows above the control hint, then fades out.
-        if (m_status[0] != '\0') {
-            u64 nowt = armGetSystemTick(), freq = armGetSystemTickFreq();
-            if ((nowt - m_status_tick) < m_status_secs * freq) {
-                // On a plate, so it stays readable over whatever the layout
-                // has down here (Deck's news cards, a busy screenshot).
-                const int sw = m_gfx->TextWidth(FontSize::Normal, m_status) + 36;
-                const int lh = m_gfx->LineHeight(FontSize::Normal);
-                m_gfx->FillRect(gfx::Gfx::Width / 2 - sw / 2, kHintY - 50, sw, lh + 12,
-                                WithAlpha(t.bg_bottom, 225));
-                m_gfx->TextCentered(FontSize::Normal, gfx::Gfx::Width / 2, kHintY - 44, t.accent, m_status);
-            }
-            else
-                m_status[0] = '\0';
-        }
+        DrawStatusToast();
         // An active filter hides most of the library; say so on every layout
         // (XMB already puts it in its header).
         if (m_screen == Screen::Main && !m_search.empty() && m_ui_mode != UiMode::XMB) {
@@ -3592,6 +3705,8 @@ namespace sl::menu::ui {
             case ItemKind::HomebrewMenu: file = "homebrewmenu"; break;
             case ItemKind::FileManager:  file = "filemanager";  break;
             case ItemKind::Collection:   file = "fm_folder";    break;
+            case ItemKind::GameLibrary:  file = "games";        break;
+            case ItemKind::VideoLibrary: file = "album";        break;
             default: break;
         }
         SDL_Texture *tex = nullptr;
@@ -3642,31 +3757,138 @@ namespace sl::menu::ui {
         return tex;
     }
 
+    void Menu::PanelCard(float x, float y, float w, float h, float r, float sh, SDL_Color fill, Uint8 a) {
+        gfx::Gfx::CardStyle cs;
+        cs.radius = r; cs.shadow = sh; cs.fill = fill;
+        if (!m_gfx->Card(nullptr, x, y, w, h, cs, a))
+            m_gfx->FillRect((int)x, (int)y, (int)w, (int)h, WithAlpha(fill, (Uint8)(fill.a * a / 255)));
+    }
+    // The options overlay, the dialogs and the status toast take the look of
+    // the layout they open over, as the Discord banner does: Metro and Blades
+    // their own, XMB the PS3's smoked column, Deck its frosted side panel, and
+    // every other layout a card in the theme's colours.
     void Menu::DrawOptions() {
         const Theme &t = m_theme.Current();
         const int n = (int)m_options.size();
         if (n == 0) return;
         if (m_ui_mode == UiMode::Metro) { DrawMetroOptions(); return; }
         if (BladesUi()) { DrawBladesOptions(); return; }
+        if (NxeUi())    { DrawNxeOptions(); return; }
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+        const int cur = m_options_cursor;
+        // The rows that fit, kept around the cursor (a long Collections list).
+        auto first_of = [&](int vis) { return n > vis ? std::clamp(cur - vis / 2, 0, n - vis) : 0; };
+        const SDL_Color white{ 255, 255, 255, 255 };
 
-        // Dim the menu behind the panel.
-        m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0, 0, 0, 150});
-
-        const int rowH   = 62;
-        const int panelW = 560;
-        const int panelH = rowH * n + 40;
-        const int px = (gfx::Gfx::Width  - panelW) / 2;
-        const int py = (gfx::Gfx::Height - panelH) / 2;
-
-        m_gfx->FillRect(px, py, panelW, panelH, WithAlpha(t.bg_bottom, 245));
-        m_gfx->FillRect(px, py, panelW, 4, t.accent);
-
-        for (int i = 0; i < n; i++) {
-            const bool sel = (i == m_options_cursor);
-            const int  ry  = py + 26 + i * rowH;
-            if (sel) m_gfx->FillRect(px + 14, ry - 8, panelW - 28, rowH - 10, WithAlpha(t.accent, 60));
-            m_gfx->Text(FontSize::Normal, px + 36, ry, sel ? t.accent : t.fg,
-                        m_options[i].label.c_str());
+        if (m_ui_mode == UiMode::XMB) {
+            const int pw = 440, px = W - pw, rh = 50, top = 130;
+            const int vis = std::min(n, (H - top - 50) / rh), first = first_of(vis);
+            m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 90 });
+            m_gfx->FillRect(px, 0, pw, H, SDL_Color{ 12, 12, 16, 220 });
+            m_gfx->FillRect(px, 0, 1, H, SDL_Color{ 255, 255, 255, 50 });
+            m_gfx->Text(FontSize::Small, px + 40, 72, SDL_Color{ 170, 170, 170, 255 },
+                        Ellipsize(OptionsTitle(), pw - 70, FontSize::Small).c_str());
+            for (int k = 0; k < vis; k++) {
+                const int i = first + k, y = top + k * rh;
+                const bool sel = i == cur;
+                if (sel) {
+                    m_gfx->FillRect(px + 20, y - 6, pw - 40, rh - 6, SDL_Color{ 255, 255, 255, 26 });
+                    m_gfx->FillRect(px + 20, y - 6, pw - 40, 1, SDL_Color{ 255, 255, 255, 80 });
+                    m_gfx->FillRect(px + 20, y + rh - 13, pw - 40, 1, SDL_Color{ 255, 255, 255, 80 });
+                }
+                m_gfx->Text(FontSize::Normal, px + 40, y, sel ? white : SDL_Color{ 150, 150, 150, 255 },
+                            Ellipsize(m_options[i].label, pw - 80, FontSize::Normal).c_str());
+            }
+            return;
         }
+        if (m_ui_mode == UiMode::Deck) {
+            const int pw = 440, px = W - pw, rh = 54, top = 106;
+            const int vis = std::min(n, (H - top - 50) / rh), first = first_of(vis);
+            m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 150 });
+            m_gfx->DrawSceneBlurred(px, 0, pw, H, 10);
+            m_gfx->FillRect(px, 0, pw, H, WithAlpha(t.bg_top, 205));
+            m_gfx->FillRect(px - 2, 0, 2, H, WithAlpha(t.accent, 120));
+            m_gfx->Text(FontSize::Large, px + 34, 34, t.title,
+                        Ellipsize(OptionsTitle(), pw - 60, FontSize::Large).c_str());
+            for (int k = 0; k < vis; k++) {
+                const int i = first + k, y = top + k * rh;
+                const bool sel = i == cur;
+                if (sel) {
+                    m_gfx->FillRect(px, y - 6, pw, rh - 4, WithAlpha(t.accent, 60));
+                    m_gfx->FillRect(px, y - 6, 4, rh - 4, t.accent);
+                }
+                m_gfx->Text(FontSize::Normal, px + 34, y, sel ? t.title : t.fg,
+                            Ellipsize(m_options[i].label, pw - 60, FontSize::Normal).c_str());
+            }
+            return;
+        }
+        const int rh = 52, pw = 600;
+        const int vis = std::min(n, (H - 200) / rh), first = first_of(vis);
+        const int ph = 80 + vis * rh + 16, px = (W - pw) / 2, py = (H - ph) / 2;
+        const SDL_Color fill{ (Uint8)((t.bg_top.r + t.bg_bottom.r) / 2), (Uint8)((t.bg_top.g + t.bg_bottom.g) / 2),
+                              (Uint8)((t.bg_top.b + t.bg_bottom.b) / 2), 248 };
+        m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 150 });
+        PanelCard((float)px, (float)py, (float)pw, (float)ph, 16.0f, 24.0f, fill);
+        PanelCard(px + 20.0f, py + 24.0f, 5.0f, 32.0f, 2.5f, 0.0f, t.accent);
+        m_gfx->Text(FontSize::Normal, px + 38, py + 22, t.title,
+                    Ellipsize(OptionsTitle(), pw - 70, FontSize::Normal).c_str());
+        for (int k = 0; k < vis; k++) {
+            const int i = first + k, y = py + 80 + k * rh;
+            const bool sel = i == cur;
+            if (sel) PanelCard(px + 14.0f, y - 4.0f, pw - 28.0f, rh - 6.0f, 10.0f, 0.0f, WithAlpha(t.accent, 70));
+            m_gfx->Text(FontSize::Normal, px + 38, y + 4, sel ? t.title : t.fg,
+                        Ellipsize(m_options[i].label, pw - 76, FontSize::Normal).c_str());
+        }
+    }
+    void Menu::DrawStatusToast() {
+        if (m_status[0] == '\0') return;
+        const u64 now = armGetSystemTick(), freq = armGetSystemTickFreq();
+        const float e = (float)(now - m_status_tick) / (float)freq, left = (float)m_status_secs - e;
+        if (left <= 0.0f) { m_status[0] = '\0'; return; }
+        auto ease = [](float v) { v = std::clamp(v, 0.0f, 1.0f); return 1.0f - (1.0f - v) * (1.0f - v) * (1.0f - v); };
+        const Uint8 a = (Uint8)(255 * std::min(1.0f, left / 0.4f));
+        const int W = gfx::Gfx::Width, H = gfx::Gfx::Height;
+        const Theme &t = m_theme.Current();
+        const int tw = m_gfx->TextWidth(FontSize::Small, m_status);
+
+        if (m_ui_mode == UiMode::Metro || XboxOld()) {
+            // The achievement pill: an accent disc and the words beside it.
+            const float h = 64.0f, pw = std::min((float)W - 80.0f, h + 30.0f + (float)tw);
+            const float px = (W - pw) / 2.0f, py = H - 150.0f + (1.0f - ease(e / 0.25f)) * 40.0f;
+            PanelCard(px, py, pw, h, h / 2, 16.0f, SDL_Color{ 38, 38, 40, 240 }, a);
+            PanelCard(px + 8, py + 8, h - 16, h - 16, (h - 16) / 2, 0.0f,
+                      XboxOld() ? SDL_Color{ 104, 176, 38, 255 } : m_mt_accent, a);
+            m_gfx->Text(FontSize::Small, (int)(px + h + 6), (int)py + 18, SDL_Color{ 255, 255, 255, a },
+                        Ellipsize(m_status, (int)(pw - h - 24), FontSize::Small).c_str());
+            return;
+        }
+        if (m_ui_mode == UiMode::XMB) {   // the PS3's smoked box, in from the right
+            const int bw = std::min(W - 80, std::max(320, tw + 40)), bh = 54;
+            const float x = W - bw - 30 + (1.0f - ease(e / 0.3f)) * (bw + 40), y = 40;
+            PanelCard(x, y, (float)bw, (float)bh, 6.0f, 10.0f, SDL_Color{ 20, 20, 24, 215 }, a);
+            m_gfx->FillRect((int)x + 6, (int)y, bw - 12, 1, SDL_Color{ 255, 255, 255, (Uint8)(60 * a / 255) });
+            m_gfx->Text(FontSize::Small, (int)x + 20, (int)y + 12, SDL_Color{ 255, 255, 255, a },
+                        Ellipsize(m_status, bw - 40, FontSize::Small).c_str());
+            return;
+        }
+        if (m_ui_mode == UiMode::Deck) {  // frosted, up from the bottom right
+            const int bw = std::min(W - 80, std::max(320, tw + 50)), bh = 58;
+            const int x = W - bw - 24, y = (int)(H - bh - 80 + (1.0f - ease(e / 0.3f)) * (bh + 90));
+            m_gfx->DrawSceneBlurred(x, y, bw, bh, 10, a);
+            m_gfx->FillRect(x, y, bw, bh, WithAlpha(t.bg_top, (Uint8)(215 * a / 255)));
+            m_gfx->FillRect(x, y, 4, bh, WithAlpha(t.accent, a));
+            m_gfx->Text(FontSize::Small, x + 22, y + 14, WithAlpha(t.title, a),
+                        Ellipsize(m_status, bw - 40, FontSize::Small).c_str());
+            return;
+        }
+        // A card in the theme's colours, dropping in at the top right.
+        const int bw = std::min(W - 80, std::max(320, tw + 60)), bh = 60;
+        const float x = W - bw - 24, y = 20 - (1.0f - ease(e / 0.3f)) * (bh + 40);
+        const SDL_Color fill{ (Uint8)((t.bg_top.r + t.bg_bottom.r) / 2), (Uint8)((t.bg_top.g + t.bg_bottom.g) / 2),
+                              (Uint8)((t.bg_top.b + t.bg_bottom.b) / 2), 245 };
+        PanelCard(x, y, (float)bw, (float)bh, 14.0f, 18.0f, fill, a);
+        PanelCard(x + 8, y + 12, 5, bh - 24, 2.5f, 0.0f, t.accent, a);
+        m_gfx->Text(FontSize::Small, (int)x + 26, (int)y + 15, WithAlpha(t.title, a),
+                    Ellipsize(m_status, bw - 44, FontSize::Small).c_str());
     }
 } // namespace sl::menu::ui

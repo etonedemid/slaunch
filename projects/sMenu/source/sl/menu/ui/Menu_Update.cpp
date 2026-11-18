@@ -265,14 +265,17 @@ namespace sl::menu::ui {
             const SDL_Color base = BladesColorOf(m_xmb_col);
             constexpr int cw = 560, ch = kBpHead + 140;
             m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 110 });   // on top of the pop-up's own dimming
-            const int x = BladesPopup(cw, ch, title), y = std::max(12, (H - ch) / 2);
-            MText(kSemi, 20, x + 24, y + kBpHead + 8, Scale(base, 0.24f), c_line);
+            const bool nx = m_ui_mode == UiMode::NXE;   // dark glass there, so light ink
+            const SDL_Color ink = nx ? SDL_Color{ 236, 240, 245, 255 } : Scale(base, 0.24f);
+            const SDL_Color ink2 = nx ? SDL_Color{ 176, 190, 204, 255 } : Scale(base, 0.36f);
+            const int x = nx ? NxePopup(cw, ch, title) : BladesPopup(cw, ch, title), y = std::max(12, (H - ch) / 2);
+            MText(kSemi, 20, x + 24, y + kBpHead + 8, ink, c_line);
             const int bx = x + 24, by = y + kBpHead + 48, bw = cw - 48;
             XbCard((float)bx, (float)by, (float)bw, 20.0f, 10.0f, 4.0f, SDL_Color{ 250, 250, 250, 255 });
             bar(bx + 2, by + 2, bw - 4, 16, SDL_Color{ 0, 0, 0, 0 }, SDL_Color{ 104, 176, 38, 255 }, 8.0f);
             XbCard(bx + 4.0f, by + 3.0f, bw - 8.0f, 6.0f, 3.0f, 0.0f, SDL_Color{ 255, 255, 255, 70 });   // gloss
-            MText(kSemi, 17, bx, by + 32, Scale(base, 0.36f), c_sub);
-            if (pct >= 0) MText(kSemi, 17, bx + bw - MWidth(kSemi, 17, pcts), by + 32, Scale(base, 0.36f), pcts);
+            MText(kSemi, 17, bx, by + 32, ink2, c_sub);
+            if (pct >= 0) MText(kSemi, 17, bx + bw - MWidth(kSemi, 17, pcts), by + 32, ink2, pcts);
             hints();
             return;
         }
@@ -303,18 +306,6 @@ namespace sl::menu::ui {
                 m_gfx->FillRect(tx, ty + th - 40, tw, 40, SDL_Color{ 0, 0, 0, 150 });
                 m_gfx->Text(FontSize::Small, tx + 10, ty + th - 34, kWhite, c_line);
                 if (!sub.empty()) m_gfx->TextCentered(FontSize::Small, W / 2, ty + th + 20, t.dim, c_sub);
-                break;
-            }
-            case UiMode::Cover: {
-                // The one big cover: the amount on it, the name and a counter under it.
-                m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, kDim });
-                const int s = 300, x = (W - s) / 2, y = 112;
-                card((float)x, (float)y, (float)s, (float)s, 26.0f, 24.0f, Scale(t.accent, 0.5f));
-                m_gfx->TextCentered(FontSize::Title, W / 2, y + s / 2 - 34, kWhite, pct >= 0 ? pcts : "...");
-                bar(x + 40, y + s - 50, s - 80, 6, SDL_Color{ 255, 255, 255, 60 }, kWhite, 3.0f);
-                m_gfx->TextCentered(FontSize::Large, W / 2, y + s + 28, t.accent, c_title);
-                m_gfx->TextCentered(FontSize::Small, W / 2, y + s + 78, t.dim, c_line);
-                if (!sub.empty()) m_gfx->TextCentered(FontSize::Small, W / 2, y + s + 108, t.dim, c_sub);
                 break;
             }
             case UiMode::Shelf: {

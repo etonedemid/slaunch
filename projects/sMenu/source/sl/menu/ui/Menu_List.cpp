@@ -265,6 +265,8 @@ namespace sl::menu::ui {
                 struct stat st {};
                 bool found = false;
                 for (const char *suffix : { "_s0.jpg", "_hero.jpg" }) {
+                    const std::string custom = CustomArt(it.app_id, suffix[1] == 's' ? "shot1" : "hero");
+                    if (!custom.empty()) { snprintf(m_bdj_path, sizeof(m_bdj_path), "%s", custom.c_str()); found = true; break; }
                     snprintf(m_bdj_path, sizeof(m_bdj_path), "sdmc:/slaunch/covers/%016llX%s",
                              (unsigned long long)it.app_id, suffix);
                     if (stat(m_bdj_path, &st) == 0) { found = true; break; }

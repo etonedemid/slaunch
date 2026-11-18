@@ -259,6 +259,9 @@ namespace sl::menu::gfx {
         // a shader fails to build, or sdmc:/slaunch/config/no_gpu_fx exists -
         // callers keep their rect-drawn version for exactly that case.
         int  FxProgram(const char *vs, const char *fs);
+        // A background shader file, base path without the extension: GL reads
+        // base.frag, deko3d base.dksh (scripts/bg-shader.py). -1 = none / broken.
+        int  FxProgramFile(const char *base);
         bool FxBegin(int prog);
         void FxSet(const char *name, float a);
         void FxSet(const char *name, float a, float b, float c, float d);

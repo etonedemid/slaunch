@@ -33,6 +33,10 @@ namespace sl::menu::net {
     // Returns true on HTTP 2xx; a failed/partial download leaves no file.
     // `now` / `total`, when given, follow the transfer in bytes (total stays
     // 0 until the server says how big it is) - for progress bars.
+    // false for a JPEG or PNG cut short before its end marker (libjpeg's error
+    // path crashes the menu on the console); anything else passes.
+    bool ImageLooksWhole(const char *path);
+
     bool Download(const char *url, const char *path, long timeout_s = 15,
                   std::atomic<uint64_t> *now = nullptr, std::atomic<uint64_t> *total = nullptr);
 

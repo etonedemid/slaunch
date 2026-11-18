@@ -7,10 +7,10 @@
 
 // The loader's exports (loader/src/qext.hpp), resolved when the menu is loaded.
 extern "C" {
-    int    qext_heap_setup(unsigned total_mb, unsigned small_mb);   // scripts/qext/loader.patch
-    unsigned long qext_arena_free_bytes(void);                      // scripts/qext/loader.patch
-    unsigned long qext_arena_size(void);                            // scripts/qext/loader.patch
-    unsigned qext_heap_release(FILE *also);  // scripts/qext/loader.patch
+    int    qext_heap_set_size(unsigned size_mb);
+    unsigned long qext_arena_free_bytes(void);
+    unsigned long qext_arena_size(void);
+    unsigned qext_heap_release(void);
     int    qext_album_refresh(void);
     u64    qext_suspended_title(void);
     int    qext_game_running(void);

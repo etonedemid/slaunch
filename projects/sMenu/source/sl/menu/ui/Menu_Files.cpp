@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -101,12 +102,89 @@ namespace sl::menu::ui {
     void Menu::OpenFileManager() {
         m_screen = Screen::Files;
         m_fm_pick = false;
+        m_fm_art = nullptr;
         if (m_fm_path.empty()) m_fm_path = "sdmc:/";
         m_fm_cursor = 0;
         m_fm_scroll = 0.0f;
         m_fm_menu_open = false;
         FmScan();
     }
+    // ---- a game's own art (X > Customize > ... from file) ---------------------
+    void Menu::PickArtFile(int kind) {
+        if (kind < 0 || kind >= kArtKindN || m_cursor < 0 || m_cursor >= (int)m_items.size()) return;
+        m_fm_art      = kArtKinds[kind].file;
+        m_fm_art_id   = m_items[m_cursor].app_id;
+        m_fm_art_back = m_screen;
+        m_fm_pick = false;
+        m_fm_menu_open = false;
+        m_options_open = false;
+        m_options_sub  = Sub_None;
+        FmGo(m_fm_path.empty() ? std::string("sdmc:/") : m_fm_path, std::string());   // where Files was last
+        m_screen = Screen::Files;
+    }
+    // Copied, not linked: the picture can be moved or deleted afterwards, and
+    // custom/ is the one place nothing else in the menu writes to.
+    void Menu::ApplyArtFile(const std::string &src) {
+        const u64 id = m_fm_art_id;
+        const char *kind = m_fm_art;
+        if (!kind || !id) return;
+        if (!net::ImageLooksWhole(src.c_str())) { SetStatus("That picture is damaged"); return; }
+        std::string ext = strrchr(src.c_str(), '.') + 1;
+        for (char &c : ext) c = (char)tolower((unsigned char)c);
+        if (ext == "jpeg") ext = "jpg";
+        char dir[64], dst[96], p[96];
+        snprintf(dir, sizeof(dir), "%s/%016llX", kCustomArtDir, (unsigned long long)id);
+        snprintf(dst, sizeof(dst), "%s/%s.%s", dir, kind, ext.c_str());
+        if (src != dst) {
+            mkdir(kCustomArtDir, 0777);
+            mkdir(dir, 0777);
+            for (const char *e : kCustomArtExts) {   // the picture it replaces, whatever its type
+                snprintf(p, sizeof(p), "%s/%s.%s", dir, kind, e);
+                remove(p);
+            }
+            bool ok = false;
+            if (FILE *in = fopen(src.c_str(), "rb")) {
+                if (FILE *out = fopen(dst, "wb")) {
+                    static char buf[64 * 1024];
+                    size_t r;
+                    ok = true;
+                    while (ok && (r = fread(buf, 1, sizeof(buf), in)) > 0) ok = fwrite(buf, 1, r, out) == r;
+                    ok = (fclose(out) == 0) && ok;
+                }
+                fclose(in);
+            }
+            if (!ok) { remove(dst); SetStatus("Could not copy the picture"); return; }
+            g_custom_art_any = 1;
+        }
+        DropArtFor(id);
+        m_fm_art = nullptr;
+        m_screen = m_fm_art_back;
+        SetStatus("Custom art set");
+    }
+    void Menu::DropArtFor(u64 id) {
+        auto drop = [&](std::unordered_map<u64, SDL_Texture *> &m) {
+            auto it = m.find(id);
+            if (it == m.end()) return;
+            if (it->second) m_gfx->FreeImage(it->second);
+            m.erase(it);
+        };
+        drop(m_covers);
+        drop(m_game_wraps);
+        drop(m_hero_art);
+        auto g = m_shots.find(id);
+        if (g != m_shots.end()) {
+            if (g->second.a) m_gfx->FreeImage(g->second.a);
+            if (g->second.b) m_gfx->FreeImage(g->second.b);
+            m_shots.erase(g);
+        }
+        m_tdb_front.erase(id);
+        m_bd_noshot.erase(id);
+        m_bd_key.clear();                                  // the background looks again
+        m_icons.Drop(id);
+        for (auto &kv : m_folder_art) kv.second.have = 0;  // folder faces use the icons
+        m_art_epoch++;                                     // in-flight loads are stale
+    }
+
     // Enter a folder, or go up to `path` keeping the cursor on where we came from.
     void Menu::FmGo(const std::string &path, const std::string &select) {
         m_fm_path = path;
@@ -343,6 +421,15 @@ namespace sl::menu::ui {
             return Action::None;
         }
         const int n = (int)m_fm_list.size();
+        if (m_fm_art) {                                  // choosing a game's picture
+            if (b == Btn::X) return Action::None;
+            if (b == Btn::B && m_fm_path == "sdmc:/") { m_fm_art = nullptr; m_screen = m_fm_art_back; return Action::None; }
+            if (b == Btn::A && n > 0 && !m_fm_list[m_fm_cursor].dir) {
+                if (IsImage(m_fm_list[m_fm_cursor].name)) ApplyArtFile(Join(m_fm_path, m_fm_list[m_fm_cursor].name));
+                else SetStatus("Choose a PNG, JPEG or BMP picture");
+                return Action::None;
+            }
+        }
 #ifdef SL_QEXT
         if (m_fm_pick) {                                 // choosing a file for Discord
             if (b == Btn::X) return Action::None;
@@ -406,7 +493,7 @@ namespace sl::menu::ui {
             return;
         }
 
-        DrawTopBar(m_fm_pick ? "Send a file" : "Files");
+        DrawTopBar(m_fm_art ? "Choose a picture" : m_fm_pick ? "Send a file" : "Files");
         // Where we are, trimmed from the left so the end of a long path shows.
         {
             std::string shown = m_fm_path;
@@ -511,7 +598,7 @@ namespace sl::menu::ui {
 
         if (m_fm_menu_open)
             DrawHint({ {{"up","down"}, "Choose"}, {{"a"}, "Confirm"}, {{"b"}, "Cancel"} });
-        else if (m_fm_pick)
+        else if (m_fm_pick || m_fm_art)
             DrawStatusHint({ {{"a"}, "Choose"}, {{"b"}, "Back"}, {{"l","r"}, "Page"} });
         else
             DrawStatusHint({ {{"a"}, "Open"}, {{"b"}, "Back"}, {{"x"}, "Actions"},

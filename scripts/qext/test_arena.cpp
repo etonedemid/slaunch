@@ -1,5 +1,5 @@
-// g++ -std=c++17 -fsanitize=address,undefined -I ~/qlaunch-ext/loader/src scripts/qext/test_arena.cpp -o /tmp/ta && /tmp/ta
-#include "arena_core.h"
+// g++ -std=c++17 -fsanitize=address,undefined -I ~/qlaunch-ext/loader/src scripts/qext/test_arena.cpp ~/qlaunch-ext/loader/src/arena.cpp -o /tmp/ta && /tmp/ta
+#include "arena.hpp"
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

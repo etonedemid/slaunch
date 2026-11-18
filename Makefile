@@ -67,9 +67,17 @@ assets: hbloader
 	@cp -f assets/previews/*.jpg SdOut/slaunch/previews/ 2>/dev/null || true
 	@mkdir -p SdOut/slaunch/skins/blades SdOut/slaunch/skins/nxe
 	@cp -f assets/skins/README.txt SdOut/slaunch/skins/
+	@cp -rf assets/skins/nxe/dashboard SdOut/slaunch/skins/nxe/
+	@# Background shader files, with the console's compiled copies (bg-shader.py).
+	@mkdir -p SdOut/slaunch/shaders
+	@cp -f assets/shaders/*.frag assets/shaders/README.txt SdOut/slaunch/shaders/
+	@python3 projects/sMenu/scripts/bg-shader.py -o SdOut/slaunch/shaders assets/shaders/*.frag >/dev/null
 	@# The Blades layout's baked blades and lighting (scripts/gen-blades-art.py).
 	@mkdir -p SdOut/slaunch/ui/blades
 	@cp -f assets/UI/blades/*.png SdOut/slaunch/ui/blades/
+	@# ...and NXE's (scripts/gen-nxe-art.py).
+	@mkdir -p SdOut/slaunch/ui/nxe
+	@cp -f assets/UI/nxe/*.png SdOut/slaunch/ui/nxe/
 	@# Black/white icons for the system menu entries (List + Grid modes).
 	@mkdir -p SdOut/slaunch/icons
 	@cp -f assets/theming.png assets/controllers.png assets/album.png assets/user.png \

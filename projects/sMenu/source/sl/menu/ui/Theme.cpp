@@ -45,6 +45,50 @@ namespace sl::menu::ui {
         // backgrounds had colours of their own.
         for (auto &b : m_builtin) { b.fx_a = b.accent; b.fx_b = b.title; }
 
+        // PS3 Green - the PS3's olive-green XMB with its lit wave across the
+        // middle. Meant for XMB in its PS3 style; looks fine in the others too.
+        m_builtin[5] = { "PS3 Green",
+            C(122, 150, 54), C(58, 86, 22), C(245, 248, 238), C(255, 255, 255),
+            C(214, 228, 190), C(255, 255, 255), "" };
+        m_builtin[5].background_style = BackgroundStyle_Wave;
+        m_builtin[5].fx_a = C(236, 244, 206);
+        m_builtin[5].fx_b = C(255, 255, 255);
+        m_builtin[5].fx[BackgroundStyle_RibbonHD].y = 560;   // across the middle, under the bar
+        m_builtin[5].fx[BackgroundStyle_Wave].y = 470;
+
+        // The showcase set: each one built around a moving background, its
+        // text and accent picked to sit on that background.
+        auto add = [&](int i, const char *name, SDL_Color top, SDL_Color bot, SDL_Color fg, SDL_Color accent,
+                       SDL_Color dim, SDL_Color title, int style, SDL_Color fa, SDL_Color fb) {
+            m_builtin[i] = { "", top, bot, fg, accent, dim, title, "" };
+            snprintf(m_builtin[i].name, sizeof(m_builtin[i].name), "%s", name);
+            m_builtin[i].background_style = style;
+            m_builtin[i].fx_a = fa;
+            m_builtin[i].fx_b = fb;
+        };
+        // Aurora - a polar night, green and violet curtains overhead.
+        add(6, "Aurora", C(6, 16, 30), C(3, 30, 40), C(232, 244, 242), C(110, 240, 196),
+            C(140, 172, 176), C(196, 255, 232), BackgroundStyle_Aurora, C(70, 230, 170), C(150, 110, 255));
+        m_builtin[6].fx[BackgroundStyle_Aurora] = { 5, 9, 26, 12, 9, 560, 50, 50 };
+        // Synthwave - a neon grid running to a sunset.
+        add(7, "Synthwave", C(30, 8, 52), C(92, 20, 86), C(250, 236, 248), C(255, 120, 196),
+            C(196, 150, 200), C(255, 196, 120), BackgroundStyle_Grid, C(255, 70, 180), C(255, 170, 70));
+        // Deep Sea - three slow currents of light low in deep water.
+        add(8, "Deep Sea", C(4, 34, 62), C(2, 12, 30), C(226, 242, 252), C(96, 206, 255),
+            C(124, 162, 190), C(176, 232, 255), BackgroundStyle_Ribbon, C(60, 170, 240), C(170, 230, 255));
+        m_builtin[8].fx[BackgroundStyle_Ribbon] = { 3, 3, 26, 5, 3, 590, 50, 50 };
+        // Nebula - a slow star field over violet dust.
+        add(9, "Nebula", C(20, 10, 42), C(6, 4, 16), C(238, 232, 252), C(186, 150, 255),
+            C(150, 136, 186), C(226, 206, 255), BackgroundStyle_Stars, C(236, 220, 255), C(150, 110, 255));
+        // Rose Gold - a fine lit ribbon on warm dusk.
+        add(10, "Rose Gold", C(58, 28, 40), C(20, 10, 18), C(252, 238, 234), C(255, 186, 160),
+            C(196, 158, 156), C(255, 214, 196), BackgroundStyle_RibbonHD, C(255, 196, 176), C(255, 136, 150));
+        m_builtin[10].fx[BackgroundStyle_RibbonHD] = { 1, 4, 30, 3, 3, 600, 50, 50 };
+        // Midnight Wave - the cross-media bar's sheets, in deep blue.
+        add(11, "Midnight Wave", C(26, 50, 128), C(6, 12, 46), C(240, 244, 255), C(255, 255, 255),
+            C(170, 186, 226), C(255, 255, 255), BackgroundStyle_Wave, C(196, 214, 255), C(255, 255, 255));
+        m_builtin[11].fx[BackgroundStyle_Wave].y = 470;
+
         // No custom themes exist until the user creates one.
         m_custom.clear();
     }
@@ -111,6 +155,7 @@ namespace sl::menu::ui {
         if (!fp) return;
 
         int want_current = m_current;
+        int saved_builtins = 5;   // files from before "builtins" was written had 5
         bool seen_fx_a = false, seen_fx_b = false;
         char line[160];
         while (fgets(line, sizeof(line), fp)) {
@@ -122,6 +167,7 @@ namespace sl::menu::ui {
             const char *val = eq + 1;
 
             if (strcmp(key, "current") == 0) { want_current = atoi(val); continue; }
+            if (strcmp(key, "builtins") == 0) { saved_builtins = atoi(val); continue; }
             if (strcmp(key, "custom_count") == 0) {
                 int n = atoi(val);
                 if (n < 0) n = 0; if (n > 64) n = 64;
@@ -170,6 +216,7 @@ namespace sl::menu::ui {
                     int a = atoi(val);
                     c.icon_bg_alpha = (a < 0) ? 0 : (a > 255 ? 255 : a);
                 }
+                else if (!strcmp(field, "shader")) { strncpy(c.shader, val, sizeof(c.shader) - 1); c.shader[sizeof(c.shader) - 1] = '\0'; }
                 else if (!strcmp(field, "wallpaper")) { strncpy(c.wallpaper, val, sizeof(c.wallpaper) - 1); c.wallpaper[sizeof(c.wallpaper) - 1] = '\0'; }
                 else if (!strcmp(field, "background_style")) c.background_style = atoi(val);
                 else if (!strcmp(field, "ribbon_lines")) {
@@ -218,6 +265,8 @@ namespace sl::menu::ui {
             if (!seen_fx_a) c.fx_a = c.accent;
             if (!seen_fx_b) c.fx_b = c.title;
         }
+        // A custom theme keeps its place when built-ins are added before it.
+        if (want_current >= saved_builtins) want_current += BuiltinThemeCount - saved_builtins;
         Select(want_current);
         m_applied = m_current;
     }
@@ -230,6 +279,7 @@ namespace sl::menu::ui {
         FILE *fp = fopen(ThemeCfgPath().c_str(), "w");
         if (!fp) return;
         fprintf(fp, "current=%d\n", m_current);
+        fprintf(fp, "builtins=%d\n", BuiltinThemeCount);
         fprintf(fp, "custom_count=%d\n", (int)m_custom.size());
         for (int i = 0; i < (int)m_custom.size(); i++) {
             const Theme &c = m_custom[i];
@@ -249,6 +299,7 @@ namespace sl::menu::ui {
 
             fprintf(fp, "c%d_wallpaper=%s\n", i, c.wallpaper);
             fprintf(fp, "c%d_background_style=%d\n", i, c.background_style);
+            fprintf(fp, "c%d_shader=%s\n", i, c.shader);
             for (int st = 0; st < (int)BackgroundStyle_Count; st++) {
                 const Theme::FxParams &f = c.fx[st];
                 fprintf(fp, "c%d_fx%d=%d,%d,%d,%d,%d,%d,%d,%d\n", i, st,

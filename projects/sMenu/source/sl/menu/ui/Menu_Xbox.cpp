@@ -58,6 +58,8 @@ namespace sl::menu::ui {
         constexpr SDL_Color kBlSilver{ 226, 229, 233, 255 };
         // The baked blades and lighting sLaunch ships (scripts/gen-blades-art.py).
         const char *const kXbArt = "sdmc:/slaunch/ui/blades/";
+        // ...and NXE's (scripts/gen-nxe-art.py).
+        const char *const kNxArt = "sdmc:/slaunch/ui/nxe/";
 
         struct BladeGeo {
             int   n = 1;
@@ -126,45 +128,60 @@ namespace sl::menu::ui {
         }
 
         // ---- NXE ------------------------------------------------------------
-        constexpr int   kNxX      = 110;
-        constexpr int   kNxSize   = 290;
-        constexpr int   kNxTop    = 208;
-        constexpr int   kNxTitleY = 150;    // centre line of the open channel's name
-        constexpr int   kNxNextY  = 606;    // ...and of the one below
-        constexpr int   kNxPeek   = 428;    // how far down the next channel's row waits
-        constexpr int   kNxPitch  = 162;    // finger travel per panel
+        // Measured off the 2008 dashboard at 1280x720: the front panel is the
+        // dashboard's own 420x320 at (96, 248), and each one behind it is set
+        // against the right edge of the one before, smaller and a little lower.
+        constexpr int   kNxX      = 96;
+        constexpr int   kNxTitleY = 202;    // centre line of the open channel's name
+        constexpr int   kNxPitch  = 300;    // finger travel per panel
+        constexpr float kNxW[] = { 420, 310, 184, 124, 86, 62, 46, 34, 26, 20 };
+        constexpr float kNxH[] = { 320, 238, 186, 156, 134, 118, 106, 96, 88, 82 };
+        constexpr float kNxCy  = 407.0f;    // the front panel's centre line
+        constexpr int   kNxN   = 10;
 
-        // Panel d places from the front one: where it sits, how big, how lit.
-        void NxPlace(float d, float &x, float &cy, float &size, float &a, float &lit) {
+        // Panel d places from the front one: left edge, top, size, alpha, light.
+        void NxPlace(float d, float &x, float &y, float &w, float &h, float &a, float &lit) {
             if (d >= 0.0f) {
-                const float sc = powf(0.8f, d);
-                size = kNxSize * sc;
-                x    = kNxX + 2.8f * kNxSize * (1.0f - sc);
-                cy   = kNxTop + kNxSize / 2.0f - 46.0f * (1.0f - sc);
-                a    = std::clamp((9.0f - d) / 2.0f, 0.0f, 1.0f);
-                lit  = std::clamp(1.0f - 0.12f * d, 0.3f, 1.0f);
-            } else {   // on its way out, toward the viewer
-                size = kNxSize * (1.0f - 0.25f * d);
-                x    = kNxX + d * (kNxSize + 120.0f);
-                cy   = kNxTop + kNxSize / 2.0f - 20.0f * d;
-                a    = std::clamp(1.0f + d * 1.4f, 0.0f, 1.0f);
-                lit  = 1.0f;
+                const int i = std::min((int)d, kNxN - 2);
+                const float f = std::min(d - (float)i, 1.0f);
+                w = kNxW[i] + (kNxW[i + 1] - kNxW[i]) * f;
+                h = kNxH[i] + (kNxH[i + 1] - kNxH[i]) * f;
+                // The left edge: the front one's, plus every whole panel ahead of this one.
+                x = (float)kNxX;
+                for (int k = 0; k < i; k++) x += kNxW[k];
+                x += kNxW[i] * f;
+                const float cy = kNxCy - (kNxH[0] - h) * 0.07f;
+                y = cy - h / 2.0f;
+                a = std::clamp((float)(kNxN - 1) - d, 0.0f, 1.0f);
+                lit = std::clamp(1.0f - 0.05f * d, 0.6f, 1.0f);
+            } else {   // folding away to the left
+                w = kNxW[0]; h = kNxH[0];
+                x = kNxX + d * (kNxW[0] + 40.0f);
+                y = kNxCy - h / 2.0f;
+                a = std::clamp(1.0f + d * 1.6f, 0.0f, 1.0f);
+                lit = 1.0f;
             }
         }
-        // A channel's row, rd channels below the open one: how far down, how lit, how solid.
-        void NxRow(float rd, float &yoff, float &lit, float &a) {
-            if (rd <= 0.0f)      { yoff = rd * 240.0f; lit = 1.0f; a = std::clamp(1.0f + rd * 1.5f, 0.0f, 1.0f); }
-            else if (rd <= 1.0f) { yoff = kNxPeek * rd; lit = 1.0f - 0.6f * rd; a = 1.0f; }
-            else                 { yoff = kNxPeek + (rd - 1.0f) * 180.0f; lit = 0.4f; a = std::clamp(2.0f - rd, 0.0f, 1.0f); }
+        // A channel's row, rd channels from the open one: rows above rise and
+        // fade, the next one comes up from below.
+        void NxRow(float rd, float &yoff, float &a) {
+            yoff = rd * 260.0f;
+            a = std::clamp(1.0f - std::abs(rd) * 1.4f, 0.0f, 1.0f);
         }
+        // The names: the open channel large, the ones before it stacked above,
+        // smaller and fainter the further back; none below.
         float NxNameY(float d) {
-            if (d <= 0.0f) return kNxTitleY + d * 40.0f - (d < 0.0f ? std::min(1.0f, -d) * 12.0f : 0.0f);
-            if (d <= 1.0f) return kNxTitleY + (kNxNextY - kNxTitleY) * d;
-            return kNxNextY + (d - 1.0f) * 60.0f;
+            if (d >= 0.0f) return kNxTitleY + d * 50.0f;
+            const float u = -d;
+            return kNxTitleY - 43.0f * std::min(u, 1.0f) - 27.0f * std::max(0.0f, u - 1.0f);
         }
         float NxNameAlpha(float d) {
-            if (d <= 0.0f) return std::clamp(1.0f + d * 0.38f, 0.0f, 1.0f);
-            return std::clamp(1.0f - 0.45f * d, 0.0f, 1.0f) * std::clamp(2.0f - d, 0.0f, 1.0f);
+            if (d > 0.0f) return std::clamp(1.0f - d * 1.5f, 0.0f, 1.0f);
+            return std::clamp(1.0f + d * 0.22f, 0.0f, 1.0f);
+        }
+        int NxNameSize(float d) {
+            const float u = std::abs(d);
+            return (int)lroundf(u < 1.0f ? 40.0f - 12.0f * u : std::max(16.0f, 28.0f - 4.0f * (u - 1.0f)));
         }
     } // namespace
 
@@ -375,6 +392,25 @@ namespace sl::menu::ui {
                 if (fetch("fond1.png", d) && CutBladeTile(d, out + "/spine.png", out + "/spine_right.png")) wrote++;
             } else {
                 for (const Pick &pk : kPickNxe) take(pk);
+                // Other dashboards' packages (FreeStyle Dash and the like) name
+                // their pictures their own way: the biggest picture whose name
+                // has the word in it, for whatever the exact names missed.
+                auto takeLike = [&](const char *dst, std::initializer_list<const char *> words) {
+                    if (Exists(out + "/" + dst + ".png")) return;
+                    const std::string *best = nullptr;
+                    size_t best_n = 0;
+                    for (auto &kv : files) {
+                        const std::string &n = kv.first;
+                        if (n.size() < 5 || n.compare(n.size() - 4, 4, ".png")) continue;
+                        bool hit = false;
+                        for (const char *w : words) hit = hit || n.find(w) != std::string::npos;
+                        if (hit && kv.second.second.second > best_n) { best = &n; best_n = kv.second.second.second; }
+                    }
+                    if (best) { const Pick pk{ dst, { best->c_str() } }; take(pk); }
+                };
+                takeLike("background", { "background", "wallpaper", "bg" });
+                takeLike("panel", { "panel", "window", "box" });
+                takeLike("highlight", { "highlight", "select", "focus", "hover" });
             }
             const std::string ini = out + "/skin.ini";
             struct stat st {};
@@ -405,6 +441,10 @@ namespace sl::menu::ui {
         SDL_Texture *panel = nullptr, *highlight = nullptr, *card = nullptr, *detail = nullptr;
         SDL_Texture *frame = nullptr, *front = nullptr;     // NXE: over every panel / the front one
         SDL_Texture *btn[4] = {};                           // a b x y
+        SDL_Texture *tile = nullptr, *floor = nullptr;      // NXE: a panel's face, the stage floor's glow
+        std::map<std::string, SDL_Texture *> icons;         // NXE: icon_<name>, the skin's or sLaunch's (NxeIcon)
+        SDL_Texture *p_games = nullptr, *p_videos = nullptr, *p_music = nullptr, *p_photos = nullptr;    // NXE: panel faces
+        SDL_Texture *shadow = nullptr, *av_shadow = nullptr;   // NXE: right of a panel, under the account picture
         int b_panel = 16, b_highlight = 12, b_card = 12, b_frame = 12;   // nine-slice borders, px
         SDL_Color cat[6] = {};
         bool has_cat[6] = {};
@@ -449,11 +489,33 @@ namespace sl::menu::ui {
         s.dir = dir;
         // What sLaunch ships, for whatever the skin leaves alone.
         auto builtin = [&] {
-            if (m_ui_mode != UiMode::Blades) return;
             auto own = [&](const char *file) -> SDL_Texture * {
-                const std::string p = std::string(kXbArt) + file;
+                const std::string p = std::string(m_ui_mode == UiMode::NXE ? kNxArt : kXbArt) + file;
                 return Exists(p) ? m_gfx->LoadImage(p.c_str()) : nullptr;
             };
+            if (m_ui_mode == UiMode::NXE) {
+                if (!s.bg) s.bg = own("background.png");
+                if (!s.panel) {
+                    s.panel = own("panel.png");
+                    s.b_panel = 16;
+                    if (!s.has_list) { s.list_text = SDL_Color{ 236, 240, 245, 255 }; s.has_list = true; }
+                }
+                if (!s.highlight) {
+                    s.highlight = own("highlight.png");
+                    s.b_highlight = 16;
+                    if (!s.has_sel) { s.list_sel = SDL_Color{ 255, 255, 255, 255 }; s.has_sel = true; }
+                }
+                if (!s.tile) s.tile = own("tile.png");
+                // The game details' stars are Blades' (DrawBladesGameInfo).
+                auto blades = [&](const char *file) -> SDL_Texture * {
+                    const std::string p = std::string(kXbArt) + file;
+                    return Exists(p) ? m_gfx->LoadImage(p.c_str()) : nullptr;
+                };
+                if (!s.star) s.star = blades("star.png");
+                if (!s.star_off) s.star_off = blades("star_off.png");
+                return;
+            }
+            if (m_ui_mode != UiMode::Blades) return;
             bool theirs = s.spine != nullptr;
             for (SDL_Texture *t : s.cat_spine) theirs = theirs || t;
             if (!theirs) { s.spine = own("spine.png"); s.spine_r = own("spine_right.png"); }
@@ -489,6 +551,14 @@ namespace sl::menu::ui {
         s.detail = img("detail");
         s.frame = img("frame");
         s.front = img("front");
+        s.tile = img("tile");
+        s.floor = img("floor");
+        s.p_videos = img("panel_videos");
+        s.p_games = img("panel_games");
+        s.p_music = img("panel_music");
+        s.p_photos = img("panel_photos");
+        s.shadow = img("shadow");
+        s.av_shadow = img("avatar_shadow");
         const char *btn[4] = { "button_a", "button_b", "button_x", "button_y" };
         for (int i = 0; i < 4; i++) s.btn[i] = img(btn[i]);
         struct stat st {};
@@ -545,14 +615,36 @@ namespace sl::menu::ui {
         return s;
     }
 
+    // A panel's glyph, by name: the skin's icon_<name>, else the one sLaunch
+    // draws (scripts/gen-nxe-art.py). Loaded on first use; nullptr is kept too.
+    SDL_Texture *Menu::NxeIcon(const char *name) {
+        XboxSkin &s = Skin();
+        auto f = s.icons.find(name);
+        if (f != s.icons.end()) return f->second;
+        SDL_Texture *t = nullptr;
+        std::vector<std::string> paths;
+        if (!s.dir.empty())
+            for (const char *ext : { ".png", ".jpg" }) paths.push_back(s.dir + "/icon_" + name + ext);
+        paths.push_back(std::string(kNxArt) + "icon_" + name + ".png");
+        for (const std::string &p : paths) {
+            struct stat st {};
+            if (stat(p.c_str(), &st) == 0 && (t = m_gfx->LoadImage(p.c_str()))) break;
+        }
+        s.icons[name] = t;
+        return t;
+    }
+
     void Menu::XboxSkinDrop() {
         if (!m_xskin) return;
         XboxSkin &s = *m_xskin;
         std::vector<SDL_Texture *> all = { s.bg, s.face, s.spine, s.spine_r, s.light, s.light_w, s.panel, s.highlight, s.card,
-                                           s.detail, s.frame, s.front, s.info, s.star, s.star_off };
+                                           s.detail, s.frame, s.front, s.info, s.star, s.star_off,
+                                           s.tile, s.floor,
+                                           s.p_videos, s.p_games, s.p_music, s.p_photos, s.shadow, s.av_shadow };
         all.insert(all.end(), std::begin(s.cat_face), std::end(s.cat_face));
         all.insert(all.end(), std::begin(s.cat_spine), std::end(s.cat_spine));
         all.insert(all.end(), std::begin(s.btn), std::end(s.btn));
+        for (auto &kv : s.icons) all.push_back(kv.second);
         for (SDL_Texture *t : all) if (t) m_gfx->FreeImage(t);
         delete m_xskin;
         m_xskin = nullptr;
@@ -1232,8 +1324,7 @@ namespace sl::menu::ui {
         const SDL_Color base = BladesColorOf(m_xmb_col);
         constexpr int cw = 520;
         const int ch = kBpHead + n * kBpRowH + 10, y = std::max(12, (H - ch) / 2);
-        const int x = BladesPopup(cw, ch, (m_cursor >= 0 && m_cursor < (int)m_items.size())
-                                          ? m_items[m_cursor].name : std::string(T("Options")));
+        const int x = BladesPopup(cw, ch, OptionsTitle());
         for (int i = 0; i < n; i++) {
             const int ry = y + kBpHead + i * kBpRowH;
             const bool sel = i == m_options_cursor;
@@ -1286,6 +1377,167 @@ namespace sl::menu::ui {
     }
 
     // ---------------------------------------------------------------------------
+    // NXE, everywhere
+    // ---------------------------------------------------------------------------
+    // Every screen stands on NXE's backdrop, its name large at the top left as
+    // a channel's is, its list on a sheet of dark glass with the selection a
+    // bright bar. A skin replaces any of the pictures (skins/nxe/<name>).
+    namespace {
+        constexpr int kNxListY = 128, kNxRowH = 46, kNxRows = 10, kNxListW = 820, kNxHintY = 650;
+        constexpr SDL_Color kNxInk{ 246, 248, 246, 255 }, kNxDim{ 200, 206, 210, 255 };
+        float NxTop(float scroll, int count) {
+            return std::clamp(scroll - (kNxRows - 1) / 2.0f, 0.0f, (float)std::max(0, count - kNxRows));
+        }
+    }
+    bool Menu::NxeUi() const {
+        if (m_ui_mode != UiMode::NXE) return false;
+        switch (m_screen) {
+            case Screen::Oobe: case Screen::Welcome:
+            case Screen::Themes: case Screen::ThemeEditor: case Screen::ColorPicker:
+                return false;
+            default: return true;
+        }
+    }
+    void Menu::NxeTheme(Theme &t) {
+        const XboxSkin &sk = Skin();
+        t.bg_top    = SDL_Color{ 120, 170, 40, 255 };
+        t.bg_bottom = SDL_Color{ 200, 204, 206, 255 };
+        t.fg = t.title = t.icon_fg = sk.has_text ? sk.text : kNxInk;
+        t.dim    = sk.has_dim ? sk.dim : SDL_Color{ 236, 240, 236, 255 };
+        t.accent = SDL_Color{ 150, 210, 40, 255 };   // the 360's green
+    }
+    void Menu::DrawNxeFrame() {
+        const XboxSkin &sk = Skin();
+        if (sk.bg) m_gfx->DrawCover(sk.bg);
+        else m_gfx->GradientV(SDL_Color{ 120, 170, 40, 255 }, SDL_Color{ 200, 204, 206, 255 });
+        if (sk.floor) m_gfx->DrawImage(sk.floor, -160, 372, 1600, 75);   // the stage's lit edge
+    }
+    void Menu::DrawNxeHeader(const char *title) {
+        const XboxSkin &sk = Skin();
+        const SDL_Color ink = sk.has_text ? sk.text : kNxInk;
+        time_t now = time(nullptr);
+        struct tm tm_now;
+        localtime_r(&now, &tm_now);
+        char clock[16], batt[24];
+        strftime(clock, sizeof(clock), "%H:%M", &tm_now);
+        snprintf(batt, sizeof(batt), sys::Charging() ? "+%lu%%" : "%lu%%", (unsigned long)sys::BatteryPercent());
+        int x = W - 60 - MWidth(XF_Semi, 18, batt);
+        MText(XF_Semi, 18, x, 40, ink, batt);
+        x -= 20 + MWidth(XF_Semi, 18, clock);
+        MText(XF_Semi, 18, x, 40, WithAlpha(ink, 205), clock);
+        DrawUsbTag(x - 20, 40);
+        if (title && *title)
+            MText(XF_Light, 44, kNxX, 34, ink, MFit(XF_Light, 44, title, x - 60 - kNxX).c_str());
+    }
+    void Menu::DrawCarouselNxe(const std::vector<std::string> &labels,
+                               const std::vector<std::string> &values, int cursor, float &scroll_pos) {
+        const XboxSkin &sk = Skin();
+        const int n = (int)labels.size();
+        scroll_pos += (cursor - scroll_pos) * 0.30f;
+        if (std::abs(cursor - scroll_pos) < 0.01f) scroll_pos = (float)cursor;
+        const int shown = std::min(n, kNxRows);
+        const int left = kNxX - 16, pw = kNxListW, ph = shown * kNxRowH + 16;
+        if (sk.panel) m_gfx->Draw9(sk.panel, left, kNxListY, pw, ph, sk.b_panel, kWhite);
+        else XbCard((float)left, (float)kNxListY, (float)pw, (float)ph, 12.0f, 0.0f, SDL_Color{ 16, 20, 26, 200 });
+        const bool marker = n > kNxRows;
+        const int rw = pw - (marker ? 12 : 0);
+        const float top = NxTop(scroll_pos, n);
+        const int y0 = kNxListY + 8, y1 = y0 + shown * kNxRowH;
+        const float by = std::clamp(y0 + (scroll_pos - top) * kNxRowH, (float)y0, (float)(y1 - kNxRowH));
+        if (sk.highlight) m_gfx->Draw9(sk.highlight, left + 6, (int)by + 2, rw - 12, kNxRowH - 4, sk.b_highlight, kWhite);
+        else XbCard(left + 6.0f, by + 2.0f, rw - 12.0f, kNxRowH - 4.0f, 8.0f, 6.0f, SDL_Color{ 236, 238, 240, 255 });
+        const SDL_Color plain = sk.has_list ? sk.list_text : kNxInk;
+        const SDL_Color lit = sk.has_sel ? sk.list_sel : kWhite;
+        for (int i = std::max(0, (int)top); i < n && i <= (int)top + kNxRows; i++) {
+            const float ry = y0 + ((float)i - top) * kNxRowH;
+            float vis = 1.0f;
+            if (ry < y0) vis = 1.0f - (y0 - ry) / kNxRowH;
+            if (ry + kNxRowH > y1) vis = std::min(vis, 1.0f - (ry + kNxRowH - y1) / kNxRowH);
+            if (vis <= 0.03f) continue;
+            const Uint8 a = (Uint8)(255.0f * vis);
+            const bool sel = i == cursor;
+            if (!sel && i + 1 != cursor && i + 1 < n)   // a hairline between rows, as NXE ruled its lists
+                m_gfx->FillRect(left + 14, (int)ry + kNxRowH - 1, rw - 28, 1, SDL_Color{ 255, 255, 255, (Uint8)(a * 40 / 255) });
+            const std::string &v = i < (int)values.size() ? values[i] : std::string();
+            const std::string vs = v.empty() ? v : MFit(XF_Semi, 18, v, rw / 2 - 24);
+            const int vw = vs.empty() ? 0 : MWidth(XF_Semi, 18, vs.c_str());
+            MText(XF_Semi, 21, left + 22, (int)ry + (kNxRowH - 29) / 2, WithAlpha(sel ? lit : plain, a),
+                  MFit(XF_Semi, 21, labels[i], rw - 44 - (vw ? vw + 24 : 0)).c_str());
+            if (vw) MText(XF_Semi, 18, left + rw - 22 - vw, (int)ry + (kNxRowH - 25) / 2,
+                          WithAlpha(sel ? lit : plain, (Uint8)(a * (sel ? 230 : 180) / 255)), vs.c_str());
+        }
+        if (marker) {
+            const int bh = kNxRows * kNxRowH, th = std::max(28, bh * kNxRows / n);
+            const int ty = y0 + (int)((bh - th) * (top / (float)(n - kNxRows)));
+            m_gfx->FillRect(left + pw - 9, y0, 3, bh, SDL_Color{ 255, 255, 255, 40 });
+            m_gfx->FillRect(left + pw - 9, ty, 3, th, SDL_Color{ 255, 255, 255, 200 });
+        }
+    }
+    int Menu::NxeListRowAt(int y, float scroll, int rows) const {
+        return (int)floorf(NxTop(scroll, rows) + (float)(y - (kNxListY + 8)) / (float)kNxRowH);
+    }
+    // Pop-ups: the screen dimmed, a sheet of glass in the middle, its title in
+    // the light face above a hairline.
+    int Menu::NxePopup(int cw, int ch, const std::string &title) {
+        const XboxSkin &sk = Skin();
+        const int x = (W - cw) / 2, y = std::max(12, (H - ch) / 2);
+        m_gfx->FillRect(0, 0, W, H, SDL_Color{ 0, 0, 0, 150 });
+        if (sk.panel) m_gfx->Draw9(sk.panel, x, y, cw, ch, sk.b_panel, kWhite);
+        else XbCard((float)x, (float)y, (float)cw, (float)ch, 12.0f, 20.0f, SDL_Color{ 16, 20, 26, 235 });
+        MText(XF_Light, 24, x + 20, y + 8, sk.has_list ? sk.list_text : kNxInk, MFit(XF_Light, 24, title, cw - 40).c_str());
+        m_gfx->FillRect(x + 16, y + 44, cw - 32, 1, SDL_Color{ 255, 255, 255, 50 });
+        return x;
+    }
+    void Menu::DrawNxeRow(int x, int y, int w, bool sel, const char *label) {
+        const XboxSkin &sk = Skin();
+        if (sel) {
+            if (sk.highlight) m_gfx->Draw9(sk.highlight, x + 6, y + 2, w - 12, kBpRowH - 4, sk.b_highlight, kWhite);
+            else XbCard(x + 6.0f, y + 2.0f, w - 12.0f, kBpRowH - 4.0f, 8.0f, 6.0f, SDL_Color{ 236, 238, 240, 255 });
+        }
+        const SDL_Color c = sel ? (sk.has_sel ? sk.list_sel : kWhite)
+                                : (sk.has_list ? sk.list_text : kNxInk);
+        MText(XF_Semi, 21, x + 22, y + (kBpRowH - 29) / 2, c, MFit(XF_Semi, 21, label, w - 44).c_str());
+    }
+    void Menu::DrawNxeOptions() {
+        const int n = (int)m_options.size();
+        constexpr int cw = 520;
+        const int ch = kBpHead + n * kBpRowH + 10, y = std::max(12, (H - ch) / 2);
+        const int x = NxePopup(cw, ch, OptionsTitle());
+        for (int i = 0; i < n; i++)
+            DrawNxeRow(x, y + kBpHead + i * kBpRowH, cw, i == m_options_cursor, m_options[i].label.c_str());
+    }
+    void Menu::DrawNxeDialog() {
+        const XboxSkin &sk = Skin();
+        constexpr int cw = 600;
+        std::vector<std::string> lines;
+        {
+            std::string line, word;
+            auto flush = [&]() {
+                if (word.empty()) return;
+                const std::string t = line.empty() ? word : line + " " + word;
+                if (!line.empty() && MWidth(XF_Semi, 19, t.c_str()) > cw - 48) { lines.push_back(line); line = word; }
+                else line = t;
+                word.clear();
+            };
+            for (char c : m_dialog_note) { if (c == ' ' || c == '\n') flush(); else word += c; }
+            flush();
+            if (!line.empty()) lines.push_back(line);
+        }
+        const int nopts = m_dialog == Dialog::CrashReport ? 1 : 2;
+        const int noteH = lines.empty() ? 0 : (int)lines.size() * 26 + 14;
+        const int ch = kBpHead + noteH + nopts * kBpRowH + 10, y = std::max(12, (H - ch) / 2);
+        const int x = NxePopup(cw, ch, m_dialog_title.empty() ? std::string(T("Close running application?"))
+                                                             : m_dialog_title);
+        int ty = y + kBpHead + 2;
+        const SDL_Color note = sk.has_dim ? sk.dim : kNxDim;
+        for (const std::string &l : lines) { MText(XF_Semi, 19, x + 24, ty, note, l.c_str()); ty += 26; }
+        const char *opts[2] = { T("Yes"), T("No") };
+        if (nopts == 1) opts[0] = T("OK");
+        for (int i = 0; i < nopts; i++)
+            DrawNxeRow(x, y + kBpHead + noteH + i * kBpRowH, cw, i == m_dialog_cursor, opts[i]);
+    }
+
+    // ---------------------------------------------------------------------------
     // Blades: the main screen
     // ---------------------------------------------------------------------------
     void Menu::DrawBladesGameInfo(const MenuItem &it, const GameInfo *gi, int x, int y, int w, int h, Uint8 A) {
@@ -1293,6 +1545,7 @@ namespace sl::menu::ui {
         const SDL_Color white = WithAlpha(kWhite, A), grey = WithAlpha(SDL_Color{ 165, 165, 165, 255 }, A);
         if (sk.detail)    m_gfx->Draw9(sk.detail, x, y, w, h, sk.b_panel, kWhite, A);
         else if (sk.info) m_gfx->DrawImage(sk.info, x, y, w, h, A);
+        else if (m_ui_mode == UiMode::NXE && sk.panel) m_gfx->Draw9(sk.panel, x, y, w, h, sk.b_panel, kWhite, A);
         else              XbCard((float)x, (float)y, (float)w, (float)h, 12.0f, 0.0f, SDL_Color{ 12, 12, 12, 235 }, A);
 
         // The picture in a pale frame, the name beside it, the stars under that.
@@ -1424,7 +1677,9 @@ namespace sl::menu::ui {
                 MText(XF_Semi, 17, gx + gw - 12 - MWidth(XF_Semi, 17, clock), gy + 4, WithAlpha(kWhite, A), clock);
                 // The gamer picture: the account's own, or a plain figure without one.
                 card(nullptr, gx + 10.0f, gy + 37.0f, 56.0f, 56.0f, 5.0f, 0.0f, Shade(base, 0.62f), A);
-                if (SDL_Texture *av = MetroAvatar())
+                if (SDL_Texture *mh = MiiRender(1))   // the Mii's head, as a gamer picture
+                    m_gfx->DrawImage(mh, gx + 10, gy + 37, 56, 56, A);
+                else if (SDL_Texture *av = MetroAvatar())
                     m_gfx->DrawImage(av, gx + 12, gy + 39, 52, 52, A);
                 else if (SDL_Texture *ic = SystemIcon(ItemKind::UserPage))
                     m_gfx->DrawImageTinted(ic, gx + 18, gy + 45, 40, 40, WithAlpha(kWhite, A));
@@ -1578,122 +1833,407 @@ namespace sl::menu::ui {
     // ---------------------------------------------------------------------------
     // NXE
     // ---------------------------------------------------------------------------
+    namespace {
+#ifndef SL_SIMULATOR
+        // A Switch Mii (CharInfo) as Mii Studio's 46 bytes: the same fields, in
+        // the order the studio keeps them, then obfuscated the studio's way -
+        // each byte 7 + (byte ^ the previous output), after a seed byte.
+        std::string MiiStudioHex(const u8 *c) {
+            const MiiCharInfo &m = *(const MiiCharInfo *)c;
+            const u8 v[46] = {
+                m.mii_facial_hair_color, m.mii_beard_style, m.mii_width, m.mii_eye_thickness, m.mii_eye_color,
+                m.mii_eye_angle, m.mii_eye_size, m.mii_eye_style, m.mii_eye_pos_x, m.mii_eye_pos_y,
+                m.mii_eyebrow_thickness, m.mii_eyebrow_color, m.mii_eyebrow_angle, m.mii_eyebrow_size,
+                m.mii_eyebrow_style, m.mii_eyebrow_pos_x, m.mii_eyebrow_pos_y,
+                m.mii_face_color, m.mii_makeup_style, m.mii_face_shape, m.mii_wrinkles_style,
+                m.mii_color, m.mii_sex,
+                m.mii_glasses_color, m.mii_glasses_size, m.mii_glasses_style, m.mii_glasses_pos,
+                m.mii_hair_color, m.mii_has_hair_flipped, m.mii_hair_style, m.mii_height,
+                m.mii_mole_size, m.mii_has_mole, m.mii_mole_pos_x, m.mii_mole_pos_y,
+                m.mii_mouth_thickness, m.mii_mouth_color, m.mii_mouth_size, m.mii_mouth_style, m.mii_mouth_pos,
+                m.mii_mustache_size, m.mii_mustache_style, m.mii_mustache_pos,
+                m.mii_nose_size, m.mii_nose_style, m.mii_nose_pos };
+            std::string hex = "00";
+            u8 prev = 0;
+            for (u8 b : v) {
+                prev = (u8)(7 + (b ^ prev));
+                char h[3];
+                snprintf(h, sizeof(h), "%02x", prev);
+                hex += h;
+            }
+            return hex;
+        }
+#endif
+
+        // The Mii the account's picture was made from, as studio data; "" when
+        // the picture is a character, or there is no Mii service.
+        std::string AccountMiiHex(AccountUid uid) {
+#ifdef SL_SIMULATOR
+            (void)uid;
+            return "000d142a303f434b717a7b84939ba6b2bbbec5cbc9d0e2ea010d15252b3250535960736f726870757f8289a0a7aeb1";
+#else
+            AccountProfile p;
+            AccountUserData ud{};
+            if (!accountUidIsValid(&uid) || R_FAILED(accountGetProfile(&p, uid))) return "";
+            const Result rc = accountProfileGet(&p, &ud, nullptr);
+            accountProfileClose(&p);
+            static const u8 kZero[16] = {};
+            if (R_FAILED(rc) || !memcmp(ud.miiID, kZero, 16)) return "";
+            std::string out;
+            if (R_FAILED(miiInitialize(MiiServiceType_System))) return "";
+            MiiDatabase db;
+            if (R_SUCCEEDED(miiOpenDatabase(&db, MiiSpecialKeyCode_Normal))) {
+                std::vector<MiiCharInfo> all(100);
+                s32 n = 0;
+                if (R_SUCCEEDED(miiDatabaseGet1(&db, MiiSourceFlag_Database, all.data(), (s32)all.size(), &n)))
+                    for (s32 i = 0; i < n && i < (s32)all.size() && out.empty(); i++)
+                        if (!memcmp(&all[i].create_id, ud.miiID, 16)) out = MiiStudioHex((const u8 *)&all[i]);
+                miiDatabaseClose(&db);
+            }
+            miiExit();
+            return out;
+#endif
+        }
+    }
+
+    void Menu::MiiTrampoline(void *self) {
+        Menu *m = (Menu *)self;
+        if (!net::Download(m->m_mii_url.c_str(), m->m_mii_path.c_str(), 15) ||
+            !net::ImageLooksWhole(m->m_mii_path.c_str()))
+            remove(m->m_mii_path.c_str());
+        m->m_mii_done.store(true, std::memory_order_release);
+    }
+
+    SDL_Texture *Menu::MiiRender(int which) {
+        static const char *const kType[2] = { "all_body", "face" };
+        if (m_mii_running && m_mii_done.load(std::memory_order_acquire)) {
+            threadWaitForExit(&m_mii_thread);
+            threadClose(&m_mii_thread);
+            m_mii_running = false;
+            struct stat st {};
+            if (stat(m_mii_path.c_str(), &st) == 0) m_mii_tex[m_mii_job] = m_gfx->LoadImage(m_mii_path.c_str());
+        }
+        if (m_mii_tried[which] || m_mii_running) return m_mii_tex[which];
+        if (!m_mii_hex_read) { m_mii_hex_read = true; m_mii_hex = AccountMiiHex(m_user); }
+        m_mii_tried[which] = true;
+        if (m_mii_hex.empty()) return nullptr;
+        // Named by the Mii's look, so an edit in Mii Edit renders it again.
+        char name[48];
+        snprintf(name, sizeof(name), "%016llx_%s.png", (unsigned long long)std::hash<std::string>{}(m_mii_hex), kType[which]);
+        mkdir("sdmc:/slaunch/cache", 0777);
+        mkdir("sdmc:/slaunch/cache/mii", 0777);
+        m_mii_path = std::string("sdmc:/slaunch/cache/mii/") + name;
+        struct stat st {};
+        if (stat(m_mii_path.c_str(), &st) == 0 && net::ImageLooksWhole(m_mii_path.c_str())) {
+            m_mii_tex[which] = m_gfx->LoadImage(m_mii_path.c_str());
+            return m_mii_tex[which];
+        }
+        m_mii_url = "https://studio.mii.nintendo.com/miis/image.png?data=" + m_mii_hex + "&type=" + kType[which] +
+                    "&width=512&expression=normal&bgColor=FFFFFF00";
+        m_mii_job = which;
+        m_mii_done.store(false, std::memory_order_release);
+        if (R_SUCCEEDED(threadCreate(&m_mii_thread, &Menu::MiiTrampoline, this, nullptr, 0x10000, 0x3B, -2))) {
+            threadStart(&m_mii_thread);
+            m_mii_running = true;
+        }
+        return nullptr;
+    }
+
+    // One panel of a channel's row. The library entry and anything without
+    // pictures of its own is the skin's lime panel with its icon and name; a
+    // game shows its art, cropped to the panel.
+    void Menu::NxePanel(const MenuItem &it, float x, float y, float w, float h, float a, float lit, bool front) {
+        const XboxSkin &sk = Skin();
+        const Uint8 A = (Uint8)(255.0f * a);
+        const float sc = h / kNxH[0];
+        const bool prof = it.kind == ItemKind::UserPage;
+        SDL_Texture *art = (it.kind == ItemKind::GameLibrary || prof) ? nullptr : ItemArt(it);
+        // A panel's own face where the skin has one: the libraries'.
+        SDL_Texture *face = nullptr;
+        switch (it.kind) {
+            case ItemKind::GameLibrary: face = sk.p_games; break;
+            case ItemKind::VideoLibrary: face = sk.p_videos; break;
+            case ItemKind::MusicPlayer: face = sk.p_music; break;
+            case ItemKind::Album:       face = sk.p_photos; break;
+            default: break;
+        }
+        if (!face) face = sk.tile;
+        // The shadow it throws on the next one, drawn first so this panel covers its own edge.
+        if (sk.shadow && sc > 0.2f) m_gfx->DrawImage(sk.shadow, (int)(x + w - 2), (int)y, (int)(32 * sc), (int)h, A);
+        if (art) {
+            float tw = 0, th = 0;
+            SDL_GetTextureSize(art, &tw, &th);
+            SDL_FRect src{ 0, 0, tw, th };
+            if (tw / th > w / h) { src.w = th * w / h; src.x = (tw - src.w) / 2; }
+            else                 { src.h = tw * h / w; src.y = (th - src.h) / 2; }
+            m_gfx->DrawRegion(art, src, SDL_FRect{ x, y, w, h }, kWhite, A);
+        } else if (face) {
+            m_gfx->DrawImage(face, (int)x, (int)y, (int)w, (int)h, A);
+        } else {
+            m_gfx->FillRect((int)x, (int)y, (int)w, (int)h, SDL_Color{ 120, 180, 30, A });
+        }
+        if (prof && sc > 0.45f) {
+            // The gamer card on the panel's face: who, how long they have played,
+            // and what lately. The Mii stands in front of it (DrawMainNxe).
+            const SDL_Color ink = WithAlpha(kWhite, A);
+            const int px = (int)(x + 22 * sc);
+            int ty = (int)(y + 16 * sc);
+            if (!MiiBody()) {   // no Mii to stand there: the account picture, top right
+                const int ps = (int)(76 * sc);
+                if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, (int)(x + w - 18 * sc) - ps, ty, ps, ps, A);
+            }
+            MText(XF_Semi, (int)lroundf(30 * sc), px, ty, ink, MFit(XF_Semi, (int)lroundf(30 * sc), m_nickname, (int)(w * 0.6f)).c_str());
+            ty += (int)(40 * sc);
+            std::vector<std::pair<u64, const MenuItem *>> recent;
+            u64 secs = 0;
+            for (const MenuItem &g : m_items) {
+                if (g.kind != ItemKind::Game) continue;
+                if (const play::PlayInfo *pi = Play(g.app_id)) {
+                    secs += pi->seconds;
+                    if (pi->last_played) recent.push_back({ (u64)pi->last_played, &g });
+                }
+            }
+            if (secs) MText(XF_Semi, (int)lroundf(21 * sc), px, ty, ink, play::FormatPlaytime(secs).c_str());
+            // Latest Games: the last four played, newest first.
+            const int n = std::min<int>(4, (int)recent.size());
+            std::partial_sort(recent.begin(), recent.begin() + n, recent.end(),
+                              [](const auto &l, const auto &r) { return l.first > r.first; });
+            if (n && sc > 0.9f) {
+                const int is = (int)(50 * sc), iy = (int)(y + h - 22 * sc) - is;
+                MText(XF_Semi, (int)lroundf(17 * sc), px, iy - (int)(26 * sc), ink, T("Latest Games"));
+                for (int k = 0; k < n; k++)
+                    if (SDL_Texture *ic = ItemArt(*recent[k].second))
+                        m_gfx->DrawImage(ic, px + k * (is + (int)(8 * sc)), iy, is, is, A);
+            }
+        }
+        if (!art && !prof) {
+            // The skin's own picture for the entries that have one, else the system glyph.
+            const char *icn = nullptr;
+            switch (it.kind) {
+                case ItemKind::GameLibrary: case ItemKind::Game:
+                case ItemKind::Collection:  icn = "games"; break;
+                case ItemKind::RandomGame:  icn = "random"; break;
+                case ItemKind::Album:       icn = "photos"; break;
+                case ItemKind::VideoLibrary: icn = "videos"; break;
+                case ItemKind::MusicPlayer: icn = "music"; break;
+                case ItemKind::MiiEdit:     icn = "mii"; break;
+                case ItemKind::UserPage:    icn = "profile"; break;
+                case ItemKind::Wifi:        icn = "network"; break;
+                case ItemKind::Bluetooth:   icn = "bluetooth"; break;
+                case ItemKind::Power:       icn = "power"; break;
+                case ItemKind::Controllers: icn = "games"; break;
+                case ItemKind::Theming: case ItemKind::Themes: icn = "theming"; break;
+                case ItemKind::Fonts:       icn = "fonts"; break;
+                case ItemKind::HomebrewMenu: case ItemKind::Homebrew: icn = "homebrew"; break;
+                case ItemKind::FileManager: icn = "files"; break;
+                case ItemKind::WebBrowser:  icn = "web"; break;
+                case ItemKind::Discord:     icn = "chat"; break;
+                default:                    icn = "settings"; break;
+            }
+            SDL_Texture *ic = NxeIcon(icn);
+            const float is = h * 0.56f;
+            if (ic) {
+                float iw = 0, ih = 0;
+                SDL_GetTextureSize(ic, &iw, &ih);
+                const float ww = is * iw / std::max(ih, 1.0f);
+                m_gfx->DrawImage(ic, (int)(x + (w - ww) / 2), (int)(y + h * 0.40f - is / 2), (int)ww, (int)is, A);
+            } else if (SDL_Texture *g = SystemIcon(it.kind == ItemKind::GameLibrary ? ItemKind::RandomGame : it.kind)) {
+                const float gs = h * 0.36f;
+                m_gfx->DrawImageTinted(g, (int)(x + (w - gs) / 2), (int)(y + h * 0.40f - gs / 2), (int)gs, (int)gs,
+                                       SDL_Color{ 255, 255, 255, 255 }, (Uint8)(A * 235 / 255));
+            }
+        }
+        // The name along the bottom: always on a plain panel, on art only up
+        // front, over a dark fade so it reads on any picture.
+        if (sc > 0.45f && !prof && (!art || front)) {
+            const int pt = (int)lroundf(26.0f * sc);
+            if (art) {
+                for (int k = 0; k < 8; k++)
+                    m_gfx->FillRect((int)x, (int)(y + h - 70 * sc + k * 70 * sc / 8), (int)w, (int)(70 * sc / 8) + 1,
+                                    SDL_Color{ 0, 0, 0, (Uint8)(A * (k * 18) / 255) });
+            }
+            std::string name = it.kind == ItemKind::GameLibrary ? std::string(T("Game Library"))
+                             : it.kind == ItemKind::VideoLibrary ? std::string(T("Video Library"))
+                             : it.kind == ItemKind::MusicPlayer ? std::string(T("Music Library"))
+                             : it.kind == ItemKind::Album       ? std::string(T("Picture Library"))
+                             : prof                             ? std::string(m_nickname) : it.name;
+            MText(XF_Semi, pt, (int)(x + 22 * sc), (int)(y + h - 50 * sc), WithAlpha(kWhite, A),
+                  MFit(XF_Semi, pt, name, (int)(w - 44 * sc)).c_str());
+        }
+        if (it.kind == ItemKind::Game && it.app_id == m_suspended && m_suspended != 0)
+            m_gfx->FillRect((int)(x + w - 26 * sc), (int)(y + 12 * sc), (int)(12 * sc), (int)(12 * sc),
+                            SDL_Color{ 160, 220, 40, A });
+        if (lit < 0.99f)
+            m_gfx->FillRect((int)x, (int)y, (int)w, (int)h, SDL_Color{ 0, 0, 0, (Uint8)(A * (1.0f - lit)) });
+    }
+
     void Menu::DrawMainNxe() {
         if (!XboxStep()) return;
         const XboxSkin &sk = Skin();
-        Theme t = m_theme.Current();   // a copy: the skin's colours win over the theme's here
-        if (sk.has_text) t.title = sk.text;
-        if (sk.has_dim)  { t.dim = sk.dim; t.fg = sk.dim; }
-        if (sk.bg) m_gfx->DrawCover(sk.bg);
+        const Theme &t = m_theme.Current();
         const int ncols = (int)m_xmb_cols.size();
-        DrawTopBar(nullptr);
 
-        // --- the rows of panels: the open channel's, the one leaving above it
-        // and the next one waiting at the bottom. Solid, back to front, and
-        // darker the further off they are - never see-through. ---
-        for (int c = std::min(ncols - 1, m_xmb_col + 2); c >= std::max(0, m_xmb_col - 2); c--) {
-            float yoff, rlit, ra;
-            NxRow((float)c - m_xmb_col_scroll, yoff, rlit, ra);
-            if (ra <= 0.02f || kNxTop + yoff > H) continue;
+        // The account, top right: name over its play time, then its picture.
+        {
+            const int ps = 52, px = W - 36 - ps, py = 22;
+            if (SDL_Texture *av = MetroAvatar()) m_gfx->DrawImage(av, px, py, ps, ps);
+            else m_gfx->FillRect(px, py, ps, ps, SDL_Color{ 255, 255, 255, 60 });
+            MText(XF_Semi, 20, px - 10 - MWidth(XF_Semi, 20, m_nickname), py, t.title, m_nickname);
+            u64 secs = 0;
+            for (const MenuItem &g : m_items)
+                if (g.kind == ItemKind::Game)
+                    if (const play::PlayInfo *pi = Play(g.app_id)) secs += pi->seconds;
+            if (secs) {
+                const std::string pt = play::FormatPlaytime(secs);
+                MText(XF_Semi, 18, px - 10 - MWidth(XF_Semi, 18, pt.c_str()), py + 26, t.title, pt.c_str());
+            }
+        }
+
+        // --- the rows: the open channel's, and the ones it is changing with ---
+        for (int c = std::min(ncols - 1, m_xmb_col + 1); c >= std::max(0, m_xmb_col - 1); c--) {
+            float yoff, ra;
+            NxRow((float)c - m_xmb_col_scroll, yoff, ra);
+            if (ra <= 0.02f) continue;
             const auto &items = m_xmb_cols[c].items;
             const int count = (int)items.size();
             const float at = c == m_xmb_col ? m_xmb_item_scroll : 0.0f;
             const int first = std::max(0, (int)floorf(at) - 1);
-            const int last  = std::min(count - 1, (int)at + 9);
-            for (int i = last; i >= first; i--) {
-                float x, cy, size, al, lit;
-                NxPlace((float)i - at, x, cy, size, al, lit);
-                const Uint8 a = (Uint8)(255.0f * al * ra);
-                if (a < 6) continue;
-                cy += yoff;
-                lit *= rlit;
-                const MenuItem &it = m_items[items[i]];
-                const float y = cy - size / 2.0f, sc = size / kNxSize;
-                const bool front = c == m_xmb_col && i == m_xmb_item;
-                SDL_Texture *art = ItemArt(it);
-                gfx::Gfx::CardStyle cs;
-                cs.radius = 9.0f * sc;
-                cs.shadow = 22.0f * sc;
-                cs.glow   = (front && !sk.front) ? 0.5f : 0.0f;
-                if (!art) cs.fill = SDL_Color{ t.icon_bg.r, t.icon_bg.g, t.icon_bg.b, 255 };
-                const bool gpu = m_gfx->Card(art, x, y, size, size, cs, a);
-                if (!gpu) {
-                    if (art) m_gfx->DrawImage(art, (int)x, (int)y, (int)size, (int)size, a);
-                    else     m_gfx->FillRect((int)x, (int)y, (int)size, (int)size, WithAlpha(cs.fill, a));
-                }
-                if (!art) {
-                    if (SDL_Texture *icon = SystemIcon(it.kind)) {
-                        const int is = (int)(size * 0.5f);
-                        m_gfx->DrawImageTinted(icon, (int)(x + size / 2) - is / 2, (int)cy - is / 2, is, is,
-                                               IconTint(t, a));
-                    } else if (!it.name.empty()) {
-                        char initial[2] = { (char)toupper((unsigned char)it.name[0]), '\0' };
-                        m_gfx->TextCentered(FontSize::Title, (int)(x + size / 2),
-                                            (int)cy - m_gfx->LineHeight(FontSize::Title) / 2,
-                                            WithAlpha(t.dim, a), initial);
-                    }
-                }
-                if (it.kind == ItemKind::Game && it.app_id == m_suspended && m_suspended != 0)
-                    m_gfx->FillRect((int)(x + size) - 22, (int)y + 10, 12, 12, WithAlpha(t.accent, a));
-                // The skin's frame over every panel, or its own for the front one.
-                if (SDL_Texture *fr = front && sk.front ? sk.front : sk.frame)
-                    m_gfx->Draw9(fr, (int)x, (int)y, (int)size, (int)size, (int)(sk.b_frame * sc + 0.5f),
-                                 kWhite, a);
-                if (lit < 0.99f) {   // distance, as shade
-                    gfx::Gfx::CardStyle shade;
-                    shade.radius = cs.radius; shade.shadow = 0.0f;
-                    shade.fill = SDL_Color{ 0, 0, 0, (Uint8)(255.0f * (1.0f - lit)) };
-                    if (!gpu || !m_gfx->Card(nullptr, x, y, size, size, shade, a))
-                        m_gfx->FillRect((int)x, (int)y, (int)size, (int)size, WithAlpha(shade.fill, (Uint8)(shade.fill.a * a / 255)));
-                }
+            const int last  = std::min(count - 1, (int)at + kNxN - 1);
+            for (int i = last; i >= first; i--) {   // back to front
+                float x, y, w, h, al, lit;
+                NxPlace((float)i - at, x, y, w, h, al, lit);
+                al *= ra;
+                if (al < 0.02f || x > W) continue;
+                NxePanel(m_items[items[i]], x, y + yoff, w, h, al, lit, c == m_xmb_col && i == m_xmb_item);
+            }
+            // The Mii stands on the floor in front of the profile panel's right
+            // edge, taller than the row, over the panel after it.
+            SDL_Texture *mii = MiiBody();
+            for (int i = first; mii && i <= last; i++) {
+                if (m_items[items[i]].kind != ItemKind::UserPage) continue;
+                float x, y, w, h, al, lit;
+                NxPlace((float)i - at, x, y, w, h, al, lit);
+                al *= ra;
+                if (al < 0.02f) break;
+                const Uint8 A = (Uint8)(255.0f * al);
+                // The render is a square; the body is its lower ~58%, the feet near its foot.
+                const float ms = h * 1.8f, cx = x + w * 0.86f, foot = y + yoff + h * 1.12f;
+                if (sk.av_shadow) m_gfx->DrawImage(sk.av_shadow, (int)(cx - ms * 0.14f), (int)(foot - ms * 0.045f),
+                                                   (int)(ms * 0.28f), (int)(ms * 0.08f), A);
+                else m_gfx->FillRect((int)(cx - ms * 0.07f), (int)(foot - 3), (int)(ms * 0.14f), 5, SDL_Color{ 0, 0, 0, (Uint8)(A * 50 / 255) });
+                m_gfx->DrawImage(mii, (int)(cx - ms / 2), (int)(foot - ms * 0.975f), (int)ms, (int)ms, A);
+                break;
             }
         }
 
-        // --- the channel names: the open one large, the ones above it fading
-        // off up the screen, the next one down by its waiting row ---
+        // --- the names: the open channel, and the ones before it above ---
         for (int c = 0; c < ncols; c++) {
             const float d = (float)c - m_xmb_col_scroll;
             const float al = NxNameAlpha(d);
             if (al <= 0.02f) continue;
-            std::string name = m_xmb_cols[c].label.empty() ? XmbCatName(m_xmb_cols[c].cat)
-                                                            : m_xmb_cols[c].label.c_str();
+            std::string name = !m_xmb_cols[c].label.empty() ? m_xmb_cols[c].label.c_str()
+                             : m_xmb_cols[c].cat == XmbCat::User ? T("My Switch")   // the home channel
+                             : XmbCatName(m_xmb_cols[c].cat);
             const float near = std::max(0.0f, 1.0f - std::abs(d));
             if (near > 0.5f && !m_search.empty()) name = std::string(T("Search")) + ": \"" + m_search + "\"";
-            const int pt = (int)lroundf(24.0f + 26.0f * near);
-            MText(XF_Light, pt, kNxX, (int)NxNameY(d) - pt * 2 / 3,
-                  WithAlpha(near > 0.5f ? t.title : t.fg, (Uint8)(255 * al)), name.c_str());
+            const int pt = NxNameSize(d);
+            const int y = (int)NxNameY(d) - pt * 2 / 3;
+            MText(XF_Semi, pt, kNxX, y, WithAlpha(near > 0.5f ? t.title : t.fg, (Uint8)(255 * al * (0.55f + 0.45f * near))),
+                  name.c_str());
+            if (near > 0.5f)   // the small square the open channel is marked with
+                m_gfx->FillRect(kNxX - 14, y + pt / 2 - 2, 7, 7, WithAlpha(t.title, (Uint8)(255 * al)));
         }
 
-        // Under the front panel: what it is.
+        // Under the front panel: where it is in the row.
         const float slide = std::min(1.0f, std::abs((float)m_xmb_col - m_xmb_col_scroll) * 1.6f);
-        const XmbColumn &col = m_xmb_cols[m_xmb_col];
-        const int count = (int)col.items.size();
+        const int count = (int)m_xmb_cols[m_xmb_col].items.size();
         if (slide < 0.97f && count > 0) {
-            const MenuItem &sel = m_items[col.items[std::clamp(m_xmb_item, 0, count - 1)]];
-            const Uint8 a = (Uint8)(255.0f * (1.0f - slide));
-            const int ty = kNxTop + kNxSize + 12;
-            MText(XF_Semi, 30, kNxX, ty, WithAlpha(t.title, a), MFit(XF_Semi, 30, sel.name, W - 2 * kNxX).c_str());
-            const std::string info = XboxInfo(sel);
-            if (!info.empty())
-                MText(XF_Semi, 18, kNxX, ty + 42, WithAlpha(t.dim, a), MFit(XF_Semi, 18, info, W - 2 * kNxX).c_str());
-            if (m_show_counter) {
-                char pos[48];
-                snprintf(pos, sizeof(pos), "%d %s %d", m_xmb_item + 1, T("of"), count);
-                MText(XF_Semi, 17, W - 60 - MWidth(XF_Semi, 17, pos), kNxTitleY - 8, WithAlpha(t.dim, a), pos);
+            char pos[48];
+            snprintf(pos, sizeof(pos), "%d %s %d", m_xmb_item + 1, T("of"), count);
+            MText(XF_Semi, 19, kNxX, (int)(kNxCy + kNxH[0] / 2 + 12), WithAlpha(t.dim, (Uint8)(255 * (1.0f - slide))), pos);
+        }
+        m_xb_hint_x = kNxX;
+        DrawStatusHint({ {{"a"}, "Select"}, {{"y"}, "Search"}, {{"x"}, "Options"} });
+    }
+
+    // The Game Library: every game as a list on the grey sheet, the selected
+    // one's panel beside it, and what to show and in which order above.
+    void Menu::DrawNxeLibrary() {
+        static const char *kShow[] = { "All Games", "Favourites", "Recently Played", "Game Card", "Homebrew" };
+        static const char *kSort[] = { "Recently Played", "Title", "Most Played" };
+        const XboxSkin &sk = Skin();
+        const Theme &t = m_theme.Current();
+        m_icons.SetScale(0);
+        std::vector<int> list;
+        MetroLibList(list);
+        const int n = (int)list.size();
+        if (n) { m_metro_lib_cur = std::clamp(m_metro_lib_cur, 0, n - 1); m_cursor = list[m_metro_lib_cur]; }
+
+        // The channel it was opened from, small, over its own name.
+        MText(XF_Semi, 26, kNxX, 132, WithAlpha(t.fg, 150), T(m_search.empty() ? "My Switch" : "Games"));
+        MText(XF_Semi, 40, kNxX, 170, t.title, T("Game Library"));
+        m_gfx->FillRect(kNxX - 14, 170 + 18, 7, 7, t.title);
+
+        // Show / Sort: up from the top of the list lands here.
+        {
+            int x = kNxX;
+            for (int k = 0; k < 2; k++) {
+                const std::string s = std::string(T(k ? "Sort" : "Show")) + ": " + T(k ? kSort[m_metro_lib_sort] : kShow[m_metro_lib_filter]);
+                const int w = MWidth(XF_Semi, 19, s.c_str()) + 24;
+                const bool on = m_metro_lib_hdr == k;
+                if (on) {
+                    if (sk.highlight) m_gfx->Draw9(sk.highlight, x - 12, 226, w, 32, std::min(sk.b_highlight, 14), kWhite);
+                    else m_gfx->FillRect(x - 12, 226, w, 32, SDL_Color{ 120, 180, 30, 255 });
+                }
+                MText(XF_Semi, 19, x, 230, on ? kWhite : WithAlpha(t.fg, 210), s.c_str());
+                x += w + 18;
             }
         }
-        m_xb_hint_x = 760;   // clear of the row waiting at the bottom left
-        DrawStatusHint({ {{"a"}, "Select"}, {{"y"}, "Search"},
-                         {{"l","r"}, XmbShoulderHint()}, {{"x"}, "Options"} });
+
+        // The list.
+        constexpr int lx = kNxX - 8, ly = 268, lw = 520, rh = 44, rows = 7;
+        const int shown = std::max(1, std::min(n, rows));
+        if (sk.panel) m_gfx->Draw9(sk.panel, lx, ly, lw, shown * rh + 16, sk.b_panel, kWhite);
+        else m_gfx->FillRect(lx, ly, lw, shown * rh + 16, SDL_Color{ 60, 62, 66, 235 });
+        m_metro_lib_scroll += ((float)m_metro_lib_cur - m_metro_lib_scroll) * 0.3f;
+        const float top = std::clamp(m_metro_lib_scroll - (rows - 1) / 2.0f, 0.0f, (float)std::max(0, n - rows));
+        const SDL_Color plain = sk.has_list ? sk.list_text : kNxInk;
+        const SDL_Color lit = sk.has_sel ? sk.list_sel : kWhite;
+        if (!n) MText(XF_Semi, 21, lx + 22, ly + 18, plain, T("No games here"));
+        for (int i = std::max(0, (int)top); i < n && i <= (int)top + rows; i++) {
+            const float ry = ly + 8 + ((float)i - top) * rh;
+            if (ry < ly + 4 || ry + rh > ly + 12 + shown * rh) continue;
+            const bool sel = i == m_metro_lib_cur && m_metro_lib_hdr < 0;
+            if (sel) {
+                if (sk.highlight) m_gfx->Draw9(sk.highlight, lx + 6, (int)ry + 2, lw - 12, rh - 4, sk.b_highlight, kWhite);
+                else m_gfx->FillRect(lx + 6, (int)ry + 2, lw - 12, rh - 4, SDL_Color{ 120, 180, 30, 255 });
+            } else if (i + 1 < n) {
+                m_gfx->FillRect(lx + 14, (int)ry + rh - 1, lw - 28, 1, SDL_Color{ 255, 255, 255, 40 });
+            }
+            const MenuItem &it = m_items[list[i]];
+            if (SDL_Texture *art = ItemArt(it)) m_gfx->DrawImage(art, lx + 16, (int)ry + 6, rh - 12, rh - 12);
+            MText(XF_Semi, 20, lx + 16 + rh, (int)ry + (rh - 27) / 2, sel ? lit : plain,
+                  MFit(XF_Semi, 20, it.name, lw - rh - 40).c_str());
+        }
+        if (n) {
+            char pos[48];
+            snprintf(pos, sizeof(pos), "%d %s %d", m_metro_lib_cur + 1, T("of"), n);
+            MText(XF_Semi, 19, kNxX, ly + shown * rh + 26, WithAlpha(t.dim, 230), pos);
+        }
+
+        // The selected game's details, as Blades shows them.
+        if (n) {
+            const MenuItem &sel = m_items[list[m_metro_lib_cur]];
+            DrawBladesGameInfo(sel, BladesInfo(sel), lx + lw + 24, ly, W - 88 - (lx + lw + 24), shown * rh + 16, 255);
+        }
+        DrawStatusHint({ {{"a"}, "Play"}, {{"b"}, "Back"}, {{"y"}, "Search"}, {{"x"}, "Options"} });
     }
 
     int Menu::NxeColAt(int x, int y) const {
-        if (x < kNxX - 20 || x > kNxX + 460) return -1;
-        // The row waiting at the bottom is the next channel, whatever part of it is touched.
-        if (y >= kNxNextY - 20 && m_xmb_col + 1 < (int)m_xmb_cols.size()) return m_xmb_col + 1;
+        if (x < kNxX - 20 || x > kNxX + 520 || y > kNxTitleY + 24) return -1;
         for (int c = 0; c < m_xmb_col; c++) {
             const float d = (float)c - m_xmb_col_scroll;
-            if (NxNameAlpha(d) > 0.02f && std::abs((float)y - NxNameY(d)) <= 18.0f) return c;
+            if (NxNameAlpha(d) > 0.02f && std::abs((float)y - NxNameY(d)) <= 14.0f) return c;
         }
         return -1;
     }
@@ -1701,11 +2241,10 @@ namespace sl::menu::ui {
         if (m_xmb_col < 0 || m_xmb_col >= (int)m_xmb_cols.size()) return -1;
         const auto &items = m_xmb_cols[m_xmb_col].items;
         const int count = (int)items.size();
-        // Front to back, as they overlap.
-        for (int i = std::max(0, (int)floorf(m_xmb_item_scroll)); i < count && i <= (int)m_xmb_item_scroll + 9; i++) {
-            float cx, cy, size, al, lit;
-            NxPlace((float)i - m_xmb_item_scroll, cx, cy, size, al, lit);
-            if (al > 0.1f && x >= cx && x < cx + size && y >= cy - size / 2 && y < cy + size / 2) return items[i];
+        for (int i = std::max(0, (int)floorf(m_xmb_item_scroll)); i < count && i <= (int)m_xmb_item_scroll + kNxN; i++) {
+            float px, py, w, h, al, lit;
+            NxPlace((float)i - m_xmb_item_scroll, px, py, w, h, al, lit);
+            if (al > 0.1f && x >= px && x < px + w && y >= py && y < py + h) return items[i];
         }
         return -1;
     }

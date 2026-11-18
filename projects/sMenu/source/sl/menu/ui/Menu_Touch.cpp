@@ -217,6 +217,7 @@ namespace sl::menu::ui {
                 int target = (int)lroundf(scroll + off);
                 // Blades and Metro show a page of rows, not a carousel round the middle.
                 if (BladesUi()) target = BladesListRowAt(y, scroll, rows);
+                else if (NxeUi()) target = NxeListRowAt(y, scroll, rows);
                 else if (m_ui_mode == UiMode::Metro) target = MetroListRowAt(y, scroll, rows);
                 if (m_screen == Screen::ThemeEditor) {
                     const Theme *c = m_theme.IsCustom(m_editing_theme)
@@ -501,7 +502,7 @@ namespace sl::menu::ui {
     // XMB: which category icon is under a touch point, or -1. Only the bar row
     // answers, so a tap on the column below never jumps categories.
     int Menu::XmbColAt(int x, int y) const {
-        if (y < kXmbTabY - kXmbIcon || y > kXmbTabY + kXmbIcon) return -1;
+        if (y < XmbTabY() - kXmbIcon || y > XmbTabY() + kXmbIcon) return -1;
         for (int c = 0; c < (int)m_xmb_cols.size(); c++) {
             const int cx = kXmbAnchorX + (int)((float)(c - m_xmb_col_scroll) * kXmbSpacingH);
             if (std::abs(x - cx) <= kXmbSpacingH / 2) return c;
@@ -513,7 +514,7 @@ namespace sl::menu::ui {
     int Menu::XmbItemAt(int x, int y) const {
         (void)x;
         if (m_xmb_col < 0 || m_xmb_col >= (int)m_xmb_cols.size()) return -1;
-        if (y < kXmbFadeEnd || y >= kXmbFadeBotEnd) return -1;
+        if (XmbFade(y) <= 0.0f) return -1;
         const auto &items = m_xmb_cols[m_xmb_col].items;
 
         // Rows are not evenly spaced - the cursor row carries a wide band above
@@ -525,8 +526,7 @@ namespace sl::menu::ui {
                                    (int)m_xmb_item_scroll + kXmbBelow + 1);
         int best = -1, best_d = 0;
         for (int i = first; i <= last; i++) {
-            const int cy = kXmbMarginTop + kXmbIcon / 2
-                         + (int)XmbRowOffset((float)i - m_xmb_item_scroll);
+            const int cy = (int)XmbRowY((float)i - m_xmb_item_scroll);
             // The band is a whole icon rather than a row pitch: the cursor row
             // is three pitches clear of the row under it, so a tighter band
             // would leave that gap dead to touch.
@@ -566,11 +566,6 @@ namespace sl::menu::ui {
         if (m_ui_mode == UiMode::Shelf) {   // left-anchored uniform row (see DrawMainShelf)
             const int idx = (int)lroundf(m_scroll_pos + (float)(x - kShelfAnchorX) / ShelfPitch());
             return (idx >= 0 && idx <= last) ? idx : -1;
-        }
-        if (m_ui_mode == UiMode::Cover) {          // left/right thirds browse
-            if (x < gfx::Gfx::Width / 3)       return (m_cursor > 0)    ? m_cursor - 1 : m_cursor;
-            if (x > gfx::Gfx::Width * 2 / 3)   return (m_cursor < last) ? m_cursor + 1 : m_cursor;
-            return m_cursor;                       // centre -> tap launches
         }
         return ListItemAt(x, y);
     }

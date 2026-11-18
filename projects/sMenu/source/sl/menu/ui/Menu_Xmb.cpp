@@ -17,7 +17,7 @@
 namespace sl::menu::ui {
 
     // ---------------------------------------------------------------------------
-    // XMB (PSP cross-media bar)
+    // XMB (PSP cross-media bar, or the PS3's - m_xmb_ps3)
     // ---------------------------------------------------------------------------
     namespace {
 
@@ -103,6 +103,9 @@ namespace sl::menu::ui {
     // work is only ever "walk the visible slice of one column".
     void Menu::XmbRebuild() {
         m_xmb_cols.clear();
+        // NXE's library entry is made here, so one from an earlier pass goes first.
+        while (!m_items.empty() && (m_items.back().kind == ItemKind::GameLibrary ||
+                                    m_items.back().kind == ItemKind::VideoLibrary)) m_items.pop_back();
         std::vector<int> bucket[(int)XmbCat::Count];
         // Shortcut categories, in the order they are first seen. m_items has
         // them already grouped and sorted (ScanShortcuts sorts by category, and
@@ -145,6 +148,58 @@ namespace sl::menu::ui {
                 m_xmb_cols.push_back({ XmbCat::Game, kv.first, std::move(kv.second) });
         if (m_xmb_cols.empty()) { m_xmb_col = -1; m_xmb_item = 0; return; }
 
+        // NXE keeps the console's games behind one panel: the channel shows the
+        // one played last, the library (A opens every game as a list), and
+        // whatever else lives there - collections, the random pick.
+        if (m_ui_mode == UiMode::NXE && m_search.empty()) {
+            for (XmbColumn &col : m_xmb_cols) {
+                if (col.cat != XmbCat::Game || !col.label.empty()) continue;
+                std::vector<int> games, rest;
+                for (int i : col.items) (m_items[i].kind == ItemKind::Game ? games : rest).push_back(i);
+                if (games.size() < 2) break;
+                MenuItem lib;
+                lib.kind = ItemKind::GameLibrary;
+                lib.name = T("Game Library");
+                m_items.push_back(lib);
+                col.items.clear();
+                col.items.push_back(games[0]);
+                col.items.push_back((int)m_items.size() - 1);
+                col.items.insert(col.items.end(), rest.begin(), rest.end());
+                break;
+            }
+        }
+
+        // ...and opens on the home channel: the profile, then the games, then
+        // the media - User, Games and Media made one row, first in the list.
+        if (m_ui_mode == UiMode::NXE && m_search.empty()) {
+            // The album's clips get a panel of their own, ahead of the pictures.
+            for (XmbColumn &col : m_xmb_cols) {
+                if (col.cat != XmbCat::Media || !col.label.empty()) continue;
+                auto al = std::find_if(col.items.begin(), col.items.end(),
+                                       [&](int i){ return m_items[i].kind == ItemKind::Album; });
+                if (al == col.items.end()) break;
+                MenuItem vid;
+                vid.kind = ItemKind::VideoLibrary;
+                vid.name = T("Video Library");
+                const size_t at = al - col.items.begin();
+                m_items.push_back(vid);
+                col.items.insert(col.items.begin() + at, (int)m_items.size() - 1);
+                break;
+            }
+            XmbColumn home{ XmbCat::User, std::string(), {} };
+            for (XmbCat c : { XmbCat::User, XmbCat::Game, XmbCat::Media }) {
+                auto it = std::find_if(m_xmb_cols.begin(), m_xmb_cols.end(),
+                                       [&](const XmbColumn &col){ return col.cat == c && col.label.empty(); });
+                if (it == m_xmb_cols.end()) continue;
+                home.items.insert(home.items.end(), it->items.begin(), it->items.end());
+                m_xmb_cols.erase(it);
+            }
+            // Only the profile itself leads; the rest of User (Mii Edit) goes last.
+            std::stable_partition(home.items.begin(), home.items.end(), [&](int i) {
+                return m_items[i].kind == ItemKind::UserPage || XmbCatOf(m_items[i]) != XmbCat::User; });
+            if (!home.items.empty()) m_xmb_cols.insert(m_xmb_cols.begin(), std::move(home));
+        }
+
         // Every entry lands in exactly one column, so following m_cursor keeps
         // the bar on whatever was selected across a rebuild (a favourite being
         // toggled, the full app list replacing the cached one, ...). m_cursor is
@@ -161,7 +216,8 @@ namespace sl::menu::ui {
     void Menu::XmbOpenDefaultColumn() {
         m_xmb_placed = true;
         for (int i = 0; i < (int)m_xmb_cols.size(); i++) {
-            if (m_xmb_cols[i].cat != XmbCat::Game) continue;
+            // NXE: the home channel, which is first.
+            if (m_xmb_cols[i].cat != (m_ui_mode == UiMode::NXE && m_search.empty() ? XmbCat::User : XmbCat::Game)) continue;
             m_xmb_col = i; m_xmb_item = 0;
             m_xmb_col_scroll = (float)i; m_xmb_item_scroll = 0.0f;
             XmbApplyCursor();
@@ -285,6 +341,25 @@ namespace sl::menu::ui {
         if (isGame && it.app_id == m_suspended && m_suspended != 0)
             m_gfx->FillRect(x + size - 9, y - 3, 8, 8, WithAlpha(t.accent, alpha));
     }
+    // Where the bar and its rows sit, PSP or PS3 style. The touch code goes
+    // through these too, so a tap lands on the row it hit in either style.
+    int Menu::XmbTabY() const { return m_xmb_ps3 ? kXmbTabYPs3 : kXmbTabY; }
+    float Menu::XmbRowY(float d) const {
+        return m_xmb_ps3 ? kXmbTabYPs3 + XmbRowOffsetPs3(d) : kXmbTabY + XmbRowOffset(d);
+    }
+    float Menu::XmbFade(int cy) const {
+        // Rows drifting up past the bar fade out instead of clipping against
+        // it - RetroArch's vertical fade factor - and rows sliding off the
+        // bottom fade the same way rather than popping.
+        const int end   = m_xmb_ps3 ? kXmbFadeEndPs3 : kXmbFadeEnd;
+        const int start = m_xmb_ps3 ? (int)XmbRowY(-1.0f) : kXmbFadeStart;
+        if (cy <= end || cy >= kXmbFadeBotEnd) return 0.0f;
+        if (cy < start) return (float)(cy - end) / (float)(start - end);
+        if (cy > kXmbFadeBotStart)
+            return (float)(kXmbFadeBotEnd - cy) / (float)(kXmbFadeBotEnd - kXmbFadeBotStart);
+        return 1.0f;
+    }
+
     // XMB mode, laid out the way RetroArch's XMB driver lays it out.
     //
     // Two axes crossing at one anchor: a horizontal row of category icons near
@@ -332,7 +407,9 @@ namespace sl::menu::ui {
         // in it, so the query has to be on screen the whole time it is active.
         std::string header = colname ? colname : "";
         if (!m_search.empty()) header = std::string(T("Search")) + ": \"" + m_search + "\"";
-        DrawXmbHeader(header.c_str());
+        // The PS3 names the column under its icon instead (see the row below).
+        DrawXmbHeader(m_xmb_ps3 && m_search.empty() ? "" : header.c_str());
+        const int tabY = XmbTabY();
 
         // --- category row ----------------------------------------------------
         // RetroArch tweens every tab between a passive and an active zoom and
@@ -349,9 +426,17 @@ namespace sl::menu::ui {
             const Uint8 a    = (Uint8)(255.0f * (0.75f + 0.25f * prox));
 
             if (SDL_Texture *icon = SystemIcon(XmbCatIconKind(m_xmb_cols[c].cat))) {
-                const int ix = cx - sz / 2, iy = kXmbTabY - sz / 2;
-                m_gfx->FillRect(ix, iy, sz, sz, IconPlate(t, a));
+                const int ix = cx - sz / 2, iy = tabY - sz / 2;
+                if (!m_xmb_ps3) m_gfx->FillRect(ix, iy, sz, sz, IconPlate(t, a));   // the PS3's are bare glyphs
                 m_gfx->DrawImageTinted(icon, ix, iy, sz, sz, IconTint(t, a));
+            }
+            // PS3: the open column's name under its icon, fading with the slide.
+            if (m_xmb_ps3 && prox > 0.0f) {
+                const std::string &lb = m_xmb_cols[c].label;
+                const std::string  nm = lb.empty() ? XmbCatName(m_xmb_cols[c].cat) : lb;
+                m_gfx->TextCentered(FontSize::Small, cx, tabY + sz / 2 + 4,
+                                    WithAlpha(t.title, (Uint8)(255.0f * prox)),
+                                    Ellipsize(nm, 2 * kXmbSpacingH - 16, FontSize::Small).c_str());
             }
         }
 
@@ -372,19 +457,10 @@ namespace sl::menu::ui {
 
         for (int i = firstv; i <= lastv; i++) {
             const float d  = (float)i - m_xmb_item_scroll;
-            const int   cy = kXmbMarginTop + kXmbIcon / 2 + (int)XmbRowOffset(d);
+            const int   cy = (int)XmbRowY(d);
             if (cy >= kXmbFadeBotEnd) break;
-            if (cy < kXmbFadeEnd)     continue;
-
-            // Rows drifting up into the category row fade out behind it instead
-            // of clipping against it - RetroArch's vertical fade factor - and
-            // rows sliding off the bottom fade the same way rather than popping.
-            float fade = 1.0f;
-            if (cy < kXmbFadeStart)
-                fade = (float)(cy - kXmbFadeEnd) / (float)(kXmbFadeStart - kXmbFadeEnd);
-            else if (cy > kXmbFadeBotStart)
-                fade = (float)(kXmbFadeBotEnd - cy)
-                     / (float)(kXmbFadeBotEnd - kXmbFadeBotStart);
+            const float fade = XmbFade(cy);
+            if (fade <= 0.0f) continue;
 
             const bool  sel  = (i == m_xmb_item);
             const float prox = std::max(0.0f, 1.0f - std::abs(d));
@@ -410,8 +486,7 @@ namespace sl::menu::ui {
         // Sits in the band the placement curve leaves open under the cursor,
         // which is the whole reason that band exists.
         const MenuItem &sel  = m_items[col.items[m_xmb_item]];
-        const int       selY = kXmbMarginTop + kXmbIcon / 2
-                             + (int)XmbRowOffset((float)m_xmb_item - m_xmb_item_scroll);
+        const int       selY = (int)XmbRowY((float)m_xmb_item - m_xmb_item_scroll);
 
         std::string info;
         if (sel.app_id != 0 && sel.app_id == m_suspended) info = T("Running");

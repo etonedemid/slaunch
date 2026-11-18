@@ -29,7 +29,6 @@ MENU_SRCS := \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Touch.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_List.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Grid.cpp \
-	$(MENU_DIR)/source/sl/menu/ui/Menu_Cover.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Shelf.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Xmb.cpp \
 	$(MENU_DIR)/source/sl/menu/ui/Menu_Xbox.cpp \

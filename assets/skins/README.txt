@@ -84,4 +84,10 @@ panel, highlight), selects it, and renames the packages to .xzp.done so they
 are not read again. Sounds and fonts are not converted:
 add them to the skin folder yourself.
 
+For NXE, put the packages in sdmc:/slaunch/skins/import/nxe/ instead and
+switch to the NXE layout. Skin packages from other dashboards (FreeStyle
+Dash and the like) work there too: a package not named res, shrdres or
+mediasite becomes a skin of its own, under the package's name. Its biggest
+picture named like a background, a panel or a highlight is taken for each.
+
 Only use art you made yourself or have the right to use.

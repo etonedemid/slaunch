@@ -224,8 +224,7 @@ namespace sl::menu::ui {
         const bool prev = (b == Btn::Left || b == Btn::Up);
         const bool next = (b == Btn::Right || b == Btn::Down);
         if (m_oobe_step == 1 && (prev || next)) {          // layout gallery
-            const int n = kUiModeChoices;
-            m_ui_mode = (UiMode)(((int)m_ui_mode + (next ? 1 : n - 1)) % n);
+            m_ui_mode = StepUiMode(m_ui_mode, next ? 1 : -1);
             RebuildItems();   // the list contents depend on the mode
         }
         if (m_oobe_step == 2 && (prev || next)) {          // theme, applied live
@@ -244,7 +243,7 @@ namespace sl::menu::ui {
                     if (FILE *f = fopen(kSysmodNoticePath, "w")) fclose(f);
                 m_oobe_step++;
                 if (m_oobe_step == 3) m_boot_modules = BootModules();
-                if (m_oobe_step == 1) m_oobe_gallery = (float)(int)m_ui_mode;
+                if (m_oobe_step == 1) m_oobe_gallery = (float)((int)m_ui_mode - (m_ui_mode > UiMode::Cover ? 1 : 0));   // gallery slot: Cover has none
                 if (m_oobe_step == 2) m_oobe_list = (float)m_theme_cursor;
             } else {
                 m_theme.Save();
@@ -1250,8 +1249,7 @@ namespace sl::menu::ui {
         }
         auto cycleUiMode = [&]() {
             const int dir = (b == Btn::Right) ? +1 : -1;
-            const int n = kUiModeChoices;
-            m_ui_mode = (UiMode)(((int)m_ui_mode + dir + n) % n);
+            m_ui_mode = StepUiMode(m_ui_mode, dir);
             // The item list itself depends on the mode now: XMB carries the full
             // scanned-homebrew category, the other layouts only pinned homebrew.
             // Rebuild before syncing the bar, so the bar points into the list it
@@ -1294,7 +1292,12 @@ namespace sl::menu::ui {
             m_shelf_vertical = !m_shelf_vertical;
             SaveSettings();
         };
-        auto toggleShelfStyle = [&]() { m_shelf_ps = !m_shelf_ps; SaveSettings(); };
+        // One row for both: Shelf's PS4/Xbox 360 and XMB's PSP/PS3.
+        auto toggleShelfStyle = [&]() {
+            if (m_ui_mode == UiMode::XMB) m_xmb_ps3 = !m_xmb_ps3;
+            else                          m_shelf_ps = !m_shelf_ps;
+            SaveSettings();
+        };
         if (m_theming_cursor == TH_Backdrop &&
             (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
             m_backdrop = (Backdrop)(((int)m_backdrop + (b == Btn::Left ? 2 : 1)) % 3);
@@ -1365,10 +1368,17 @@ namespace sl::menu::ui {
         // Off leaves USB free for homebrew that wants it, and stops the drive
         // showing up on every computer the console is charged from.
         if (m_theming_cursor == TH_Usb && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
-            m_usb_mtp = !m_usb_mtp;
-            if (m_usb_mtp) usb::MtpStart(); else usb::MtpStop();
-            SaveSettings();
-            SetStatus(m_usb_mtp ? T("USB file transfer on") : T("USB file transfer off"));
+            if (m_usb_mtp && usb::MtpYieldsToFrameTap()) {   // on, but left to Switch Frame Tap
+                usb::MtpTakeUsb();
+                SetStatus(T("USB file transfer on until restart - Switch Frame Tap loses USB"));
+            } else {
+                m_usb_mtp = !m_usb_mtp;
+                if (m_usb_mtp) usb::MtpStart(); else usb::MtpStop();
+                SaveSettings();
+                SetStatus(!m_usb_mtp ? T("USB file transfer off")
+                          : usb::MtpYieldsToFrameTap() ? T("Switch Frame Tap has USB - press again to take it")
+                          : T("USB file transfer on"));
+            }
         }
         if (m_theming_cursor == TH_Online && (b == Btn::Left || b == Btn::Right || b == Btn::A)) {
             m_online_count = !m_online_count;
@@ -1692,8 +1702,22 @@ namespace sl::menu::ui {
     void Menu::CycleBackground(int dir) {
         if (!m_theme.IsCustom(m_editing_theme)) return;
         Theme &c = m_theme.CustomAt(m_editing_theme);
-        const int n = (int)BackgroundStyle_Count;
-        c.background_style = (c.background_style + dir + n) % n;
+        // The built-in styles, then each shader file as a style of its own.
+        const std::vector<std::string> files = ShaderFiles();
+        const int nb = (int)BackgroundStyle_Shader, n = nb + (int)files.size();
+        int at = c.background_style;
+        if (at == BackgroundStyle_Shader) {
+            at = nb;
+            for (int i = 0; i < (int)files.size(); i++) if (files[i] == c.shader) at = nb + i;
+        } else if (at > nb) {
+            at = 0;
+        }
+        at = (at + dir + n) % n;
+        if (at < nb) c.background_style = at;
+        else {
+            c.background_style = BackgroundStyle_Shader;
+            snprintf(c.shader, sizeof(c.shader), "%s", files[at - nb].c_str());
+        }
         m_theme.Select(m_editing_theme);
         m_theme_cursor    = m_editing_theme;
         m_wallpaper_theme = -1;
@@ -2103,43 +2127,41 @@ namespace sl::menu::ui {
             "The first Xbox 360 dashboard: a curved blade per category",
             "The New Xbox Experience: channels and a row of cards" };
 
-        struct Page { const char *title, *sub; };
+        struct Page { const char *title; };
         const Page pages[kOobeSteps] = {
-            { "Welcome to sLaunch", "A new home. Let's set it up - it only takes a moment." },
-            { "Choose a layout",    "How your games are laid out. You can change it any time in Theming." },
-            { "Pick a theme",       "Applied as you browse. Make your own later in Theming > Themes." },
-            { "Turn off system modules", "Sysmodules that hook into the HOME Menu are the most common cause of crashes." },
-            { "Good to know",       "A few things worth knowing before you start." },
-            { "You're all set",     "Enjoy sLaunch." },
+            { "Welcome to sLaunch" }, { "Choose a layout" }, { "Pick a theme" },
+            { "Turn off system modules" }, { "Good to know" }, { "You're all set" },
         };
         const int step = m_oobe_step;
 
-        // ---- progress + heading ----
-        {
-            const int seg = 64, gap = 10, total = kOobeSteps * seg + (kOobeSteps - 1) * gap;
-            for (int i = 0; i < kOobeSteps; i++) {
-                const int x = (W - total) / 2 + i * (seg + gap);
-                const SDL_Color c = (i <= step) ? t.accent : WithAlpha(t.dim, 90);
-                m_gfx->FillRect(x, 36, seg, 3, c);
-            }
-            m_gfx->TextCentered(FontSize::Title, W / 2, 62, t.title, T(pages[step].title));
-            m_gfx->TextCentered(FontSize::Normal, W / 2, 130, t.dim,
-                                Ellipsize(T(pages[step].sub), W - 160, FontSize::Normal).c_str());
-        }
+        // Everything on these pages is one of three things: a sheet (a soft
+        // card the content sits on), a lit row (the selection, in the accent),
+        // or text. Colours come from the theme being chosen, so the pages
+        // follow it as it changes.
+        auto mix = [](SDL_Color a, SDL_Color b, float k) {
+            return SDL_Color{ (Uint8)(a.r + (b.r - a.r) * k), (Uint8)(a.g + (b.g - a.g) * k),
+                              (Uint8)(a.b + (b.b - a.b) * k), 255 };
+        };
+        const SDL_Color sheetC = WithAlpha(mix(t.bg_bottom, t.fg, 0.07f), 235);
+        const SDL_Color lineC  = WithAlpha(t.fg, 28);
+        const bool lightAccent = t.accent.r * 299 + t.accent.g * 587 + t.accent.b * 114 > 150000;
+        const SDL_Color onAccent = lightAccent ? SDL_Color{ 16, 16, 18, 255 } : SDL_Color{ 255, 255, 255, 255 };
+        auto sheet = [&](int x, int y, int w, int h) { XbCard((float)x, (float)y, (float)w, (float)h, 16.0f, 22.0f, sheetC); };
+        auto lit   = [&](int x, int y, int w, int h) { XbCard((float)x, (float)y, (float)w, (float)h, 10.0f, 0.0f, t.accent); };
+        auto pill  = [&](int x, int y, int w, int h, SDL_Color c) { XbCard((float)x, (float)y, (float)w, (float)h, h / 2.0f, 0.0f, c); };
+        const int lhN = m_gfx->LineHeight(FontSize::Normal), lhS = m_gfx->LineHeight(FontSize::Small);
 
-        // A preview card: the screenshot, or a named placeholder when the
-        // file is missing (an SD card set up without the previews folder).
+        // ---- heading: the page's title, nothing else ----
+        m_gfx->TextCentered(FontSize::Title, W / 2, 56, t.title, T(pages[step].title));
+        constexpr int kTop = 150, kBottom = 618;   // the content band, between heading and hints
+
+        // A layout's screenshot on a rounded card, or its name when the file is missing.
         auto preview = [&](int mode, float x, float y, float w, float h, Uint8 a, bool sel) {
+            if (sel) XbCard(x - 5, y - 5, w + 10, h + 10, 17.0f, 0.0f, WithAlpha(t.accent, a));
+            gfx::Gfx::CardStyle cs;
+            cs.radius = 13.0f; cs.shadow = sel ? 26.0f : 14.0f; cs.fill = mix(t.bg_bottom, t.fg, 0.05f);
             SDL_Texture *tex = OobePreview(mode);
-            if (sel) {                                 // a thin frame, nothing more
-                const SDL_Color f = WithAlpha(t.accent, a);
-                m_gfx->FillRect((int)x - 3, (int)y - 3, (int)w + 6, 3, f);
-                m_gfx->FillRect((int)x - 3, (int)(y + h), (int)w + 6, 3, f);
-                m_gfx->FillRect((int)x - 3, (int)y, 3, (int)h, f);
-                m_gfx->FillRect((int)(x + w), (int)y, 3, (int)h, f);
-            }
-            m_gfx->FillRect((int)x, (int)y, (int)w, (int)h, WithAlpha(t.bg_bottom, a));
-            if (tex) m_gfx->DrawImage(tex, (int)x, (int)y, (int)w, (int)h, a);
+            if (!m_gfx->Card(tex, x, y, w, h, cs, a) && tex) m_gfx->DrawImage(tex, (int)x, (int)y, (int)w, (int)h, a);
             if (!tex)
                 m_gfx->TextCentered(FontSize::Large, (int)(x + w / 2), (int)(y + h / 2 - 20),
                                     WithAlpha(t.dim, a), T(kLayoutNames[mode]));
@@ -2147,14 +2169,23 @@ namespace sl::menu::ui {
 
         switch (step) {
             case 0: {   // three layouts fanned out, to show what this is
-                preview((int)UiMode::XMB, (W - 640) / 2.0f, 200.0f, 640.0f, 360.0f, 255, false);
+                const float cw = 600, ch = cw * 9 / 16, cy = (kTop + kBottom) / 2.0f - ch / 2;
+                const float sw = cw * 0.72f, sh = sw * 9 / 16;
+                preview((int)UiMode::Blades, W / 2.0f - 420 - sw / 2, cy + (ch - sh) / 2, sw, sh, 150, false);
+                preview((int)UiMode::NXE,    W / 2.0f + 420 - sw / 2, cy + (ch - sh) / 2, sw, sh, 150, false);
+                preview((int)UiMode::XMB, W / 2.0f - cw / 2, cy, cw, ch, 255, false);
                 DrawHint({ {{"a"}, "Get started"} });
                 break;
             }
             case 1: {   // layout gallery
-                const int n = kUiModeChoices, cur = (int)m_ui_mode;
-                // Chase the choice the short way round, so wrapping from Deck
-                // to List slides one step instead of across the whole gallery.
+                std::vector<int> modes;   // every layout there is to choose
+                for (int m = 0; m < (int)UiMode::Count; m++)
+                    if ((UiMode)m != UiMode::Cover) modes.push_back(m);
+                const int n = (int)modes.size();
+                int cur = 0;
+                for (int i = 0; i < n; i++) if (modes[i] == (int)m_ui_mode) cur = i;
+                // Chase the choice the short way round, so wrapping from the
+                // last to the first slides one step instead of across the gallery.
                 float target = (float)cur;
                 while (target - m_oobe_gallery >  n * 0.5f) target -= n;
                 while (target - m_oobe_gallery < -n * 0.5f) target += n;
@@ -2170,81 +2201,87 @@ namespace sl::menu::ui {
                 for (auto &o : order) {
                     const float d  = (float)o.second - m_oobe_gallery;
                     const float ad = std::min(std::abs(d), 1.5f);
-                    const float w  = 580.0f * (1.0f - std::min(ad, 1.0f) * 0.34f);
+                    const float w  = 560.0f * (1.0f - std::min(ad, 1.0f) * 0.30f);
                     const float h  = w * 9.0f / 16.0f;
-                    const float cx = W / 2.0f + d * 440.0f;
-                    const float cy = 355.0f;
-                    const Uint8 a  = (Uint8)(255.0f - ad * 120.0f);
-                    const int mode = ((o.second % n) + n) % n;
-                    preview(mode, cx - w / 2, cy - h / 2, w, h, a, mode == cur && ad < 0.5f);
+                    const float cx = W / 2.0f + d * 450.0f;
+                    const Uint8 a  = (Uint8)(255.0f - ad * 110.0f);
+                    const int vi = ((o.second % n) + n) % n;
+                    preview(modes[vi], cx - w / 2, 352.0f - h / 2, w, h, a, vi == cur && ad < 0.5f);
                 }
-                m_gfx->TextCentered(FontSize::Large, W / 2, 540, t.title, T(kLayoutNames[cur]));
-                if (cur == (int)UiMode::Shelf) {           // the one we suggest (the default)
-                    const int nw = m_gfx->TextWidth(FontSize::Large, T(kLayoutNames[cur]));
-                    m_gfx->Text(FontSize::Small, W / 2 + nw / 2 + 14, 552, t.accent, T("Recommended"));
+                const char *name = T(kLayoutNames[modes[cur]]);
+                const bool rec = modes[cur] == (int)UiMode::Shelf;   // the one we suggest (the default)
+                const int nw = m_gfx->TextWidth(FontSize::Large, name);
+                const int rw = rec ? m_gfx->TextWidth(FontSize::Small, T("Recommended")) + 24 : 0;
+                const int nx = W / 2 - (nw + (rec ? rw + 14 : 0)) / 2;
+                m_gfx->Text(FontSize::Large, nx, 524, t.title, name);
+                if (rec) {
+                    const int py = 524 + (m_gfx->LineHeight(FontSize::Large) - (lhS + 6)) / 2;
+                    pill(nx + nw + 14, py, rw, lhS + 6, t.accent);
+                    m_gfx->Text(FontSize::Small, nx + nw + 26, py + 3, onAccent, T("Recommended"));
                 }
-                m_gfx->TextCentered(FontSize::Normal, W / 2, 588, t.dim, T(kLayoutDesc[cur]));
+                m_gfx->TextCentered(FontSize::Normal, W / 2, 572, t.dim, T(kLayoutDesc[modes[cur]]));
                 for (int i = 0; i < n; i++) {               // where you are in the gallery
-                    const int dx = W / 2 + (i - n / 2) * 22 + 11, dy = 638;
-                    m_gfx->FillRect(dx - 4, dy - 4, 8, 8, i == cur ? t.accent : WithAlpha(t.dim, 110));
+                    const int dw = i == cur ? 22 : 8, total = (n - 1) * 14 + 22;
+                    int dx = W / 2 - total / 2 + i * 14 + (i > cur ? 14 : 0);
+                    pill(dx, 616, dw, 6, i == cur ? t.accent : WithAlpha(t.fg, 50));
                 }
                 DrawHint({ {{"left","right"}, "Choose"}, {{"a"}, "Next"}, {{"b"}, "Back"} });
                 break;
             }
-            case 2: {   // themes, each with its colours
+            case 2: {   // themes, each with its colours, on one sheet
                 const int n = m_theme.Count();
                 m_oobe_list += ((float)m_theme_cursor - m_oobe_list) * 0.25f;
                 if (std::abs((float)m_theme_cursor - m_oobe_list) < 0.01f) m_oobe_list = (float)m_theme_cursor;
-                const int rowH = 62, listW = 620, x = (W - listW) / 2, cy = 380;
-                for (int i = 0; i < n; i++) {
-                    const float d = (float)i - m_oobe_list;
-                    if (std::abs(d) > 3.4f) continue;
-                    const int   y = cy + (int)(d * rowH) - (rowH - 12) / 2;
-                    const Uint8 a = (Uint8)std::max(60.0f, 255.0f - std::abs(d) * 60.0f);
-                    const bool  sel = (i == m_theme_cursor);
+                constexpr int rowH = 56, sw = 640;
+                const int rows = std::min(n, 7);
+                const int sh = rows * rowH + 20, sx = (W - sw) / 2, sy = (kTop + kBottom - sh) / 2;
+                sheet(sx, sy, sw, sh);
+                const float top = std::clamp(m_oobe_list - (rows - 1) / 2.0f, 0.0f, (float)std::max(0, n - rows));
+                for (int i = std::max(0, (int)top); i < n && i <= (int)top + rows; i++) {
+                    const float ry = sy + 10 + ((float)i - top) * rowH;
+                    if (ry < sy + 4 || ry + rowH > sy + sh - 4) continue;
+                    const bool sel = i == m_theme_cursor;
                     const Theme &th = m_theme.At(i);
-                    const int lh = m_gfx->LineHeight(FontSize::Normal);
-                    const int ty = y + (rowH - 12 - lh) / 2;
-                    if (sel) m_gfx->Text(FontSize::Normal, x - 30, ty, WithAlpha(t.accent, a), ">");
-                    m_gfx->Text(FontSize::Normal, x, ty, WithAlpha(sel ? t.accent : t.fg, a), T(th.name));
-                    const SDL_Color sw[4] = { th.bg_top, th.bg_bottom, th.accent, th.title };
+                    if (sel) lit(sx + 10, (int)ry + 3, sw - 20, rowH - 6);
+                    else if (i + 1 < n) m_gfx->FillRect(sx + 26, (int)ry + rowH - 1, sw - 52, 1, lineC);
+                    m_gfx->Text(FontSize::Normal, sx + 30, (int)ry + (rowH - lhN) / 2, sel ? onAccent : t.fg, T(th.name));
+                    const SDL_Color c4[4] = { th.bg_top, th.bg_bottom, th.accent, th.title };
                     for (int k = 0; k < 4; k++) {           // the theme's own colours
-                        const int sx = x + listW - (4 - k) * 26, sy = y + (rowH - 12) / 2 - 9;
-                        m_gfx->FillRect(sx - 1, sy - 1, 20, 20, WithAlpha(t.dim, (Uint8)(a / 3)));
-                        m_gfx->FillRect(sx, sy, 18, 18, WithAlpha(sw[k], a));
+                        const int cx = sx + sw - 30 - (4 - k) * 30, cy = (int)ry + rowH / 2 - 11;
+                        XbCard(cx - 1.0f, cy - 1.0f, 24.0f, 24.0f, 12.0f, 0.0f, sel ? WithAlpha(onAccent, 90) : lineC);
+                        XbCard((float)cx, (float)cy, 22.0f, 22.0f, 11.0f, 0.0f, c4[k]);
                     }
                 }
                 DrawHint({ {{"up","down"}, "Choose"}, {{"a"}, "Next"}, {{"b"}, "Back"} });
                 break;
             }
             case 3: {   // system modules: what to do, and which ones are on now
-                const int x = 200, w = W - 2 * x;
-                int y = 200;
-                const int lh = m_gfx->LineHeight(FontSize::Normal) + 6;
-                for (const auto &line : WrapText(FontSize::Normal,
-                        T("Many Atmosphere sysmodules inject into the HOME Menu, which sLaunch replaces. Before reporting a crash or freeze, turn them off in the Sysmodules overlay (or rename atmosphere/contents/<id>/flags/boot2.flag) and restart."),
-                        w)) {
-                    m_gfx->Text(FontSize::Normal, x, y, t.fg, line.c_str());
-                    y += lh;
-                }
+                constexpr int sw = 860;
+                const int sx = (W - sw) / 2, tw = sw - 64;
+                std::vector<std::string> body = WrapText(FontSize::Normal,
+                    T("Many Atmosphere sysmodules inject into the HOME Menu, which sLaunch replaces. Before reporting a crash or freeze, turn them off in the Sysmodules overlay (or rename atmosphere/contents/<id>/flags/boot2.flag) and restart."), tw);
+                std::string list;
+                for (size_t i = 0; i < m_boot_modules.size(); i++) list += (i ? ", " : "") + m_boot_modules[i];
+                std::vector<std::string> mods = list.empty() ? std::vector<std::string>() : WrapText(FontSize::Small, list, tw - 24);
+                const int sh = 32 + (int)body.size() * (lhN + 6) + 28 + 1 + 24 + lhN + (mods.empty() ? 0 : 12 + (int)mods.size() * (lhS + 4)) + 30;
+                const int sy = std::max(kTop, (kTop + kBottom - sh) / 2);
+                sheet(sx, sy, sw, sh);
+                int y = sy + 32;
+                for (const auto &line : body) { m_gfx->Text(FontSize::Normal, sx + 32, y, t.fg, line.c_str()); y += lhN + 6; }
+                y += 22;
+                m_gfx->FillRect(sx + 32, y, sw - 64, 1, lineC);
                 y += 24;
-                if (m_boot_modules.empty()) {
-                    m_gfx->Text(FontSize::Normal, x, y, t.accent, T("No sysmodules start at boot. You're good to go."));
-                } else {
-                    m_gfx->Text(FontSize::Normal, x, y, t.accent, T("Starting at boot on this console:"));
-                    y += lh;
-                    std::string list;
-                    for (size_t i = 0; i < m_boot_modules.size(); i++)
-                        list += (i ? ", " : "") + m_boot_modules[i];
-                    for (const auto &line : WrapText(FontSize::Small, list, w)) {
-                        m_gfx->Text(FontSize::Small, x, y, t.title, line.c_str());
-                        y += m_gfx->LineHeight(FontSize::Small) + 4;
-                    }
-                }
+                const bool none = m_boot_modules.empty();
+                const SDL_Color dot = none ? SDL_Color{ 90, 200, 110, 255 } : SDL_Color{ 240, 180, 60, 255 };
+                pill(sx + 32, y + lhN / 2 - 6, 12, 12, dot);
+                m_gfx->Text(FontSize::Normal, sx + 54, y, t.title,
+                            T(none ? "No sysmodules start at boot. You're good to go." : "Starting at boot on this console:"));
+                y += lhN + 12;
+                for (const auto &line : mods) { m_gfx->Text(FontSize::Small, sx + 54, y, t.dim, line.c_str()); y += lhS + 4; }
                 DrawHint({ {{"a"}, "Next"}, {{"b"}, "Back"} });
                 break;
             }
-            case 4: {   // tips, as four cards
+            case 4: {   // tips, as four cards in a square
                 struct Tip { const char *key; const char *val; };
                 const Tip tips[4] = {
                     { "X",        "Options on any entry: favourite, rename, move" },
@@ -2252,32 +2289,39 @@ namespace sl::menu::ui {
                     { "Homebrew", "Browse .nro files and pin them to this menu" },
                     { "HOME",     "Suspends your game and brings this back" },
                 };
-                const int keyX = 250, textX = 440, y0 = 230, rowGap = 70;
-                const int lhN = m_gfx->LineHeight(FontSize::Normal);
+                constexpr int cw = 440, chh = 170, gap = 24;
+                const int x0 = (W - 2 * cw - gap) / 2, y0 = (kTop + kBottom - 2 * chh - gap) / 2;
                 for (int i = 0; i < 4; i++) {
-                    const int y = y0 + i * rowGap;
-                    m_gfx->Text(FontSize::Normal, keyX, y, t.accent, tips[i].key);
-                    m_gfx->Text(FontSize::Normal, textX, y, t.fg,
-                                Ellipsize(T(tips[i].val), W - 80 - textX, FontSize::Normal).c_str());
-                    (void)lhN;
+                    const int x = x0 + (i % 2) * (cw + gap), y = y0 + (i / 2) * (chh + gap);
+                    sheet(x, y, cw, chh);
+                    pill(x + 26, y + 28, 6, lhN - 4, t.accent);
+                    m_gfx->Text(FontSize::Large, x + 44, y + 22, t.title, T(tips[i].key));
+                    int ty = y + 22 + m_gfx->LineHeight(FontSize::Large) + 10;
+                    for (const auto &line : WrapText(FontSize::Normal, T(tips[i].val), cw - 70)) {
+                        m_gfx->Text(FontSize::Normal, x + 44, ty, t.dim, line.c_str());
+                        ty += lhN + 4;
+                    }
                 }
                 DrawHint({ {{"a"}, "Next"}, {{"b"}, "Back"} });
                 break;
             }
-            default: {  // done: the one last choice
-                const int rw = 640, rh = 64, x = (W - rw) / 2, y = 300;
-                m_gfx->Text(FontSize::Normal, x - 30, y + (rh - m_gfx->LineHeight(FontSize::Normal)) / 2,
-                            t.accent, ">");
-                const int lh = m_gfx->LineHeight(FontSize::Normal);
-                const char *val = m_check_updates ? T("On") : T("Off");
-                m_gfx->Text(FontSize::Normal, x + 24, y + (rh - lh) / 2, t.title,
-                            T("Check for updates on startup"));
-                m_gfx->Text(FontSize::Normal, x + rw - 24 - m_gfx->TextWidth(FontSize::Normal, val),
-                            y + (rh - lh) / 2, t.accent, val);
-                m_gfx->TextCentered(FontSize::Small, W / 2, y + rh + 26, t.dim,
-                                    T("Everything here can be changed later in Theming."));
-                m_gfx->TextCentered(FontSize::Small, W / 2, y + rh + 66, t.dim,
-                                    T("sLaunch counts how many consoles are online with a random ID. Theming > Online count turns it off."));
+            default: {  // done: the one last choice, and what to know about it
+                constexpr int sw = 680, rh = 72;
+                const int sx = (W - sw) / 2, sy = kTop + 40;
+                sheet(sx, sy, sw, rh + 24);
+                lit(sx + 12, sy + 12, sw - 24, rh);
+                m_gfx->Text(FontSize::Normal, sx + 36, sy + 12 + (rh - lhN) / 2, onAccent, T("Check for updates on startup"));
+                // A switch, on or off.
+                const int kw = 64, kh = 34, kx = sx + sw - 36 - kw, ky = sy + 12 + (rh - kh) / 2;
+                pill(kx, ky, kw, kh, m_check_updates ? WithAlpha(onAccent, 230) : WithAlpha(onAccent, 70));
+                pill(m_check_updates ? kx + kw - kh + 4 : kx + 4, ky + 4, kh - 8, kh - 8, t.accent);
+                int y = sy + rh + 24 + 34;
+                for (const char *note : { "Everything here can be changed later in Theming.",
+                                          "sLaunch counts how many consoles are online with a random ID. Theming > Online count turns it off." })
+                    for (const auto &line : WrapText(FontSize::Small, T(note), sw)) {
+                        m_gfx->TextCentered(FontSize::Small, W / 2, y, t.dim, line.c_str());
+                        y += lhS + 6;
+                    }
                 DrawHint({ {{"left","right"}, "Change"}, {{"a"}, "Finish"}, {{"b"}, "Back"} });
                 break;
             }
@@ -2329,10 +2373,10 @@ namespace sl::menu::ui {
                                    m_ui_mode != UiMode::Deck && m_ui_mode != UiMode::Shelf) continue;
             if (i == TH_FlowSet && m_ui_mode != UiMode::Flow) continue;
             if (i == TH_ShelfVert && (m_ui_mode != UiMode::Shelf || m_shelf_ps)) continue;
-            if (i == TH_ShelfStyle && m_ui_mode != UiMode::Shelf) continue;
+            if (i == TH_ShelfStyle && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::XMB) continue;
             if (i == TH_MetroColors && m_ui_mode != UiMode::Metro) continue;
             if (i == TH_Backdrop && m_ui_mode != UiMode::Shelf && m_ui_mode != UiMode::Line &&
-                m_ui_mode != UiMode::Cover && m_ui_mode != UiMode::Deck) continue;
+                m_ui_mode != UiMode::Deck) continue;
             // The wall shape is only meaningful where there is a wall.
             if ((i == TH_TileCols || i == TH_TileRows) && m_ui_mode != UiMode::Grid) continue;
 #ifndef SL_QEXT
@@ -2392,6 +2436,10 @@ namespace sl::menu::ui {
         values[TH_Antialias]   = m_antialias ? T("On") : T("Off");
         values[TH_ShelfVert]   = m_shelf_vertical ? T("On") : T("Off");
         values[TH_ShelfStyle]  = m_shelf_ps ? "PS4" : "Xbox 360";
+        if (m_ui_mode == UiMode::XMB) {
+            labels[TH_ShelfStyle] = T("XMB style");
+            values[TH_ShelfStyle] = m_xmb_ps3 ? "PS3" : "PSP";
+        }
         values[TH_MetroColors] = m_metro_themed ? T("Theme") : "Xbox 360";
         values[TH_Backdrop]    = m_backdrop == Backdrop::Off ? T("Off")
                                : m_backdrop == Backdrop::Icon ? T("Game icon") : T("Screenshot");
@@ -2428,7 +2476,7 @@ namespace sl::menu::ui {
         values[TH_DiscordSound]  = m_discord_sound.empty() ? T("Default")
                                  : m_discord_sound == "off" ? T("Off")
                                  : m_discord_sound.substr(0, m_discord_sound.rfind('.'));
-        values[TH_Usb]         = m_usb_mtp ? T("On") : T("Off");
+        values[TH_Usb]         = !m_usb_mtp ? T("Off") : usb::MtpYieldsToFrameTap() ? T("Frame Tap has it") : T("On");
         values[TH_About]       = m_upd_available ? T("Update available") : std::string("v") + SL_VERSION;
         {
             char c[32];
@@ -2863,12 +2911,17 @@ namespace sl::menu::ui {
                                             // corrupt capture is not retried
                                             // every frame
     }
-    void Menu::OpenAlbumViewer() {
+    void Menu::OpenAlbumViewer(bool videos) {
         // Rescan on every open so captures taken since the menu started show up.
         // The scan only stats directory entries, so this is cheap enough to do
         // unconditionally rather than trying to watch the tree for changes.
         m_album_scanned = false;
         ScanAlbum();
+        if (videos) {   // the Video Library: clips only, and the next scan lists everything again
+            m_album.erase(std::remove_if(m_album.begin(), m_album.end(),
+                                         [](const std::string &p) { return !IsVideoPath(p.c_str()); }), m_album.end());
+            m_album_scanned = false;
+        }
         m_screen       = Screen::Album;
         m_album_cursor = 0;
         m_album_scroll = 0.0f;   // opens settled, not mid-slide
@@ -3417,6 +3470,10 @@ namespace sl::menu::ui {
                 labels[EF_RibbonYCenter]   = T("Horizon");
                 labels[EF_FxX]             = T("Reflection");
                 break;
+            case BackgroundStyle_Wave:
+                labels[EF_RibbonLines]     = T("Sheets");
+                labels[EF_RibbonLayers]    = T("Speed");
+                break;
             default: break;   // Ribbon and Ribbon glow keep the wave labels
         }
 
@@ -3475,7 +3532,8 @@ namespace sl::menu::ui {
                 snprintf(hex, sizeof(hex), "#%02X%02X%02X", col->r, col->g, col->b);
                 m_gfx->Text(FontSize::Small, vx + 78, y + 4, WithAlpha(t.dim, alpha), hex);
             } else if (i == EF_Background) {
-                const char *bg = BackgroundName(c.background_style);
+                const char *bg = c.background_style == BackgroundStyle_Shader && c.shader[0]
+                               ? c.shader : BackgroundName(c.background_style);
                 m_gfx->Text(FontSize::Small, vx - 40, y + 4, WithAlpha(t.dim, alpha), "<");
                 m_gfx->Text(FontSize::Normal, vx, y, WithAlpha(t.fg, alpha), bg);
             } else if (i == EF_Wallpaper) {
@@ -3690,6 +3748,7 @@ namespace sl::menu::ui {
     void Menu::DrawDialog() {
         if (m_ui_mode == UiMode::Metro) { DrawMetroDialog(); return; }
         if (BladesUi()) { DrawBladesDialog(); return; }
+        if (NxeUi())    { DrawNxeDialog(); return; }
         const Theme &t = m_theme.Current();
         // Dim the whole screen, then draw a centered box.
         m_gfx->FillRect(0, 0, gfx::Gfx::Width, gfx::Gfx::Height, SDL_Color{0,0,0,150});
@@ -3704,22 +3763,51 @@ namespace sl::menu::ui {
         const int nopts = m_dialog == Dialog::CrashReport ? 1 : 2;   // a notice has only OK
         int bh = 276 + std::max(0, noteH - nlh) - (2 - nopts) * 48;
         int bx = cx - bw / 2, by = gfx::Gfx::Height / 2 - bh / 2;
-        m_gfx->FillRect(bx, by, bw, bh, WithAlpha(t.bg_bottom, 245));
-        m_gfx->FillRect(bx, by, bw, 4, t.accent);
+        // In the layout's own look (see DrawOptions): XMB a smoked band across
+        // the screen, Deck a frosted panel, the rest a card.
+        const bool xmb = m_ui_mode == UiMode::XMB, deck = m_ui_mode == UiMode::Deck;
+        const SDL_Color white{ 255, 255, 255, 255 };
+        if (xmb) {
+            m_gfx->FillRect(0, by, gfx::Gfx::Width, bh, SDL_Color{ 12, 12, 16, 225 });
+            m_gfx->FillRect(0, by, gfx::Gfx::Width, 1, SDL_Color{ 255, 255, 255, 70 });
+            m_gfx->FillRect(0, by + bh - 1, gfx::Gfx::Width, 1, SDL_Color{ 255, 255, 255, 70 });
+        } else if (deck) {
+            m_gfx->DrawSceneBlurred(bx, by, bw, bh, 10);
+            m_gfx->FillRect(bx, by, bw, bh, WithAlpha(t.bg_top, 215));
+            m_gfx->FillRect(bx, by, bw, 3, t.accent);
+        } else {
+            const SDL_Color fill{ (Uint8)((t.bg_top.r + t.bg_bottom.r) / 2), (Uint8)((t.bg_top.g + t.bg_bottom.g) / 2),
+                                  (Uint8)((t.bg_top.b + t.bg_bottom.b) / 2), 248 };
+            PanelCard((float)bx, (float)by, (float)bw, (float)bh, 18.0f, 26.0f, fill);
+            PanelCard(cx - 40.0f, by + 12.0f, 80.0f, 4.0f, 2.0f, 0.0f, t.accent);
+        }
 
         // Power prompts set their own heading (and sometimes a warning line); the
         // launch/close dialogs are always about the running game.
-        m_gfx->TextCentered(FontSize::Large, cx, by + 40, t.title, title);
+        m_gfx->TextCentered(FontSize::Large, cx, by + 40, xmb ? white : t.title, title);
         for (size_t l = 0; l < note.size(); l++)
-            m_gfx->TextCentered(FontSize::Small, cx, by + 88 + (int)l * nlh, t.dim, note[l].c_str());
+            m_gfx->TextCentered(FontSize::Small, cx, by + 88 + (int)l * nlh,
+                                xmb ? SDL_Color{ 170, 170, 170, 255 } : t.dim, note[l].c_str());
 
         const char *opts[2] = { T("Yes"), T("No") };
         if (nopts == 1) opts[0] = T("OK");
         for (int i = 0; i < nopts; i++) {
             bool sel = (i == m_dialog_cursor);
             int y = by + 136 + std::max(0, noteH - nlh) + i * 48;
-            if (sel) m_gfx->FillRect(cx - 90, y - 4, 180, 42, WithAlpha(t.accent, 60));
-            m_gfx->TextCentered(FontSize::Normal, cx, y, sel ? t.accent : t.fg, opts[i]);
+            if (sel) {
+                if (xmb) {
+                    m_gfx->FillRect(cx - 120, y - 4, 240, 42, SDL_Color{ 255, 255, 255, 26 });
+                    m_gfx->FillRect(cx - 120, y - 4, 240, 1, SDL_Color{ 255, 255, 255, 80 });
+                    m_gfx->FillRect(cx - 120, y + 37, 240, 1, SDL_Color{ 255, 255, 255, 80 });
+                } else if (deck) {
+                    m_gfx->FillRect(cx - 120, y - 4, 240, 42, WithAlpha(t.accent, 60));
+                    m_gfx->FillRect(cx - 120, y - 4, 4, 42, t.accent);
+                } else {
+                    PanelCard(cx - 110.0f, y - 4.0f, 220.0f, 42.0f, 10.0f, 0.0f, WithAlpha(t.accent, 70));
+                }
+            }
+            m_gfx->TextCentered(FontSize::Normal, cx, y,
+                                xmb ? (sel ? white : SDL_Color{ 150, 150, 150, 255 }) : sel ? t.title : t.fg, opts[i]);
         }
         // One button explains itself, and a hint would only land on top of
         // the layout's own hint row.

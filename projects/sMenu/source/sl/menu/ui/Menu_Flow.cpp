@@ -112,8 +112,11 @@ namespace sl::menu::ui {
         static const int kH[] = { kCoverTexH, 540, kDeckRowH };
         built = false;
         char path[96], key[32];
-        snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX%s",
-                 (unsigned long long)id, kSuffix[kind]);
+        static const char *const kCustom[] = { "cover", "wrap", "hero" };
+        const std::string custom = CustomArt(id, kCustom[kind]);
+        if (!custom.empty()) snprintf(path, sizeof(path), "%s", custom.c_str());
+        else snprintf(path, sizeof(path), "sdmc:/slaunch/covers/%016llX%s",
+                      (unsigned long long)id, kSuffix[kind]);
         snprintf(key, sizeof(key), "%016llX%s", (unsigned long long)id, kKey[kind]);
         struct stat src {};
         if (stat(path, &src) != 0) return nullptr;   // no file: a null result, remembered
@@ -442,13 +445,13 @@ namespace sl::menu::ui {
             struct stat st {};
             snprintf(probe, sizeof(probe), "sdmc:/slaunch/covers/%016llX.jpg",
                      (unsigned long long)m->m_cover_id);
-            need_cover = (stat(probe, &st) != 0);
+            need_cover = (stat(probe, &st) != 0) && CustomArt(m->m_cover_id, "cover").empty();
             snprintf(probe, sizeof(probe), "sdmc:/slaunch/covers/%016llX_s0.jpg",
                      (unsigned long long)m->m_cover_id);
-            need_shots = (stat(probe, &st) != 0);
+            need_shots = (stat(probe, &st) != 0) && CustomArt(m->m_cover_id, "shot1").empty();
             snprintf(probe, sizeof(probe), "sdmc:/slaunch/covers/%016llX_hero.jpg",
                      (unsigned long long)m->m_cover_id);
-            need_hero = (stat(probe, &st) != 0);
+            need_hero = (stat(probe, &st) != 0) && CustomArt(m->m_cover_id, "hero").empty();
         }
         m->m_cover_state.store((int)CoverState::Searching, std::memory_order_release);
         CoverState end = CoverState::Failed;
@@ -462,7 +465,7 @@ namespace sl::menu::ui {
             struct stat st {};
             snprintf(probe, sizeof(probe), "sdmc:/slaunch/covers/%016llX_wrap.png",
                      (unsigned long long)m->m_cover_id);
-            bool have_wrap = (stat(probe, &st) == 0);
+            bool have_wrap = (stat(probe, &st) == 0) || !CustomArt(m->m_cover_id, "wrap").empty();
             if (!have_wrap && !net::ContentFilter::ShouldFilterGameByName(m->m_cover_name)) {
                 bool cover_made = false;
                 have_wrap = FetchGameTdb(m->m_cover_id, m->m_cover_name, need_cover,
@@ -852,10 +855,13 @@ namespace sl::menu::ui {
         return none;
     }
     void Menu::StartShotDecode(u64 app_id) {
-        snprintf(m_shot_path_a, sizeof(m_shot_path_a),
-                 "sdmc:/slaunch/covers/%016llX_s0.jpg", (unsigned long long)app_id);
-        snprintf(m_shot_path_b, sizeof(m_shot_path_b),
-                 "sdmc:/slaunch/covers/%016llX_s1.jpg", (unsigned long long)app_id);
+        const std::string ca = CustomArt(app_id, "shot1"), cb = CustomArt(app_id, "shot2");
+        if (!ca.empty()) snprintf(m_shot_path_a, sizeof(m_shot_path_a), "%s", ca.c_str());
+        else snprintf(m_shot_path_a, sizeof(m_shot_path_a),
+                      "sdmc:/slaunch/covers/%016llX_s0.jpg", (unsigned long long)app_id);
+        if (!cb.empty()) snprintf(m_shot_path_b, sizeof(m_shot_path_b), "%s", cb.c_str());
+        else snprintf(m_shot_path_b, sizeof(m_shot_path_b),
+                      "sdmc:/slaunch/covers/%016llX_s1.jpg", (unsigned long long)app_id);
         m_shot_job_id = app_id;
         m_shot_surf_a = nullptr;
         m_shot_surf_b = nullptr;

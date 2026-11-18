@@ -229,10 +229,11 @@ namespace sl::menu::ui {
             char *eq = strchr(line, '=');
             if (!eq || eq == line) continue;
             *eq = '\0';
-            int w = 0, h = 0; char col[16] = "-";
-            if (sscanf(eq + 1, "%dx%d,%15s", &w, &h, col) < 2) continue;
+            int w = 0, h = 0, nm = 0; char col[16] = "-";
+            if (sscanf(eq + 1, "%dx%d,%15[^,],%d", &w, &h, col, &nm) < 2) continue;
             TileCfg c;
             c.w = w; c.h = h;
+            c.name = (nm >= 0 && nm <= 2) ? nm : 0;
             unsigned rgb = 0;
             if (col[0] != '-' && sscanf(col, "%x", &rgb) == 1) {
                 c.has_color = true;
@@ -252,10 +253,15 @@ namespace sl::menu::ui {
             if (kv.second.has_color)
                 snprintf(col, sizeof(col), "%02x%02x%02x", kv.second.color.r,
                          kv.second.color.g, kv.second.color.b);
-            fprintf(fp, "%s=%dx%d,%s\n", kv.first.c_str(),
-                    kv.second.w, kv.second.h, col);
+            fprintf(fp, "%s=%dx%d,%s,%d\n", kv.first.c_str(),
+                    kv.second.w, kv.second.h, col, kv.second.name);
         }
         fclose(fp);
+    }
+    bool Menu::TileNameShown(const std::string &key) const {
+        const auto c = m_tilecfg.find(key);
+        if (c != m_tilecfg.end() && c->second.name) return c->second.name == 1;
+        return m_tile_names;
     }
     Menu::TileCfg &Menu::TileCfgFor(const std::string &key) {
         auto it = m_tilecfg.find(key);
@@ -523,7 +529,7 @@ namespace sl::menu::ui {
             cs.radius   = 0.0f;
             cs.shadow   = 0.0f;
             cs.fill     = WithAlpha(fill, img ? 255 : 218);
-            cs.band     = (band && img) ? 30.0f : 0.0f;
+            cs.band     = (band && img && TileNameShown(ItemKey(it))) ? 30.0f : 0.0f;
             carded = m_gfx->Card(img, (float)r.x, (float)r.y, (float)r.w, (float)r.h, cs, a);
             if (!carded) {
                 m_gfx->FillRect(r.x, r.y, r.w, r.h, WithAlpha(fill, a));
@@ -624,6 +630,7 @@ namespace sl::menu::ui {
         if (!rest) return;
         const int band = 30;   // the label's line at the foot of the tile
 
+        const bool named = TileNameShown(key);
         std::string label = it.name;
         // The music tile names the track rather than naming itself - the play
         // state is already spelled out on its face, so it is not repeated here.
@@ -631,7 +638,7 @@ namespace sl::menu::ui {
             const std::string now_playing = m_music.CurrentName();
             if (!now_playing.empty()) label = now_playing;
         }
-        m_gfx->Text(FontSize::Small, r.x + 10,
+        if (named) m_gfx->Text(FontSize::Small, r.x + 10,
                     r.y + r.h - band + (band - m_gfx->LineHeight(FontSize::Small)) / 2,
                     WithAlpha(t.fg, a),
                     Ellipsize(label, r.w - 20, FontSize::Small).c_str());
