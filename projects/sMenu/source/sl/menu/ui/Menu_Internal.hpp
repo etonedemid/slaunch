@@ -748,6 +748,10 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.3.1" },
+            { false, "NXE: the game library's panels draw again instead of four squares in their corners, and the list is readable" },
+            { false, "NXE: the game page shows every row, rating included, above the time played" },
+            { false, "Your Mii shows when the account picture is a character: the first Mii in Mii Edit stands in" },
             { true,  "v2.3.0" },
             { false, "NXE: the home channel is your profile, then your games, then your media, in the dashboard's own art, now shipped as NXE's default skin" },
             { false, "Your Mii stands on the NXE profile and Metro's gamer tile, and its face is on Blades' gamer card" },

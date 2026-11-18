@@ -327,7 +327,6 @@ namespace sl::menu::ui {
             { "highlight", { "highlight.png" } },
         };
         const Pick kPickBlades[] = { { "panel", { "panel_1.png" } }, { "detail", { "panel_2inset.png" } } };
-        const Pick kPickNxe[]    = { { "panel", { "panel_bg.png" } } };
     }
 
     // made[0] / made[1]: the Blades / NXE skin this made, if any.
@@ -391,7 +390,6 @@ namespace sl::menu::ui {
                 std::string d;
                 if (fetch("fond1.png", d) && CutBladeTile(d, out + "/spine.png", out + "/spine_right.png")) wrote++;
             } else {
-                for (const Pick &pk : kPickNxe) take(pk);
                 // Other dashboards' packages (FreeStyle Dash and the like) name
                 // their pictures their own way: the biggest picture whose name
                 // has the word in it, for whatever the exact names missed.
@@ -409,7 +407,9 @@ namespace sl::menu::ui {
                     if (best) { const Pick pk{ dst, { best->c_str() } }; take(pk); }
                 };
                 takeLike("background", { "background", "wallpaper", "bg" });
-                takeLike("panel", { "panel", "window", "box" });
+                // The 360 dashboard's own panel_bg.png is corner pieces round a
+                // see-through middle, not a list panel: sLaunch's is used instead.
+                if (name != "dashboard") takeLike("panel", { "panel", "window", "box" });
                 takeLike("highlight", { "highlight", "select", "focus", "hover" });
             }
             const std::string ini = out + "/skin.ini";
@@ -545,7 +545,9 @@ namespace sl::menu::ui {
             s.cat_face[i]  = img(std::string("blade_") + kSkinCat[i]);
             s.cat_spine[i] = img(std::string("spine_") + kSkinCat[i]);
         }
-        s.panel = img("panel");
+        // Older importers put the dashboard's panel_bg.png here, which draws as
+        // four corner squares; the shipped dashboard skin has no panel of its own.
+        if (!(m_ui_mode == UiMode::NXE && name == "dashboard")) s.panel = img("panel");
         s.highlight = img("highlight");
         s.card = img("gamercard");
         s.detail = img("detail");
@@ -1606,9 +1608,10 @@ namespace sl::menu::ui {
             int yy = ry + 12;
             for (const auto &r : rows) {
                 if (r.second->empty()) continue;
+                if (yy + 24 > y + h - pad - 22) break;   // clear of the time played along the bottom
                 MText(XF_Semi, 17, x + pad, yy, grey, r.first);
                 MText(XF_Semi, 17, x + pad + lw + 10, yy, white, MFit(XF_Semi, 17, *r.second, w - 2 * pad - lw - 10).c_str());
-                yy += 28;
+                yy += m_ui_mode == UiMode::NXE ? 24 : 28;   // NXE's card is shorter, beside a 7-row list
             }
         }
         // Time played and when, along the bottom, and who is online in it.
@@ -1872,35 +1875,52 @@ namespace sl::menu::ui {
             (void)uid;
             return "000d142a303f434b717a7b84939ba6b2bbbec5cbc9d0e2ea010d15252b3250535960736f726870757f8289a0a7aeb1";
 #else
-            AccountProfile p;
+            #define MIILOG(...) do { if (FILE *f_ = fopen("sdmc:/slaunch/boot.log", "a")) { fputs("mii: ", f_); fprintf(f_, __VA_ARGS__); fputc('\n', f_); fclose(f_); } } while (0)
+            // The account's own Mii when its picture was made from one; a
+            // character picture has none, so then the first Mii in Mii Edit.
             AccountUserData ud{};
-            if (!accountUidIsValid(&uid) || R_FAILED(accountGetProfile(&p, uid))) return "";
-            const Result rc = accountProfileGet(&p, &ud, nullptr);
-            accountProfileClose(&p);
-            static const u8 kZero[16] = {};
-            if (R_FAILED(rc) || !memcmp(ud.miiID, kZero, 16)) return "";
+            AccountProfile p;
+            Result rc = accountUidIsValid(&uid) ? accountGetProfile(&p, uid) : MAKERESULT(Module_Libnx, LibnxError_BadInput);
+            if (R_SUCCEEDED(rc)) { rc = accountProfileGet(&p, &ud, nullptr); accountProfileClose(&p); }
+            if (R_FAILED(rc)) MIILOG("profile rc=0x%x", rc);
             std::string out;
-            if (R_FAILED(miiInitialize(MiiServiceType_System))) return "";
+            rc = miiInitialize(MiiServiceType_System);
+            if (R_FAILED(rc)) { MIILOG("init rc=0x%x", rc); return ""; }
             MiiDatabase db;
-            if (R_SUCCEEDED(miiOpenDatabase(&db, MiiSpecialKeyCode_Normal))) {
+            rc = miiOpenDatabase(&db, MiiSpecialKeyCode_Normal);
+            if (R_SUCCEEDED(rc)) {
                 std::vector<MiiCharInfo> all(100);
                 s32 n = 0;
-                if (R_SUCCEEDED(miiDatabaseGet1(&db, MiiSourceFlag_Database, all.data(), (s32)all.size(), &n)))
-                    for (s32 i = 0; i < n && i < (s32)all.size() && out.empty(); i++)
-                        if (!memcmp(&all[i].create_id, ud.miiID, 16)) out = MiiStudioHex((const u8 *)&all[i]);
+                rc = miiDatabaseGet1(&db, MiiSourceFlag_Database, all.data(), (s32)all.size(), &n);
+                if (R_FAILED(rc)) n = 0;
+                s32 hit = -1;
+                for (s32 i = 0; i < n && i < (s32)all.size() && hit < 0; i++)
+                    if (!memcmp(&all[i].create_id, ud.miiID, 16)) hit = i;
+                MIILOG("get rc=0x%x count=%d account=%d", rc, n, hit);
+                if (hit < 0 && n > 0) hit = 0;
+                if (hit >= 0) out = MiiStudioHex((const u8 *)&all[hit]);
                 miiDatabaseClose(&db);
+            } else {
+                MIILOG("open rc=0x%x", rc);
             }
             miiExit();
             return out;
+            #undef MIILOG
 #endif
         }
     }
 
     void Menu::MiiTrampoline(void *self) {
         Menu *m = (Menu *)self;
-        if (!net::Download(m->m_mii_url.c_str(), m->m_mii_path.c_str(), 15) ||
-            !net::ImageLooksWhole(m->m_mii_path.c_str()))
+        const bool got = net::Download(m->m_mii_url.c_str(), m->m_mii_path.c_str(), 15);
+        const bool whole = got && net::ImageLooksWhole(m->m_mii_path.c_str());
+        if (!whole) {
             remove(m->m_mii_path.c_str());
+            if (FILE *f = fopen("sdmc:/slaunch/boot.log", "a")) {
+                fprintf(f, "mii: render %s (%s)\n", got ? "not an image" : "download failed", m->m_mii_url.c_str());
+                fclose(f);
+            }
+        }
         m->m_mii_done.store(true, std::memory_order_release);
     }
 
