@@ -54,6 +54,8 @@ assets: hbloader
 	@# The Metro layout's typeface, in a subfolder so the Fonts screen does not list it.
 	@mkdir -p SdOut/slaunch/fonts/metro
 	@cp -f assets/fonts/metro/*.ttf assets/fonts/metro/LICENSE-Selawik.txt SdOut/slaunch/fonts/metro/
+	@mkdir -p SdOut/slaunch/mii
+	@cp -f assets/mii/MiiBody.dat assets/mii/anims.bin SdOut/slaunch/mii/
 	@# Default Lua widgets. example.lua is reference-only, so it is not shipped.
 	@# All ship disabled by default (Theming > Widgets turns them on).
 	@cp -f assets/widgets/weather.lua assets/widgets/auroracross.lua \

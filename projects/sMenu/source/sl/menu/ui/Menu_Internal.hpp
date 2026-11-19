@@ -749,6 +749,8 @@ namespace sl::menu::ui {
         struct LogLine { bool head; const char *text; };
         // Newest first. Headers are version tags; the rest are one-line summaries.
         inline const LogLine kChangelog[] = {
+            { true,  "v2.5.2" },
+            { false, "3D Miis work out of the box: the Mii body and animations now come with sLaunch" },
             { true,  "v2.5.1" },
             { false, "NXE: A on your profile opens Choose your Mii, Switch account, Mii Edit and User Page" },
             { false, "Choose your Mii: a 3D picker where the Miis stand in a row and the chosen one floats up in a beam" },
