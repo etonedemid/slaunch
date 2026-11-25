@@ -481,11 +481,12 @@ namespace sl::menu::ui {
     int Menu::CoverPickAt(int x, int y) const {
         const int have = m_pick_have.load(std::memory_order_acquire);
         if (have <= 0) return -1;
-        const int top = kPickTop - (int)(m_pick_scroll * (kPickCellH + kPickGapY));
+        const PickGrid g = PickGridOf(m_pick_kind == PickKind::Hero);
+        const int top = kPickTop - (int)(m_pick_scroll * (g.h + kPickGapY));
         for (int i = 0; i < have; i++) {
-            const int cx = PickCellX(i % kPickCols);
-            const int cy = top + (i / kPickCols) * (kPickCellH + kPickGapY);
-            if (x >= cx && x < cx + kPickCellW && y >= cy && y < cy + kPickCellH)
+            const int cx = PickCellX(g, i % g.cols);
+            const int cy = top + (i / g.cols) * (g.h + kPickGapY);
+            if (x >= cx && x < cx + g.w && y >= cy && y < cy + g.h)
                 return i;
         }
         return -1;
