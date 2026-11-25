@@ -279,9 +279,42 @@ namespace sl::menu::ui {
 
     // ---- drawing ------------------------------------------------------------
     // The 2012 backdrop: charcoal at the top lightening to a pale band about
-    // where the tiles stand, as if on a lit floor, then dimming again. One
-    // texture a pixel wide, stretched - a gradient the GPU filters for free.
+    // where the tiles stand, as if on a lit floor, then dimming again.
+    //
+    // In 8 bits this slow gradient has a shade every 5 to 9 rows, and each
+    // shade shows as a flat band. The shader adds triangular noise of up to
+    // one shade, different in each pixel, so the bands go (the same dither as
+    // the XMB gradient). The same stops as the texture below.
+    static constexpr const char *kMetroBgVs = R"(
+varying vec2 vP;
+void main() {
+    vP = aV.xy * vec2(1280.0, 720.0);
+    gl_Position = Clip(vP);
+}
+)";
+    static constexpr const char *kMetroBgFs = R"(
+varying vec2 vP;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
+vec3 Seg(vec3 c, vec3 to, float y0, float y1) { return mix(c, to, clamp((vP.y - y0) / (y1 - y0), 0.0, 1.0)); }
+void main() {
+    vec3 c = vec3(80.0, 81.0, 86.0);
+    c = Seg(c, vec3(104.0, 105.0, 110.0),   0.0, 160.0);
+    c = Seg(c, vec3(132.0, 133.0, 137.0), 160.0, 300.0);
+    c = Seg(c, vec3(164.0, 164.0, 166.0), 300.0, 450.0);
+    c = Seg(c, vec3(182.0, 182.0, 182.0), 450.0, 575.0);
+    c = Seg(c, vec3(176.0, 176.0, 177.0), 575.0, 625.0);
+    c = Seg(c, vec3(142.0, 143.0, 147.0), 625.0, 720.0);
+    gl_FragColor = vec4(c / 255.0 + Dither(gl_FragCoord.xy), 1.0);
+}
+)";
+    // Without the GPU: one texture a pixel wide, stretched.
     void Menu::MetroDrawBackdrop() {
+        if (m_gfx->FxBegin(m_gfx->FxProgram(kMetroBgVs, kMetroBgFs))) {
+            m_gfx->FxStrip(2);
+            m_gfx->FxEnd();
+            return;
+        }
         if (!m_metro_bg) {
             struct Stop { int y; SDL_Color c; };
             static const Stop stops[] = {

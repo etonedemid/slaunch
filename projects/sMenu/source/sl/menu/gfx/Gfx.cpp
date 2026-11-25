@@ -73,6 +73,29 @@ void main() {
     gl_FragColor = vec4(mix(uTop.rgb, uBot.rgb, vP.y / 720.0), 1.0) + k;
 }
 )";
+    // The background gradient, dithered. In 8 bits a slow gradient has only
+    // a few dozen shades per channel, so each shade is a flat band many pixels
+    // high. Noise of up to one shade either way, different in each output
+    // pixel, makes the average of each area follow the gradient. The noise is
+    // triangular (two patterns added): uniform noise one shade wide vanishes
+    // where the gradient is exactly on a shade, so clean and grainy stripes
+    // alternate, and those stripes are bands too.
+    static constexpr const char *kGradVs = R"(
+varying vec2 vP;
+void main() {
+    vP = aV.xy * vec2(1280.0, 720.0);
+    gl_Position = Clip(vP);
+}
+)";
+    static constexpr const char *kGradFs = R"(
+uniform vec4 uTop, uBot;
+varying vec2 vP;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
+void main() {
+    gl_FragColor = vec4(mix(uTop.rgb, uBot.rgb, vP.y / 720.0) + Dither(gl_FragCoord.xy), 1.0);
+}
+)";
     // The whole of a small file, or false.
     [[maybe_unused]] static bool ReadSmall(const std::string &path, std::string &out, size_t cap) {
         out.clear();
@@ -525,6 +548,13 @@ void main() {
     }
 
     void Gfx::GradientV(SDL_Color top, SDL_Color bottom) {
+        if (FxBegin(FxProgram(kGradVs, kGradFs))) {
+            FxSet("uTop", top);
+            FxSet("uBot", bottom);
+            FxStrip(2);
+            FxEnd();
+            return;
+        }
         FxClose();   // an open GPU pass must end before SDL draws again
         // Rebuild the baked gradient only when the Colors actually change.
         if (!m_gradValid || top.r != m_gradTop.r || top.g != m_gradTop.g ||
@@ -538,9 +568,10 @@ void main() {
                 if (SDL_LockTexture(m_gradTex, nullptr, &pixels, &pitch)) {
                     for (int y = 0; y < Height; y++) {
                         float t = (float)y / (float)(Height - 1);
-                        Uint8 r = (Uint8)(top.r + (bottom.r - top.r) * t);
-                        Uint8 g = (Uint8)(top.g + (bottom.g - top.g) * t);
-                        Uint8 b = (Uint8)(top.b + (bottom.b - top.b) * t);
+                        // Rounded, not truncated: no shade is a band too wide.
+                        Uint8 r = (Uint8)(top.r + (bottom.r - top.r) * t + 0.5f);
+                        Uint8 g = (Uint8)(top.g + (bottom.g - top.g) * t + 0.5f);
+                        Uint8 b = (Uint8)(top.b + (bottom.b - top.b) * t + 0.5f);
                         *(Uint32*)((Uint8*)pixels + y * pitch) =
                             (0xFFu << 24) | (r << 16) | (g << 8) | b;
                     }

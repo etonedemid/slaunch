@@ -1072,11 +1072,14 @@ void main() {
         inline constexpr const char *kRibbonFs = R"(
 varying vec4 vCol;
 varying float vAdd, vEdge, vHi, vG;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 void main() {
     float a = vCol.a;
     if (vEdge < 1.0) a = vHi + a * (1.0 - vHi);        // leading-edge sheen
     float fall = 1.0 - abs(vG * 2.0 - 1.0);            // bloom fades out from the core
-    gl_FragColor = vec4(vCol.rgb * (a + vAdd * fall * fall * fall), a);
+    float n = Dither(gl_FragCoord.xy * vec2(-1.0, 1.0)) * step(0.002, a);   // see kWaveFs
+    gl_FragColor = vec4(vCol.rgb * (a + vAdd * fall * fall * fall) + n, a);
 }
 )";
 
@@ -1481,11 +1484,14 @@ void main() {
         inline constexpr const char *kAuroraFs = R"(
 uniform vec4 uA, uB, uG;
 varying float vK, vI;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 void main() {
     float k = min(floor(vK * uG.y), uG.y - 1.0) / (uG.y - 1.0);
     float a = k * k * (1.0 - 0.25 * k) * vI;
     if (a < 3.0 / 255.0) discard;
-    gl_FragColor = vec4(mix(uB.rgb, uA.rgb, k) * a, 0.0);   // additive
+    vec3 n = vec3(Dither(gl_FragCoord.xy * vec2(-1.0, 1.0)));   // see kWaveFs
+    gl_FragColor = vec4(mix(uB.rgb, uA.rgb, k) * a + n, 0.0);   // additive
 }
 )";
 
@@ -1656,6 +1662,8 @@ void main() {
 uniform vec4 uLine, uSun, uA, uB;
 varying vec2 vP;
 varying float vA;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 void main() {
     if (uLine.x > 2.5) {                             // sun
         float r = uSun.z, top = uSun.y - r;
@@ -1670,7 +1678,8 @@ void main() {
         gl_FragColor = vec4(mix(uB.rgb, uA.rgb, k) * (210.0 / 255.0), 210.0 / 255.0);
     } else {
         float a = min(vA, 1.0);
-        gl_FragColor = vec4(uA.rgb * a, a);
+        float n = Dither(gl_FragCoord.xy * vec2(-1.0, 1.0)) * step(0.002, a);   // see kWaveFs
+        gl_FragColor = vec4(uA.rgb * a + n, a);
     }
 }
 )";
@@ -1916,6 +1925,8 @@ uniform vec4 uDeep, uCrest;
 uniform vec4 uSea;    // horizon y, swell, speed, density
 uniform vec4 uSea2;   // reflection x, pixel size
 varying vec2 vP;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 void main() {
     float px = uSea2.y;
     vec2  p  = floor(vP / px) * px + px * 0.5;          // chunky pixels
@@ -1939,7 +1950,8 @@ void main() {
     vec3 col = mix(uDeep.rgb * 0.45, uDeep.rgb, d);     // darker toward the horizon
     col = mix(col, uCrest.rgb, crest * (0.30 + 0.70 * d));
     col = mix(col, min(uCrest.rgb * 1.3 + 0.15, 1.0), refl * (1.0 - 0.45 * d));
-    gl_FragColor = vec4(col, 1.0);
+    // Dithered per chunky pixel, not per screen pixel, so the blocks stay whole.
+    gl_FragColor = vec4(col + Dither(floor(vP / px)), 1.0);
 }
 )";
         inline void DrawOceanBackground(gfx::Gfx *gfx, const Theme &t) {
@@ -1979,6 +1991,8 @@ uniform vec4 uTint;
 uniform vec4 uWa;     // centre y, height px, speed, sheets
 uniform vec4 uWb;     // edge px, seed
 varying vec2 vQ;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 float C(float x, float k) {
     float s = x * 0.0049087, t = uTime * uWa.z, q = k * 2.39996 + uWb.y;
     return sin(s * (0.62 + 0.11 * k) + t * (0.70 + 0.13 * k) + q)
@@ -2026,7 +2040,11 @@ void main() {
         a += exp(-dot(d, d) / 1.8) * tw * exp(-by * by) * 0.7 * (1.0 - a);
     }
     vec3 c = mix(uTint.rgb, vec3(1.0), 0.35);
-    gl_FragColor = vec4(c * a, a) * uTint.a;
+    // Dither the faint glow and fill as the gradient is dithered (see kGradFs).
+    // x is flipped: the gradient's noise is already in these pixels, and the
+    // same pattern again would double it instead of adding a second one.
+    float n = Dither(gl_FragCoord.xy * vec2(-1.0, 1.0)) * step(0.002, a);
+    gl_FragColor = vec4(c * a + n, a) * uTint.a;
 }
 )";
         inline void DrawWaveBackground(gfx::Gfx *gfx, const Theme &t) {
