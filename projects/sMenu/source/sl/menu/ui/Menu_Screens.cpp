@@ -2121,6 +2121,7 @@ namespace sl::menu::ui {
             }
             if (which == Dialog::ConfirmCloseGame) return Action::TerminateApp;
             if (which == Dialog::ConfirmDelete) { FmConfirmDelete(); return Action::None; }
+            if (which == Dialog::ConfirmUninstall) { UninstallGame(); return Action::None; }
             if (which == Dialog::ConfirmUpdate) { StartOta(); return Action::None; }
             if (which == Dialog::ConfirmRetroArch) {
                 m_retroarch = true;

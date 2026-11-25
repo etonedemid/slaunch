@@ -576,7 +576,8 @@ namespace sl::menu::ui {
                        OptCollNew, OptCollRename, OptCollDelete, OptHide,
                        OptAddHomebrew, OptCustomMenu, OptTileMenu, OptMoreMenu,
                        OptArtFile, OptArtReset,
-                       OptMiiPick, OptSwitchUser, OptMiiEdit, OptUserPage };
+                       OptMiiPick, OptSwitchUser, OptMiiEdit, OptUserPage,
+                       OptUninstall };
     // The art slots a game's own picture can fill (X > Customize), by the
     // file name CustomArt looks for.
     inline constexpr struct { const char *file, *label; } kArtKinds[] = {

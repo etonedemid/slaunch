@@ -403,6 +403,8 @@ extern "C" bool hosversionAtLeast(u8 major, u8 minor, u8 micro) {
     return hosversionGet() >= (u32)((major << 16) | (minor << 8) | micro);
 }
 
+extern "C" Result nsDeleteApplicationCompletely(u64) { return 0; }
+
 // ---- Bluetooth: one paired pair of headphones, one speaker found ----
 static bool g_bt_radio = true, g_bt_search = false, g_bt_conn = true;
 static void bt_dev(BtmAudioDevice *d, u8 last, const char *name) {

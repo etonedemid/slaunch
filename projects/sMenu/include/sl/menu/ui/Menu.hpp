@@ -269,6 +269,7 @@ namespace sl::menu::ui {
                             MiiPicker };
         enum class Dialog { None, ConfirmCloseForLaunch, ConfirmCloseGame, ConfirmPower,
                             ConfirmRetroArch, ConfirmDelete, ConfirmUpdate,
+                            ConfirmUninstall,
                             CrashReport };   // a notice: one OK, no choice
         // Once per start: anything that crashed since the menu last looked
         // left a report in atmosphere/crash_reports (fatal_reports for a
@@ -1745,6 +1746,8 @@ namespace sl::menu::ui {
         int m_font_preview = -1; // index currently loaded into the gfx alt slot
 
         u64 m_pending_launch = 0;
+        u64 m_uninstall_app  = 0;   // the game ConfirmUninstall asks about
+        void UninstallGame();
         int m_dialog_cursor  = 0; // 0 = Yes, 1 = No
 
         u64        m_suspended = 0;
