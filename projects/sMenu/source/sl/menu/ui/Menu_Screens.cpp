@@ -118,7 +118,7 @@ namespace sl::menu::ui {
                     SetStatus(m_kb_text.empty() ? T("Key cleared") : T("Key saved"));
                     if (m_kb_to_picker) {       // asked for by the cover picker: search now
                         m_kb_to_picker = false;
-                        EnterCoverPicker();
+                        EnterCoverPicker(m_pick_kind);
                     } else {
                         m_screen = Screen::Theming;
                     }
@@ -316,15 +316,31 @@ namespace sl::menu::ui {
             m->m_pick_state.store((int)PickState::Applying, std::memory_order_release);
             bool ok = false;
             const int idx = m->m_pick_choice;
-            if (idx >= 0 && idx < (int)m->m_pick_urls.size()) {
-                const char *dir = m->m_pick_icon ? "sdmc:/slaunch/icons_custom" : "sdmc:/slaunch/covers";
-                mkdir(dir, 0777);
-                char dst[96];
-                snprintf(dst, sizeof(dst), "%s/%016llX.jpg", dir, (unsigned long long)m->m_pick_id);
+            const unsigned long long id = m->m_pick_id;
+            char dst[96];
+            if (idx >= 0 && idx < (int)m->m_pick_urls.size() && m->m_pick_kind == PickKind::Icon) {
+                mkdir("sdmc:/slaunch/icons_custom", 0777);
+                snprintf(dst, sizeof(dst), "sdmc:/slaunch/icons_custom/%016llX.jpg", id);
                 ok = net::Download(m->m_pick_urls[idx].c_str(), dst, 25);
-                if (ok && m->m_pick_icon) {   // for the Discord presence
-                    snprintf(dst, sizeof(dst), "%s/%016llX.url", dir, (unsigned long long)m->m_pick_id);
+                if (ok) {   // for the Discord presence
+                    snprintf(dst, sizeof(dst), "sdmc:/slaunch/icons_custom/%016llX.url", id);
                     if (FILE *f = fopen(dst, "w")) { fputs(m->m_pick_urls[idx].c_str(), f); fclose(f); }
+                }
+            } else if (idx >= 0 && idx < (int)m->m_pick_urls.size()) {
+                // A cover or background goes with the user's own art, not into
+                // covers/: that is the download cache, and custom/ wins over it,
+                // stops the automatic fetch, and "Remove custom art" undoes it.
+                const char *kind = m->m_pick_kind == PickKind::Hero ? "hero" : "cover";
+                mkdir(kCustomArtDir, 0777);
+                snprintf(dst, sizeof(dst), "%s/%016llX", kCustomArtDir, id);
+                mkdir(dst, 0777);
+                snprintf(dst, sizeof(dst), "%s/%016llX/%s.jpg", kCustomArtDir, id, kind);
+                ok = net::Download(m->m_pick_urls[idx].c_str(), dst, 25);
+                // An older file of another type would still win (png first).
+                for (const char *ext : kCustomArtExts) {
+                    if (!ok || !strcmp(ext, "jpg")) continue;
+                    snprintf(dst, sizeof(dst), "%s/%016llX/%s.%s", kCustomArtDir, id, kind, ext);
+                    remove(dst);
                 }
             }
             m->m_pick_state.store((int)(ok ? PickState::Applied : PickState::Failed),
@@ -336,17 +352,20 @@ namespace sl::menu::ui {
         const std::string auth = "Bearer " + m->m_sgdb_key;
         PickState end = PickState::Failed;
 
-        // Icons: the eShop's own first (no key needed), then SteamGridDB's.
+        // Icons and backgrounds: the eShop's own first (no key needed), then
+        // SteamGridDB's.
+        const PickKind kind = m->m_pick_kind;
         std::vector<std::string> urls, thumbs;
-        if (m->m_pick_icon && !net::ContentFilter::ShouldFilterGameByName(m->m_pick_name)) {
+        if (kind != PickKind::Cover && !net::ContentFilter::ShouldFilterGameByName(m->m_pick_name)) {
             m->m_pick_state.store((int)PickState::Searching, std::memory_order_release);
-            const std::string e = net::EshopIcon(m->m_pick_name, 256);
+            const std::string e = kind == PickKind::Icon ? net::EshopIcon(m->m_pick_name, 256)
+                                                         : net::EshopHero(m->m_pick_name, 960, 540);
             if (!e.empty()) { urls.push_back(e); thumbs.push_back(e); }
             end = PickState::NoArt;
         }
 
         do {
-            if (m->m_pick_icon && !m->SgdbKeyPresent()) break;
+            if (kind != PickKind::Cover && !m->SgdbKeyPresent()) break;
             std::string q;
             for (unsigned char c : m->m_pick_name) {
                 if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
@@ -382,10 +401,14 @@ namespace sl::menu::ui {
 
             m->m_pick_state.store((int)PickState::Listing, std::memory_order_release);
             char grid[176];
-            if (m->m_pick_icon)
+            if (kind == PickKind::Icon)
                 snprintf(grid, sizeof(grid),
                          "https://www.steamgriddb.com/api/v2/icons/game/%lld"
                          "?types=static&mimes=image/png&limit=%d", gid, kPickMax);
+            else if (kind == PickKind::Hero)
+                snprintf(grid, sizeof(grid),
+                         "https://www.steamgriddb.com/api/v2/heroes/game/%lld"
+                         "?dimensions=1920x620&types=static&limit=%d", gid, kPickMax);
             else
                 snprintf(grid, sizeof(grid),
                          "https://www.steamgriddb.com/api/v2/grids/game/%lld"
@@ -435,14 +458,14 @@ namespace sl::menu::ui {
         m->m_pick_state.store((int)end, std::memory_order_release);
         m->m_pick_done.store(true, std::memory_order_release);
     }
-    void Menu::EnterCoverPicker(bool icon) {
+    void Menu::EnterCoverPicker(PickKind kind) {
         if (m_pick_running) return;                 // a fetch is already in flight
         const MenuItem &it = m_items[m_cursor];
         if (it.kind != ItemKind::Game || it.app_id == 0) return;
 
         LeaveCoverPicker();                          // free any previous session
         m_pick_id     = it.app_id;
-        m_pick_icon   = icon;
+        m_pick_kind   = kind;
         m_pick_name   = it.name;
         m_pick_cursor = 0;
         m_pick_scroll = 0.0f;
@@ -454,7 +477,7 @@ namespace sl::menu::ui {
         m_pick_done.store(false, std::memory_order_release);
         m_screen = Screen::CoverPicker;
 
-        if (!icon && !SgdbKeyPresent()) {
+        if (kind == PickKind::Cover && !SgdbKeyPresent()) {
             m_pick_state.store((int)PickState::NoKey, std::memory_order_release);
             return;
         }
@@ -521,7 +544,7 @@ namespace sl::menu::ui {
         const PickState st = (PickState)m_pick_state.load(std::memory_order_acquire);
         if (st != PickState::Applied) { SetStatus(T("Could not download that cover")); return; }
 
-        if (m_pick_icon) {
+        if (m_pick_kind == PickKind::Icon) {
             m_custom_icons.insert(m_pick_id);
             m_icons.Drop(m_pick_id);
             for (auto &kv : m_folder_art) kv.second.have = 0;   // folder faces too
@@ -531,24 +554,10 @@ namespace sl::menu::ui {
             return;
         }
 
-        // Drop what Flow and the shelf have cached for this title so the new
-        // file is picked up on the next frame, exactly as a fetch does.
-        m_art_epoch++;
-        auto f = m_covers.find(m_pick_id);
-        if (f != m_covers.end()) {
-            if (f->second) m_gfx->FreeImage(f->second);
-            m_covers.erase(f);
-        }
-        auto g = m_shots.find(m_pick_id);
-        if (g != m_shots.end()) {
-            if (g->second.a) m_gfx->FreeImage(g->second.a);
-            if (g->second.b) m_gfx->FreeImage(g->second.b);
-            m_shots.erase(g);
-        }
-        m_cover_tried[m_pick_id] = true;   // do not let the auto-fetch undo this
-        for (auto &kv : m_folder_art) kv.second.have = 0;   // a folder made of box art shows the new one
-
-        SetStatus(T("Cover updated"));
+        // Every layout loads the new file on the next frame.
+        g_custom_art_any = 1;
+        DropArtFor(m_pick_id);
+        SetStatus(m_pick_kind == PickKind::Hero ? T("Background updated") : T("Cover updated"));
         m_screen = BackTarget();
         LeaveCoverPicker();
     }
@@ -577,18 +586,19 @@ namespace sl::menu::ui {
         const int have = m_pick_have.load(std::memory_order_acquire);
         if (have <= 0) return Action::None;          // nothing to move around yet
 
-        const int rows = (have + kPickCols - 1) / kPickCols;
+        const int cols = PickGridOf(m_pick_kind == PickKind::Hero).cols;
+        const int rows = (have + cols - 1) / cols;
         if (b == Btn::Left)  m_pick_cursor = (m_pick_cursor + have - 1) % have;
         if (b == Btn::Right) m_pick_cursor = (m_pick_cursor + 1) % have;
         if (b == Btn::Up) {
-            if (m_pick_cursor >= kPickCols) m_pick_cursor -= kPickCols;
+            if (m_pick_cursor >= cols) m_pick_cursor -= cols;
         }
         if (b == Btn::Down) {
-            if (m_pick_cursor + kPickCols < have) m_pick_cursor += kPickCols;
+            if (m_pick_cursor + cols < have) m_pick_cursor += cols;
         }
 
         // Keep the cursor's row on screen.
-        const int row = m_pick_cursor / kPickCols;
+        const int row = m_pick_cursor / cols;
         const float first = m_pick_scroll;
         if ((float)row < first)                    m_pick_scroll = (float)row;
         else if (row > (int)first + kPickRows - 1) m_pick_scroll = (float)(row - kPickRows + 1);
@@ -614,7 +624,8 @@ namespace sl::menu::ui {
     void Menu::DrawCoverPicker() {
         const Theme &t = m_theme.Current();
         const int    W = gfx::Gfx::Width;
-        DrawTopBar(m_pick_icon ? T("Choose icon") : T("Choose cover"));
+        const bool icon = m_pick_kind == PickKind::Icon, hero = m_pick_kind == PickKind::Hero;
+        DrawTopBar(icon ? T("Choose icon") : hero ? T("Choose background") : T("Choose cover"));
 
         const PickState st = (PickState)m_pick_state.load(std::memory_order_acquire);
         const int have  = m_pick_have.load(std::memory_order_acquire);
@@ -630,7 +641,8 @@ namespace sl::menu::ui {
             case PickState::Searching:msg = T("Searching..."); break;
             case PickState::Listing:  msg = T("Loading covers..."); break;
             case PickState::NoMatch:  msg = T("No match on SteamGridDB"); break;
-            case PickState::NoArt:    msg = m_pick_icon ? T("No icons found") : T("No covers available"); break;
+            case PickState::NoArt:    msg = icon ? T("No icons found") : hero ? T("No backgrounds found")
+                                                                   : T("No covers available"); break;
             case PickState::Failed:   msg = T("Fetch failed"); break;
             case PickState::Applying: msg = T("Downloading..."); break;
             default: break;
@@ -649,33 +661,38 @@ namespace sl::menu::ui {
         int budget = 2;
         if ((int)m_pick_tex.size() < have) m_pick_tex.resize(have, nullptr);
 
-        const int top = kPickTop - (int)(m_pick_scroll * (kPickCellH + kPickGapY));
+        const PickGrid g = PickGridOf(hero);
+        const int top = kPickTop - (int)(m_pick_scroll * (g.h + kPickGapY));
 
         for (int i = 0; i < have; i++) {
-            const int cx = PickCellX(i % kPickCols);
-            const int cy = top + (i / kPickCols) * (kPickCellH + kPickGapY);
-            if (cy + kPickCellH < 110 || cy > gfx::Gfx::Height - 40) continue;
+            const int cx = PickCellX(g, i % g.cols);
+            const int cy = top + (i / g.cols) * (g.h + kPickGapY);
+            // Only the rows in view: a part row below runs into the hints.
+            const int row = i / g.cols - (int)m_pick_scroll;
+            if (row < 0 || row >= kPickRows) continue;
 
             if (!m_pick_tex[i] && budget > 0) {
                 char path[96];
                 snprintf(path, sizeof(path), "%s/%02d.jpg", kPickDir, i);
-                m_pick_tex[i] = m_gfx->LoadImageScaled(path, kPickCellW, m_pick_icon ? kPickCellW : kPickCellH);
+                // A background is cropped to the cell, as the Deck tile crops it.
+                m_pick_tex[i] = hero ? m_gfx->LoadImageCropped(path, g.w, g.h)
+                                     : m_gfx->LoadImageScaled(path, g.w, icon ? g.w : g.h);
                 budget--;
             }
 
             const bool sel = (i == m_pick_cursor);
             // Icons are square: drawn in the middle of the cell.
-            const int ch = m_pick_icon ? kPickCellW : kPickCellH;
-            const int iy = cy + (kPickCellH - ch) / 2;
-            if (m_pick_tex[i]) m_gfx->DrawImage(m_pick_tex[i], cx, iy, kPickCellW, ch);
-            else               m_gfx->FillRect(cx, iy, kPickCellW, ch,
+            const int ch = icon ? g.w : g.h;
+            const int iy = cy + (g.h - ch) / 2;
+            if (m_pick_tex[i]) m_gfx->DrawImage(m_pick_tex[i], cx, iy, g.w, ch);
+            else               m_gfx->FillRect(cx, iy, g.w, ch,
                                                WithAlpha(t.fg, 26));
             if (sel) {
                 const SDL_Color a = t.accent;
-                m_gfx->FillRect(cx - 4, iy - 4, kPickCellW + 8, 4, a);
-                m_gfx->FillRect(cx - 4, iy + ch, kPickCellW + 8, 4, a);
+                m_gfx->FillRect(cx - 4, iy - 4, g.w + 8, 4, a);
+                m_gfx->FillRect(cx - 4, iy + ch, g.w + 8, 4, a);
                 m_gfx->FillRect(cx - 4, iy - 4, 4, ch + 8, a);
-                m_gfx->FillRect(cx + kPickCellW, iy - 4, 4, ch + 8, a);
+                m_gfx->FillRect(cx + g.w, iy - 4, 4, ch + 8, a);
             }
         }
 

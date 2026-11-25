@@ -569,7 +569,7 @@ namespace sl::menu::ui {
 
     // ---- X "Options" overlay ------------------------------------------------
     enum { OptFav = 0, OptRename, OptMove, OptUnpinHb, OptSetDonor,
-                       OptSort, OptCloseGame, OptPickCover, OptPickIcon, OptResetIcon, OptDismiss,
+                       OptSort, OptCloseGame, OptPickCover, OptPickIcon, OptPickHero, OptResetIcon, OptDismiss,
                        OptTileSize, OptTileColor, OptTileReset, OptTileName, OptTileNamesAll,
                        OptAddWidget, OptAddWidgetMenu, OptSubBack,
                        OptRemoveWidget, OptCollMenu, OptCollToggle,
@@ -715,17 +715,19 @@ namespace sl::menu::ui {
     // here can disturb the art already on the card until a choice is confirmed.
         inline constexpr const char *kPickDir = "sdmc:/slaunch/cache/covertmp";
         inline constexpr int kPickMax  = 24;   // grids listed; two full screens
-        inline constexpr int kPickCols = 6;
         inline constexpr int kPickRows = 2;    // visible at once
-        inline constexpr int kPickCellW = 170;
-        inline constexpr int kPickCellH = 255;
         inline constexpr int kPickGapX  = 20;
         inline constexpr int kPickGapY  = 22;
         inline constexpr int kPickTop   = 138;
 
-        inline int PickCellX(int col) {
-            const int total = kPickCols * kPickCellW + (kPickCols - 1) * kPickGapX;
-            return (gfx::Gfx::Width - total) / 2 + col * (kPickCellW + kPickGapX);
+        // Cells: case-front 2:3 for covers (icons sit square inside them), and
+        // 16:9 for backgrounds, the shape of the Deck tile that crops them.
+        struct PickGrid { int cols, w, h; };
+        inline PickGrid PickGridOf(bool hero) { return hero ? PickGrid{ 3, 380, 214 } : PickGrid{ 6, 170, 255 }; }
+
+        inline int PickCellX(const PickGrid &g, int col) {
+            const int total = g.cols * g.w + (g.cols - 1) * kPickGapX;
+            return (gfx::Gfx::Width - total) / 2 + col * (g.w + kPickGapX);
         }
 
     // ---- Power screen -------------------------------------------------------

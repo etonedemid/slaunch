@@ -1853,6 +1853,7 @@ namespace sl::menu::ui {
         if (m_options_sub == Sub_Customize) {
             m_options.push_back({ T("Rename"), OptRename });
             m_options.push_back({ T("Choose cover"), OptPickCover });
+            m_options.push_back({ T("Choose background"), OptPickHero });
             m_options.push_back({ T("Choose icon"), OptPickIcon });
             if (m_custom_icons.count(it.app_id))
                 m_options.push_back({ T("Restore icon"), OptResetIcon });
@@ -2023,12 +2024,16 @@ namespace sl::menu::ui {
                 return Action::None;
             case OptPickCover:
             case OptPickIcon:
+            case OptPickHero: {
+                const int a = m_options[m_options_cursor].action;
                 m_options_open = false;
                 // Opened from Flow's own menu, B should return there, not to the
                 // shelf - the same rule every screen reached that way follows.
                 m_from_flow_menu = (m_screen != Screen::Main);
-                EnterCoverPicker(m_options[m_options_cursor].action == OptPickIcon);
+                EnterCoverPicker(a == OptPickIcon ? PickKind::Icon
+                                 : a == OptPickHero ? PickKind::Hero : PickKind::Cover);
                 return Action::None;
+            }
             case OptResetIcon: {
                 m_options_open = false;
                 const u64 id = m_items[m_cursor].app_id;

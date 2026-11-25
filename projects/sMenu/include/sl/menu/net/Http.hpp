@@ -60,6 +60,10 @@ namespace sl::menu::net {
     // has no such game. Blocking: worker threads only.
     std::string EshopIcon(const std::string &title, int w = 256);
 
+    // The game's wide eShop store art as a w x h JPEG URL, or "" when the
+    // store has no such game. Blocking: worker threads only.
+    std::string EshopHero(const std::string &title, int w, int h);
+
     // The same rule on its own: is `candidate` the game called `title`?
     bool TitlesMatch(const std::string &candidate, const std::string &title);
 

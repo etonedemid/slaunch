@@ -1188,7 +1188,10 @@ namespace sl::menu::ui {
         bool              m_pick_want_apply = false;
         int               m_pick_choice  = 0;
         u64               m_pick_id      = 0;
-        bool              m_pick_icon    = false;  // choosing the square icon, not the cover
+        // What the picker chooses: the box front, the square icon, or the
+        // wide background (hero) that Deck, Metro and the backdrop show.
+        enum class PickKind { Cover, Icon, Hero };
+        PickKind          m_pick_kind    = PickKind::Cover;
         std::string       m_pick_name;
         std::vector<std::string>   m_pick_urls;    // full size
         std::vector<std::string>   m_pick_thumbs;  // preview
@@ -1196,7 +1199,7 @@ namespace sl::menu::ui {
         int   m_pick_cursor = 0;
         float m_pick_scroll = 0.0f;               // animated row offset
 
-        void   EnterCoverPicker(bool icon = false);
+        void   EnterCoverPicker(PickKind kind);
         // Icons chosen in the picker live in slaunch/icons_custom/<id>.jpg (the
         // extracted ones are rewritten at boot), with the source URL beside
         // them in <id>.url for the Discord presence.
