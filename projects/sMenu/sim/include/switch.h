@@ -178,6 +178,9 @@ Result btmsysConnectAudioDevice(BtdrvAddress addr);
 Result btmsysDisconnectAudioDevice(BtdrvAddress addr);
 Result btmsysRemoveAudioDevicePairing(BtdrvAddress addr);
 
+// Applications (ns). Uninstall reports success and deletes nothing.
+Result nsDeleteApplicationCompletely(u64 application_id);
+
 typedef struct {
     u32 flags;
     s32 handheld_sleep_plan;

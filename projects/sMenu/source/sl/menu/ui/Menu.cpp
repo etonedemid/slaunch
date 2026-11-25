@@ -1010,6 +1010,27 @@ namespace sl::menu::ui {
         if (m_suspended != 0 && !m_jumped_to_suspended && SelectApp(m_suspended))
             m_jumped_to_suspended = true;
     }
+    // X > Uninstall, after the dialog said yes. The same call Goldleaf uses to
+    // remove a game with its update and DLC. ns deletes save data only through
+    // its own separate commands, which this does not call.
+    void Menu::UninstallGame() {
+        const u64 id = m_uninstall_app;
+        m_uninstall_app = 0;
+        const Result rc = nsDeleteApplicationCompletely(id);
+        if (R_FAILED(rc)) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "%s (0x%X)", T("Could not uninstall"), (unsigned)rc);
+            SetStatus(msg);
+            return;
+        }
+        // Drop it now; the periodic record check would only catch up later.
+        std::erase_if(m_apps, [id](const AppEntry &a) { return a.app_id == id; });
+        m_play_dirty = true;
+        const int keep = m_cursor;
+        RebuildItems();
+        if (!m_items.empty()) m_cursor = std::min(keep, (int)m_items.size() - 1);
+        SetStatus(T("Uninstalled"));
+    }
     void Menu::SetSuspendedApp(u64 app_id) { m_suspended = app_id; }
     void Menu::ClearSuspendedApp()          { m_suspended = 0; }
     // ---- Settings (text alignment) + custom names --------------------------
@@ -1922,6 +1943,9 @@ namespace sl::menu::ui {
         m_options.push_back({ T("Move"), OptMove });   // any entry can be reordered
         if (m_ui_mode == UiMode::Grid) m_options.push_back({ T("Tile"), OptTileMenu });
         m_options.push_back({ T("More"), OptMoreMenu });
+        // Next to last, not last: the cursor wraps, and Up from the top
+        // should land on Cancel rather than here.
+        if (game) m_options.push_back({ T("Uninstall"), OptUninstall });
         m_options.push_back({ T("Cancel"), OptDismiss });
     }
     const char *Menu::OptionsTitle() const {
@@ -2215,6 +2239,16 @@ namespace sl::menu::ui {
                 m_options_open = false;
                 return Action::None;
             }
+            case OptUninstall:
+                m_options_open = false;
+                // Never delete the game that is running.
+                if (sel_id == m_suspended) { SetStatus(T("Close the game first")); return Action::None; }
+                m_uninstall_app = sel_id;
+                m_dialog_title  = T("Uninstall this game?");
+                m_dialog_note   = sel.name;
+                m_dialog_cursor = 1;   // "No" first: this cannot be undone
+                m_dialog        = Dialog::ConfirmUninstall;
+                return Action::None;
             case OptDismiss:
             default:
                 m_options_open = false;
