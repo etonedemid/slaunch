@@ -667,7 +667,9 @@ namespace sl::menu::ui {
         for (int i = 0; i < have; i++) {
             const int cx = PickCellX(g, i % g.cols);
             const int cy = top + (i / g.cols) * (g.h + kPickGapY);
-            if (cy + g.h < 110 || cy > gfx::Gfx::Height - 40) continue;
+            // Only the rows in view: a part row below runs into the hints.
+            const int row = i / g.cols - (int)m_pick_scroll;
+            if (row < 0 || row >= kPickRows) continue;
 
             if (!m_pick_tex[i] && budget > 0) {
                 char path[96];

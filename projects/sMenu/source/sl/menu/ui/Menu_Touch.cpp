@@ -486,7 +486,8 @@ namespace sl::menu::ui {
         for (int i = 0; i < have; i++) {
             const int cx = PickCellX(g, i % g.cols);
             const int cy = top + (i / g.cols) * (g.h + kPickGapY);
-            if (x >= cx && x < cx + g.w && y >= cy && y < cy + g.h)
+            const int row = i / g.cols - (int)m_pick_scroll;
+            if (row >= 0 && row < kPickRows && x >= cx && x < cx + g.w && y >= cy && y < cy + g.h)
                 return i;
         }
         return -1;
