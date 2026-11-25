@@ -247,7 +247,7 @@ namespace sl::menu::ui {
     // outcome stays up for a couple of seconds and fades.
     void Menu::DrawFetchStatus() {
         const auto stage = (FetchStage)m_fetch_stage.load();
-        if (stage == FetchStage::Idle) return;
+        if (stage == FetchStage::Idle || m_fetch_quiet) return;
         float a = 1.0f;
         const bool done = stage >= FetchStage::Added;
         if (done) {
@@ -736,16 +736,49 @@ namespace sl::menu::ui {
                                      : (end == CoverState::Failed ? FetchStage::Failed : FetchStage::NotFound)));
         m->m_cover_done.store(true, std::memory_order_release);
     }
+    // A request goes to the front of the queue, so the game you stop on goes
+    // next. The checks below run when it starts, in TryCoverFetch.
     void Menu::StartCoverFetch(u64 app_id, const std::string &name, bool for_backdrop) {
-        if (m_cover_running || app_id == 0 || name.empty()) return;
-
+        if (app_id == 0 || name.empty()) return;
+        for (auto it = m_fetch_q.begin(); it != m_fetch_q.end(); ++it)
+            if (it->id == app_id && it->backdrop == for_backdrop) { m_fetch_q.erase(it); break; }
+        m_fetch_q.push_front(FetchReq{ app_id, name, for_backdrop });
+        if (m_fetch_q.size() > 32) m_fetch_q.pop_back();   // the oldest; asked for again on a visit
+        PumpCoverFetch();
+    }
+    void Menu::PumpCoverFetch() {
+        if (m_cover_running) return;
+        while (!m_fetch_q.empty()) {
+            const FetchReq r = m_fetch_q.front();
+            m_fetch_q.pop_front();
+            if (TryCoverFetch(r.id, r.name, r.backdrop)) { m_fetch_quiet = false; return; }
+        }
+        // Nothing asked for: the selection, then the games near it, then the
+        // rest, outward (0, +1, -1, +2, -2, ...). Not during boot or a scroll,
+        // and a pause after each fetch, so the walk stays in the background.
+        // Only the selection shows the status bar.
+        const int n = (int)m_items.size();
+        if (n == 0 || !m_deferred_joined || ScrollBusy()) return;
+        if ((armGetSystemTick() - m_fetch_end_tick) < 2 * armGetSystemTickFreq()) return;
+        if (m_cursor != m_walk_from) { m_walk_from = m_cursor; m_walk_step = 0; }
+        for (int look = 0; look < 2 && m_walk_step <= 2 * n; look++) {
+            const int k = m_walk_step++;
+            const int i = m_cursor + (k % 2 ? (k + 1) / 2 : -(k / 2));
+            if (i < 0 || i >= n) continue;
+            const MenuItem &it = m_items[i];
+            if (it.kind != ItemKind::Game || it.app_id == 0 || m_cover_tried.count(it.app_id)) continue;
+            if (TryCoverFetch(it.app_id, it.name, false)) { m_fetch_quiet = (i != m_cursor); return; }
+        }
+    }
+    // Starts the worker for one game, or says why not (tried, marked missing).
+    bool Menu::TryCoverFetch(u64 app_id, const std::string &name, bool for_backdrop) {
         // No key is no longer the end of it: GameTDB and Steam need none.
         SgdbKeyPresent();                  // loads the key, if there is one
         if (for_backdrop) {
-            if (m_bd_fetch_tried.count(app_id)) return;
+            if (m_bd_fetch_tried.count(app_id)) return false;
             m_bd_fetch_tried.insert(app_id);
         } else {
-            if (m_cover_tried.count(app_id))  return;
+            if (m_cover_tried.count(app_id))  return false;
             m_cover_tried[app_id] = true;
         }
         m_cover_force_shots = for_backdrop;
@@ -763,7 +796,7 @@ namespace sl::menu::ui {
             fclose(f);
             if (got && sgdb == (SgdbActive() ? 1 : 0) &&
                 time(nullptr) - when < 7 * 24 * 3600)
-                return;
+                return false;
         }
 
         m_cover_id   = app_id;
@@ -777,6 +810,7 @@ namespace sl::menu::ui {
             threadStart(&m_cover_thread);
             m_cover_running = true;
         }
+        return m_cover_running;
     }
     void Menu::PollCoverFetch() {
         if (!m_cover_running || !m_cover_done.load(std::memory_order_acquire)) return;

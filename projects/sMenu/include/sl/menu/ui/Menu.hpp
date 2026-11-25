@@ -1030,8 +1030,11 @@ namespace sl::menu::ui {
         static SDL_Surface *LoadArt(int kind, u64 id, bool warm, bool &built);
 
         // ---- SteamGridDB cover fetch ---------------------------------------
-        // One title at a time on a worker, newest request wins, results land in
-        // covers/<titleid>.jpg and are picked up by FlowCover on the next frame.
+        // One title at a time on a worker. Requests wait in m_fetch_q, newest
+        // first, so a game passed while a fetch runs is fetched after it.
+        // With the queue empty, PumpCoverFetch walks the library outward from
+        // the selection, quietly. Results land in covers/<titleid>.jpg and are
+        // picked up by FlowCover on the next frame.
         // The key is read from config/steamgriddb.txt and never ships with the
         // menu; with no key the whole feature stays dormant.
         // for_backdrop: wanted for the screenshot background, so screenshots
@@ -1041,6 +1044,13 @@ namespace sl::menu::ui {
         std::unordered_set<u64> m_bd_fetch_tried;
         bool   m_cover_force_shots = false;
         void   PollCoverFetch();
+        void   PumpCoverFetch();   // each frame: start the next request, or walk
+        bool   TryCoverFetch(u64 app_id, const std::string &name, bool for_backdrop);
+        struct FetchReq { u64 id; std::string name; bool backdrop; };
+        std::deque<FetchReq> m_fetch_q;   // front goes next
+        int    m_walk_from = -1;          // the selection the walk started from
+        int    m_walk_step = 0;           // how far out from it the walk has looked
+        bool   m_fetch_quiet = false;     // a walk fetch: no status bar
         static void CoverFetchTrampoline(void *self);
         // What the fetcher is doing, so it is visible rather than silent. The
         // worker only ever writes it and the main thread only ever reads it.

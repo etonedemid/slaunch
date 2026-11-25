@@ -3372,6 +3372,7 @@ namespace sl::menu::ui {
         PollArt();          // covers, box scans, hero art decoded on the worker
         PollShotDecode();   // background hero panels, uploaded when they land
         PollCoverFetch();   // a fetched cover becomes visible on the next frame
+        PumpCoverFetch();   // then the next one starts
         PollCoverPicker();  // ...and so does one chosen by hand
 
         // Bounce finished: hand the launch to the host, which dispatches it just
