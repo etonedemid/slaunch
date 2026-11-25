@@ -1980,6 +1980,7 @@ uniform vec4 uWa;     // centre y, height px, speed, sheets
 uniform vec4 uWb;     // edge px, seed
 varying vec2 vQ;
 float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 float C(float x, float k) {
     float s = x * 0.0049087, t = uTime * uWa.z, q = k * 2.39996 + uWb.y;
     return sin(s * (0.62 + 0.11 * k) + t * (0.70 + 0.13 * k) + q)
@@ -2027,9 +2028,10 @@ void main() {
         a += exp(-dot(d, d) / 1.8) * tw * exp(-by * by) * 0.7 * (1.0 - a);
     }
     vec3 c = mix(uTint.rgb, vec3(1.0), 0.35);
-    // Dither the faint glow and fill as the gradient is dithered. The pattern
-    // is turned over (yx), so the two do not add up in the same pixels.
-    float n = (Ign(gl_FragCoord.yx) - 0.5) / 255.0 * step(0.002, a);
+    // Dither the faint glow and fill as the gradient is dithered (see kGradFs).
+    // x is flipped: the gradient's noise is already in these pixels, and the
+    // same pattern again would double it instead of adding a second one.
+    float n = Dither(gl_FragCoord.xy * vec2(-1.0, 1.0)) * step(0.002, a);
     gl_FragColor = vec4(c * a + n, a) * uTint.a;
 }
 )";

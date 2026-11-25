@@ -75,8 +75,11 @@ void main() {
 )";
     // The background gradient, dithered. In 8 bits a slow gradient has only
     // a few dozen shades per channel, so each shade is a flat band many pixels
-    // high. Noise of half a shade either way, different in each output pixel,
-    // makes the average of each area follow the gradient, not the bands.
+    // high. Noise of up to one shade either way, different in each output
+    // pixel, makes the average of each area follow the gradient. The noise is
+    // triangular (two patterns added): uniform noise one shade wide vanishes
+    // where the gradient is exactly on a shade, so clean and grainy stripes
+    // alternate, and those stripes are bands too.
     static constexpr const char *kGradVs = R"(
 varying vec2 vP;
 void main() {
@@ -88,9 +91,9 @@ void main() {
 uniform vec4 uTop, uBot;
 varying vec2 vP;
 float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 void main() {
-    float n = (Ign(gl_FragCoord.xy) - 0.5) / 255.0;
-    gl_FragColor = vec4(mix(uTop.rgb, uBot.rgb, vP.y / 720.0) + n, 1.0);
+    gl_FragColor = vec4(mix(uTop.rgb, uBot.rgb, vP.y / 720.0) + Dither(gl_FragCoord.xy), 1.0);
 }
 )";
     // The whole of a small file, or false.
