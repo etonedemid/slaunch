@@ -314,7 +314,8 @@ namespace sl::menu::net {
         return best;
     }
 
-    std::string EshopIcon(const std::string &title, int w) {
+    // The store search for `title`, asking for `field`, or "" on failure.
+    static std::string EshopSearch(const std::string &title, const char *field) {
         std::string q;
         for (unsigned char c : SearchName(title)) {
             if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') q += (char)c;
@@ -325,10 +326,25 @@ namespace sl::menu::net {
             "https://u3b6gr4ua3-dsn.algolia.net/1/indexes/store_game_en_us"
             "?x-algolia-application-id=U3B6GR4UA3"
             "&x-algolia-api-key=a29c6927638bfd8cee23993e51e721c9"
-            "&hitsPerPage=8&attributesToRetrieve=title,productImageSquare,platform"
+            "&hitsPerPage=8&attributesToRetrieve=title," + std::string(field) + ",platform"
             "&attributesToHighlight=&attributesToSnippet=&query=" + q;
         std::string body;
         if (!Get(url.c_str(), body, 8)) return "";
+        return body;
+    }
+
+    std::string EshopHero(const std::string &title, int w, int h) {
+        const std::string body = EshopSearch(title, "productImage");
+        const std::string img = body.empty() ? std::string() : NintendoArtFor(body, title);
+        if (img.empty()) return "";
+        char fx[96];
+        snprintf(fx, sizeof(fx), "https://assets.nintendo.com/image/upload/c_fill,w_%d,h_%d,f_jpg,q_80/", w, h);
+        return fx + img;
+    }
+
+    std::string EshopIcon(const std::string &title, int w) {
+        const std::string body = EshopSearch(title, "productImageSquare");
+        if (body.empty()) return "";
         // "https://assets.nintendo.com/image/fetch/q_auto/f_auto/<source>": the
         // source again, resized to a square JPEG (f_auto may answer WebP).
         const std::string sq = NintendoArtFor(body, title, "productImageSquare");
