@@ -129,6 +129,29 @@ namespace sl::menu::ui {
                 m_news.Request(news::Source::Steam, it.app_id, it.name.c_str());
         }
     }
+    // The fade under the shelf. Without the GPU it is 16 bands, 13 alpha
+    // steps apart, and each step shows as a line over the art. The shader
+    // makes the same ramp smooth and adds triangular noise of up to one shade
+    // (the same dither as the XMB gradient), so the 8-bit steps do not band.
+    static constexpr const char *kDeckFadeVs = R"(
+varying vec2 vP;
+void main() {
+    vP = aV.xy * vec2(1280.0, 720.0);
+    gl_Position = Clip(vP);
+}
+)";
+    static constexpr const char *kDeckFadeFs = R"(
+uniform vec4 uCol;
+uniform vec4 uFade;   // start y, band height
+varying vec2 vP;
+float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
+void main() {
+    if (vP.y < uFade.x) discard;
+    float a = clamp(30.0 + 13.0 * (vP.y - uFade.x) / uFade.y, 30.0, 225.0) / 255.0;
+    gl_FragColor = vec4(uCol.rgb * a + Dither(gl_FragCoord.xy), a);   // premultiplied
+}
+)";
     void Menu::DrawMainDeck() {
         const Theme &t = m_theme.Current();
         m_icons.SetScale(0);
@@ -139,9 +162,16 @@ namespace sl::menu::ui {
         {
             const int y0 = kDeckRowY + kDeckRowH / 2, bands = 16;
             const int bh = (gfx::Gfx::Height - y0) / bands + 1;
-            for (int i = 0; i < bands; i++)
-                m_gfx->FillRect(0, y0 + i * bh, gfx::Gfx::Width, bh,
-                                WithAlpha(t.bg_bottom, (Uint8)(30 + i * 13)));
+            if (m_gfx->FxBegin(m_gfx->FxProgram(kDeckFadeVs, kDeckFadeFs))) {
+                m_gfx->FxSet("uCol", t.bg_bottom);
+                m_gfx->FxSet("uFade", (float)y0, (float)bh, 0.0f, 0.0f);
+                m_gfx->FxStrip(2);
+                m_gfx->FxEnd();
+            } else {
+                for (int i = 0; i < bands; i++)
+                    m_gfx->FillRect(0, y0 + i * bh, gfx::Gfx::Width, bh,
+                                    WithAlpha(t.bg_bottom, (Uint8)(30 + i * 13)));
+            }
         }
         DrawTopBar(nullptr);
 
