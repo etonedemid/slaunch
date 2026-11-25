@@ -133,6 +133,7 @@ namespace sl::menu::ui {
     // steps apart, and each step shows as a line over the art. The shader
     // makes the same ramp smooth and adds triangular noise of up to one shade
     // (the same dither as the XMB gradient), so the 8-bit steps do not band.
+    // It also starts at 0, where the bands jumped to 30 halfway up the row.
     static constexpr const char *kDeckFadeVs = R"(
 varying vec2 vP;
 void main() {
@@ -148,7 +149,9 @@ float Ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00
 float Dither(vec2 p) { return (Ign(p) + Ign(p.yx) - 1.0) / 255.0; }   // -1..1 shade, triangular
 void main() {
     if (vP.y < uFade.x) discard;
-    float a = clamp(30.0 + 13.0 * (vP.y - uFade.x) / uFade.y, 30.0, 225.0) / 255.0;
+    // From 0 over the first band, not a jump to 30: that jump was a line too.
+    float u = (vP.y - uFade.x) / uFade.y;
+    float a = clamp(min(30.0 * u, 17.0 + 13.0 * u), 0.0, 225.0) / 255.0;
     gl_FragColor = vec4(uCol.rgb * a + Dither(gl_FragCoord.xy), a);   // premultiplied
 }
 )";
