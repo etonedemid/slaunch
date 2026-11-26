@@ -4,11 +4,29 @@
 #include <cctype>
 #include <cstring>
 #include <cstdio>
+#include <atomic>
+#include <mutex>
 
 namespace sl::menu::net {
 
     namespace {
         bool g_inited = false;
+        std::mutex g_init_mx;
+
+        // DNS answers and TLS sessions, shared by every handle: a second
+        // request to a host resumes its TLS session and skips the key
+        // exchange, the slow part of a handshake on the console. Connections
+        // are not shared: libcurl does not support that across threads.
+        std::atomic<CURLSH *> g_share { nullptr };
+        std::mutex g_share_mx[CURL_LOCK_DATA_LAST];
+        void ShareLock(CURL *, curl_lock_data d, curl_lock_access, void *) { g_share_mx[d].lock(); }
+        void ShareUnlock(CURL *, curl_lock_data d, void *) { g_share_mx[d].unlock(); }
+
+        CURL *NewHandle() {
+            CURL *c = curl_easy_init();
+            if (CURLSH *sh = g_share.load()) if (c) curl_easy_setopt(c, CURLOPT_SHARE, sh);
+            return c;
+        }
 
         size_t WriteCb(char *ptr, size_t size, size_t nmemb, void *userdata) {
             auto *out = static_cast<std::string *>(userdata);
@@ -21,13 +39,23 @@ namespace sl::menu::net {
     }
 
     void GlobalInit() {
+        std::lock_guard<std::mutex> lk(g_init_mx);
         if (g_inited) return;
-        if (curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK)
-            g_inited = true;
+        if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) return;
+        g_inited = true;
+        if (CURLSH *sh = curl_share_init()) {
+            curl_share_setopt(sh, CURLSHOPT_LOCKFUNC, ShareLock);
+            curl_share_setopt(sh, CURLSHOPT_UNLOCKFUNC, ShareUnlock);
+            curl_share_setopt(sh, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+            curl_share_setopt(sh, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+            g_share.store(sh);
+        }
     }
 
     void GlobalExit() {
+        std::lock_guard<std::mutex> lk(g_init_mx);
         if (!g_inited) return;
+        if (CURLSH *sh = g_share.exchange(nullptr)) curl_share_cleanup(sh);
         curl_global_cleanup();
         g_inited = false;
     }
@@ -38,7 +66,7 @@ namespace sl::menu::net {
     bool Get(const char *url, std::string &out, long timeout_s,
              const char *authorization, long *out_http, int *out_curl) {
         out.clear();
-        CURL *curl = curl_easy_init();
+        CURL *curl = NewHandle();
         if (!curl) return false;
 
         struct curl_slist *hdrs = nullptr;
@@ -74,7 +102,7 @@ namespace sl::menu::net {
     bool Post(const char *url, const char *body, const char *content_type,
               const char *authorization, std::string &out, long timeout_s) {
         out.clear();
-        CURL *curl = curl_easy_init();
+        CURL *curl = NewHandle();
         if (!curl) return false;
 
         struct curl_slist *headers = nullptr;
@@ -166,7 +194,7 @@ namespace sl::menu::net {
         FILE *fp = fopen(part.c_str(), "wb");
         if (!fp) return false;
 
-        CURL *curl = curl_easy_init();
+        CURL *curl = NewHandle();
         if (!curl) { fclose(fp); remove(part.c_str()); return false; }
 
         curl_easy_setopt(curl, CURLOPT_URL, url);
