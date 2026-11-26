@@ -1466,7 +1466,9 @@ namespace sl::menu::ui {
                         const float shade = 1.0f - (1.0f - kFlowEdgeBack) * (t0 + t1) * 0.5f;
                         const Uint8 v = (Uint8)std::min(255.0f, side_lit * 1.5f * shade);
                         const float uv[4] = { e + w * t0, 0.0f, e + w * t1, 1.0f };
-                        m_gfx->DrawQuad3D(nullptr, band, side_col, a0, a1, flip, 2);   // opaque backing
+                        // The front's dark backing, not the grey plastic: in the
+                        // translucent reflection the grey showed through the art.
+                        m_gfx->DrawQuad3D(nullptr, band, blank, a0, a1, flip, 2);
                         m_gfx->DrawQuad3D(cover, band, SDL_Color{ v, v, v, 255 }, a0, a1, flip, 2, uv);
                     }
                     return;
