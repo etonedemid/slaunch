@@ -41,6 +41,10 @@ namespace sl::menu::ui {
         QueueArt(Art_Cover, it.app_id);              // lands in a frame or two
         return nullptr;
     }
+    // The cover edge on a box side: how much of the cover's width is mirrored
+    // across the side, and how dark the side gets at the back.
+    static constexpr float kFlowEdgeStrip = 0.08f;
+    static constexpr float kFlowEdgeBack  = 0.45f;
     // How many boxes either side keep their scan, for the printed sides and backs.
     // Turning the camera shows the sides of boxes well away from the selection.
     static constexpr int kFlowWrapReach = 3;
@@ -1442,6 +1446,33 @@ namespace sl::menu::ui {
             // screenshot panels.
             auto draw_side = [&](const float face[4][3], bool spine,
                                  Uint8 a0 = 255, Uint8 a1 = 255, bool flip = false) {
+                // No printed spine: the cover's own edge runs on round the
+                // corner. A strip of the cover is mirrored at the front edge, so
+                // the art has no seam there, and is shaded darker toward the
+                // back, so the box reads as solid and the stretch does not show.
+                if (cover && !(spine && (gw || m_flow_wrap))) {
+                    const float e = spine ? 0.0f : 1.0f;              // the cover edge on this side
+                    const float w = spine ? kFlowEdgeStrip : -kFlowEdgeStrip;
+                    constexpr int kBands = 6;
+                    for (int k = 0; k < kBands; k++) {
+                        const float t0 = (float)k / kBands, t1 = (float)(k + 1) / kBands;
+                        float band[4][3];
+                        for (int c = 0; c < 3; c++) {              // front -> back slice
+                            band[0][c] = face[0][c] + (face[1][c] - face[0][c]) * t0;
+                            band[1][c] = face[0][c] + (face[1][c] - face[0][c]) * t1;
+                            band[2][c] = face[3][c] + (face[2][c] - face[3][c]) * t1;
+                            band[3][c] = face[3][c] + (face[2][c] - face[3][c]) * t0;
+                        }
+                        const float shade = 1.0f - (1.0f - kFlowEdgeBack) * (t0 + t1) * 0.5f;
+                        const Uint8 v = (Uint8)std::min(255.0f, side_lit * 1.5f * shade);
+                        const float uv[4] = { e + w * t0, 0.0f, e + w * t1, 1.0f };
+                        // The front's dark backing, not the grey plastic: in the
+                        // translucent reflection the grey showed through the art.
+                        m_gfx->DrawQuad3D(nullptr, band, blank, a0, a1, flip, 2);
+                        m_gfx->DrawQuad3D(cover, band, SDL_Color{ v, v, v, 255 }, a0, a1, flip, 2, uv);
+                    }
+                    return;
+                }
                 m_gfx->DrawQuad3D(nullptr, face, side_col, a0, a1, flip, 4);
                 if (spine && gw) {
                     const float uv_spine[4] = { kScanSpine0, 0.0f, kScanSpine1, 1.0f };
